@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.ehpk
+.env
+server/data/
+server/downloads/
+*.log
+.DS_Store

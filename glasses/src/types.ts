@@ -1,0 +1,243 @@
+export type Status = 'ok' | 'warn' | 'alert' | 'stale'
+
+/** 'ops' is the building, 'life' is home. The glasses show one at a time. */
+export type Space = 'ops' | 'life'
+
+export interface Metric {
+  id: string
+  label: string
+  unit: string
+  value: number | string | null
+  status: Status
+  ageSeconds: number | null
+  source: string | null
+  note: string
+}
+
+export interface Board {
+  id: string
+  name: string
+  space: Space
+  status: Status
+  counts: Partial<Record<Status, number>>
+  summary: string
+  metrics: Metric[]
+}
+
+export interface Snapshot {
+  generatedAt: string
+  boards: Board[]
+  /** Absent on older server builds; the UI treats that as "no checklists". */
+  checklists?: ChecklistsState
+  stats?: ChecklistStats[]
+  /** grouped shared-list items; absent on older server builds */
+  inbox?: InboxGroup[]
+}
+
+export type StepKind = 'do' | 'wait'
+
+export interface ChecklistItem {
+  id: string
+  label: string
+  /** 'do' costs you time; 'wait' costs the clock time while you do something else */
+  stepKind: StepKind
+  estimateMinutes: number | null
+  waitMinutes: number | null
+  done: boolean
+  /** epoch ms when it was checked, null while unchecked */
+  at: number | null
+  startedAt: number | null
+  /** a step whose clock is running but which is not finished */
+  running: boolean
+  elapsedMs: number | null
+  /** running far longer than plausible — started by accident or forgotten */
+  suspect: boolean
+  /** how long after the previous step finished this one was started */
+  lagMs: number | null
+  autoStart: boolean
+  /** when an armed wait comes due; null for 'do' steps and unstarted waits */
+  endsAt: number | null
+  /** goes negative once a wait is overdue but not yet ticked */
+  remainingSeconds: number | null
+  durationMs: number | null
+}
+
+export interface ChecklistRun {
+  runId: string
+  checklistId: string
+  name: string
+  kind: 'daily' | 'ondemand'
+  space: Space
+  day: string
+  done: number
+  total: number
+  complete: boolean
+  startedAt: number
+  finishedAt: number | null
+  ageSeconds: number
+  /** time you actually spend — the number that answers "can I start this now" */
+  activeMs: number
+  /** elapsed until finished — the number that answers "will it be done by then" */
+  wallMs: number
+  currentItemId: string | null
+  items: ChecklistItem[]
+}
+
+export interface InboxItem {
+  id: string
+  text: string
+  by: string
+  createdAt: number
+  status: 'raw' | 'sorted' | 'done'
+  kind: string | null
+  list: string | null
+  parts: string[] | null
+  note: string | null
+}
+
+export interface InboxGroup {
+  name: string
+  items: InboxItem[]
+}
+
+export interface ChecklistStepStats {
+  id: string
+  label: string
+  stepKind: StepKind
+  samples: number
+  medianMs: number | null
+}
+
+export interface PlanStep {
+  at: number
+  endsAt: number
+  choreId: string
+  chore: string
+  stepId: string
+  step: string
+  stepKind: StepKind
+  ms: number
+  measured: boolean
+  /** the step is still running when the block ends */
+  overruns: boolean
+}
+
+export interface PlanReach {
+  choreId: string
+  name: string
+  stepsDone: number
+  total: number
+  complete: boolean
+  stoppedAt: string | null
+}
+
+export type AgendaRow =
+  | {
+      kind: 'gap'
+      at: number
+      ms: number
+      running: string[]
+      nextFree: { chore: string; step: string; endsAt: number } | null
+      /** unchanged across a gap: waiting is not working */
+      cumulativeBusyMs: number | null
+      /** advances across a gap: this is the column the wait shows up in */
+      cumulativeWallMs: number | null
+    }
+  | {
+      kind: 'do'
+      /** null on an unestimated item: listed, not scheduled */
+      at: number | null
+      endsAt: number | null
+      ms: number | null
+      chore: string
+      choreId: string
+      step: string
+      stepId: string
+      stepIndex: number
+      stepTotal: number
+      measured: boolean
+      /** false when an earlier step of the same chore has to happen first */
+      open: boolean
+      /** minutes of actual work to get here, waits excluded */
+      cumulativeBusyMs: number | null
+      /** minutes of wall clock to get here, waits included */
+      cumulativeWallMs: number | null
+    }
+
+/**
+ * A big-ticket one-off: a phone call, a trip, a thing you have been avoiding.
+ *
+ * Kept apart from the agenda on purpose. These are not steps you slot into a
+ * spare twenty minutes, so they get no running total and a different shape on
+ * screen — a row that looks like the chore list invites you to read it like
+ * the chore list.
+ *
+ * `open` here means "inside its time window right now", which is a different
+ * question from a chore step's `open` ("no earlier step is in the way"). It
+ * never affects the ordering; it only decides whether the row says when it
+ * opens.
+ */
+export interface TaskRow {
+  kind: 'task'
+  taskId: string
+  label: string
+  /** context, e.g. "Wilkes Barre PA" — not always shown */
+  note: string
+  ms: number | null
+  open: boolean
+  weight: 'big' | 'normal'
+  /** "9am" / "Thu9a" when shut; null while it is open */
+  opensLabel: string | null
+  /**
+   * What you know about this task, oldest first.
+   *
+   * The reason tasks are not checkboxes. "Call dentist" is blocked on finding
+   * out which dentist; "Replace car tire" is really three hours of driving and
+   * a day off work. A row that cannot carry that is a row that nags without
+   * ever telling you how to start.
+   */
+  notes: TaskNote[]
+}
+
+export interface TaskNote {
+  id: string
+  text: string
+  by: string
+  /** 0 for a note seeded from the config */
+  at: number
+}
+
+export interface BlockPlan {
+  minutes: number
+  budgetMs: number
+  timeline: PlanStep[]
+  busyMs: number
+  idleMs: number
+  progress: Array<{ choreId: string; name: string; stepsDone: number; total: number; complete: boolean }>
+  reach: PlanReach[]
+  agenda: AgendaRow[]
+  tasks: TaskRow[]
+}
+
+export interface ChecklistStats {
+  checklistId: string
+  name: string
+  samples: number
+  /** false while there are too few runs to trust the median over the estimate */
+  trusted: boolean
+  activeMs: number
+  wallMs: number
+  steps: ChecklistStepStats[]
+}
+
+export interface StartableChecklist {
+  id: string
+  name: string
+  total: number
+  space: Space
+}
+
+export interface ChecklistsState {
+  active: ChecklistRun[]
+  startable: StartableChecklist[]
+}

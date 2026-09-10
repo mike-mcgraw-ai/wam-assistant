@@ -1,0 +1,31 @@
+{
+  "timezone": "UTC",
+  "resetHour": 5,
+  "summaryHour": 6,
+  "checklists": [
+    {
+      "id": "morning",
+      "name": "Morning",
+      "kind": "daily",
+      "space": "life",
+      "timed": false,
+      "items": [
+        { "id": "water", "label": "Drink water" },
+        { "id": "plan", "label": "Review the day" }
+      ]
+    },
+    {
+      "id": "laundry",
+      "name": "Laundry",
+      "kind": "ondemand",
+      "space": "life",
+      "items": [
+        { "id": "load", "label": "Load washer", "kind": "do", "estimateMinutes": 4 },
+        { "id": "wash", "label": "Wash cycle", "kind": "wait", "waitMinutes": 32 },
+        { "id": "move", "label": "Move to dryer", "kind": "do", "estimateMinutes": 4 },
+        { "id": "dry", "label": "Dry cycle", "kind": "wait", "waitMinutes": 50 },
+        { "id": "fold", "label": "Fold", "kind": "do", "estimateMinutes": 10 }
+      ]
+    }
+  ]
+}

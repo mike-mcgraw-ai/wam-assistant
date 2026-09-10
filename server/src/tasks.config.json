@@ -1,0 +1,19 @@
+{
+  "filters": { "hideClosed": false },
+  "tasks": [
+    {
+      "id": "appointment",
+      "label": "Schedule annual appointment",
+      "weight": "big",
+      "estimateMinutes": 10,
+      "window": "business",
+      "note": "Confirm availability before choosing a time"
+    },
+    {
+      "id": "repair",
+      "label": "Compare repair options",
+      "weight": "big",
+      "window": "anytime"
+    }
+  ]
+}

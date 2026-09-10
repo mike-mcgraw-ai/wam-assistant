@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#111417">
+<title>The List</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<style>
+  :root{
+    --bg:#111417; --card:#191d21; --line:#262c31;
+    --ink:#e8ecef; --dim:#8b969e; --accent:#5ac8a0; --warn:#e0b341;
+    color-scheme: dark;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+  }
+  header{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:14px 16px 10px;
+  }
+  h1{font-size:17px; margin:0; letter-spacing:.02em}
+  #who{
+    background:none; border:1px solid var(--line); color:var(--dim);
+    border-radius:99px; padding:5px 12px; font-size:13px;
+  }
+  form{padding:0 16px 12px; display:flex; gap:8px}
+  /* Deliberately large: this is thumbed one-handed, often while walking. */
+  #text{
+    flex:1; min-width:0; font-size:18px; padding:16px 14px;
+    background:var(--card); color:var(--ink);
+    border:1px solid var(--line); border-radius:12px;
+  }
+  #text:focus{outline:none; border-color:var(--accent)}
+  #add{
+    font-size:18px; font-weight:600; padding:16px 20px; border:0;
+    border-radius:12px; background:var(--accent); color:#06231a;
+  }
+  #add:disabled{opacity:.4}
+  #status{padding:0 16px 10px; font-size:13px; color:var(--dim); min-height:20px}
+  #status.queued{color:var(--warn)}
+  ul{list-style:none; margin:0; padding:0 16px 32px}
+  li{
+    display:flex; align-items:flex-start; gap:12px;
+    padding:13px 0; border-top:1px solid var(--line);
+  }
+  li.pendingSync{opacity:.55}
+  .tick{
+    flex:none; width:26px; height:26px; margin-top:1px; border-radius:7px;
+    border:1px solid var(--line); background:var(--card); color:var(--accent);
+    font-size:15px; line-height:24px; text-align:center; padding:0;
+  }
+  .body{flex:1; min-width:0}
+  .txt{word-wrap:break-word}
+  .meta{font-size:12px; color:var(--dim); margin-top:3px}
+  .tag{
+    display:inline-block; border:1px solid var(--line); border-radius:99px;
+    padding:1px 8px; margin-right:6px; font-size:11px; color:var(--dim);
+  }
+  .empty{padding:26px 16px; color:var(--dim); text-align:center}
+</style>
+</head>
+<body>
+<header>
+  <h1>The List</h1>
+  <span><a href="/notes" style="color:#888;text-decoration:none;font-size:13px;margin-right:12px">Notes &rsaquo;</a>
+  <button id="who" type="button">…</button></span>
+</header>
+
+<form id="form" autocomplete="off">
+  <input id="text" placeholder="milk, cat food…" enterkeyhint="done"
+         autocomplete="off" autocapitalize="sentences" spellcheck="false">
+  <button id="add" type="submit">Add</button>
+</form>
+<div id="status"></div>
+
+<ul id="list"></ul>
+
+<script>
+/*
+ * Capture must never fail. Everything is written to a local queue first and
+ * POSTed after, so an add works with no signal, on aeroplane mode, or with the
+ * server off — it flushes whenever the server is reachable again.
+ *
+ * Each queued add carries a clientId so a retry cannot create a duplicate.
+ */
+const QUEUE_KEY = 'thelist.queue'
+const WHO_KEY = 'thelist.who'
+
+const $ = id => document.getElementById(id)
+const form = $('form'), text = $('text'), status = $('status'), list = $('list')
+
+const load = k => { try { return JSON.parse(localStorage.getItem(k)) || [] } catch { return [] } }
+const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)) } catch {} }
+
+let who = null
+try { who = localStorage.getItem(WHO_KEY) } catch {}
+if (!who) {
+  who = (prompt('Your name (once, so the list shows who added what):') || 'me').trim().slice(0, 24)
+  try { localStorage.setItem(WHO_KEY, who) } catch {}
+}
+$('who').textContent = who
+$('who').onclick = () => {
+  const next = (prompt('Your name:', who) || who).trim().slice(0, 24)
+  who = next
+  try { localStorage.setItem(WHO_KEY, who) } catch {}
+  $('who').textContent = who
+}
+
+let items = []
+let queue = load(QUEUE_KEY)
+
+const uid = () =>
+  (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random())
+
+function say(msg, queued = false) {
+  status.textContent = msg
+  status.className = queued ? 'queued' : ''
+}
+
+function render() {
+  const rows = [
+    ...queue.map(q => ({ id: q.clientId, text: q.text, by: q.by, pending: true })),
+    ...items.map(i => ({ ...i, pending: false })),
+  ]
+
+  if (rows.length === 0) {
+    list.innerHTML = '<li class="empty">Nothing on the list.</li>'
+    return
+  }
+
+  list.innerHTML = ''
+  for (const row of rows) {
+    const li = document.createElement('li')
+    if (row.pending) li.className = 'pendingSync'
+
+    const tick = document.createElement('button')
+    tick.className = 'tick'
+    tick.type = 'button'
+    tick.textContent = '✓'
+    tick.setAttribute('aria-label', 'done')
+    tick.disabled = row.pending
+    tick.onclick = () => done(row.id)
+
+    const body = document.createElement('div')
+    body.className = 'body'
+    const t = document.createElement('div')
+    t.className = 'txt'
+    t.textContent = row.text
+    body.appendChild(t)
+
+    const meta = document.createElement('div')
+    meta.className = 'meta'
+    if (row.list) {
+      const tag = document.createElement('span')
+      tag.className = 'tag'
+      tag.textContent = row.list
+      meta.appendChild(tag)
+    }
+    meta.appendChild(document.createTextNode(row.pending ? 'waiting to sync' : row.by || ''))
+    body.appendChild(meta)
+
+    li.append(tick, body)
+    list.appendChild(li)
+  }
+}
+
+async function flush() {
+  if (queue.length === 0) return true
+  const rest = []
+  for (const entry of queue) {
+    try {
+      const res = await fetch('/inbox', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(entry),
+      })
+      if (!res.ok) { rest.push(entry); continue }
+    } catch {
+      // Still offline — keep this and everything after it for next time.
+      rest.push(entry)
+    }
+  }
+  queue = rest
+  save(QUEUE_KEY, queue)
+  return queue.length === 0
+}
+
+async function refresh() {
+  const drained = await flush()
+  try {
+    const res = await fetch('/inbox', { cache: 'no-store' })
+    if (!res.ok) throw new Error(String(res.status))
+    items = (await res.json()).items || []
+    say(drained ? '' : `${queue.length} waiting to sync`, !drained)
+  } catch {
+    say(queue.length ? `${queue.length} waiting to sync` : 'offline — adds are saved', true)
+  }
+  render()
+}
+
+form.onsubmit = async e => {
+  e.preventDefault()
+  const body = text.value.trim()
+  if (!body) return
+
+  queue.push({ text: body, by: who, clientId: uid(), at: Date.now() })
+  save(QUEUE_KEY, queue)
+
+  // Clear immediately and keep focus: the next thing is usually said straight
+  // after the first, and waiting on a round trip loses it.
+  text.value = ''
+  text.focus()
+  render()
+  say('added')
+  await refresh()
+}
+
+async function done(id) {
+  try {
+    await fetch('/inbox/' + encodeURIComponent(id) + '/done', { method: 'POST' })
+  } catch {
+    say('offline — will not stick until you are back', true)
+    return
+  }
+  await refresh()
+}
+
+window.addEventListener('online', refresh)
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') refresh()
+})
+
+text.focus()
+refresh()
+setInterval(refresh, 20000)
+</script>
+</body>
+</html>

@@ -1,0 +1,134 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Notes</title>
+<style>
+  :root{--bg:#111;--fg:#eee;--dim:#888;--line:#2a2a2a;--warn:#d8a531}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:16px/1.45 -apple-system,system-ui,Roboto,sans-serif}
+  header{display:flex;align-items:center;justify-content:space-between;
+         padding:14px 16px;border-bottom:1px solid var(--line)}
+  h1{font-size:17px;margin:0;font-weight:600}
+  a{color:var(--dim);text-decoration:none;font-size:13px}
+  .task{border-bottom:1px solid var(--line);padding:12px 16px}
+  .name{font-weight:600;display:flex;justify-content:space-between;gap:10px}
+  .meta{color:var(--dim);font-size:12px;margin-top:2px}
+  .notes{margin:8px 0 0;padding:0;list-style:none}
+  .notes li{color:var(--fg);font-size:14px;padding:4px 0 4px 12px;
+            border-left:2px solid var(--line)}
+  .notes li span{color:var(--dim);font-size:11px;margin-left:6px}
+  form{display:flex;gap:8px;margin-top:8px}
+  input{flex:1;min-width:0;background:#1b1b1b;border:1px solid var(--line);
+        color:var(--fg);border-radius:8px;padding:9px 11px;font-size:16px}
+  button{background:#2a2a2a;border:1px solid var(--line);color:var(--fg);
+         border-radius:8px;padding:9px 13px;font-size:14px}
+  #status{padding:8px 16px;color:var(--dim);font-size:12px;min-height:18px}
+  #status.queued{color:var(--warn)}
+</style>
+
+<header>
+  <h1>Notes</h1>
+  <a href="/">The List &rsaquo;</a>
+</header>
+<div id="status"></div>
+<div id="tasks"></div>
+
+<script>
+/*
+ * Notes on the big-ticket tasks.
+ *
+ * Same discipline as the shared list: every note is queued locally first and
+ * POSTed after, so writing one down works with no signal. A note you thought
+ * of and lost is worse than no notes at all.
+ *
+ * Dictation is the phone keyboard's microphone. There is nothing to build for
+ * that — tap the mic in Gboard and talk into the field.
+ */
+const QUEUE_KEY = 'tasknotes.queue'
+const WHO_KEY = 'thelist.who'
+
+const $ = id => document.getElementById(id)
+const load = k => { try { return JSON.parse(localStorage.getItem(k)) || [] } catch { return [] } }
+const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)) } catch {} }
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))
+const uid = () => 'n' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+
+let who = 'me'
+try { who = localStorage.getItem(WHO_KEY) || 'me' } catch {}
+
+let queue = load(QUEUE_KEY)
+let tasks = []
+
+function say(msg, queued) {
+  $('status').textContent = msg
+  $('status').className = queued ? 'queued' : ''
+}
+
+function render() {
+  const pending = {}
+  for (const q of queue) (pending[q.id] = pending[q.id] || []).push(q)
+
+  $('tasks').innerHTML = tasks.map(t => {
+    const notes = [...(t.notes || []), ...(pending[t.id] || []).map(q => ({ text: q.text, by: q.by, pending: true }))]
+    const est = t.estimateMs ? Math.round(t.estimateMs / 60000) + 'm' : 'no estimate'
+    const shut = t.open ? '' : ' - opens ' + t.opensLabel
+    return '<div class="task">' +
+      '<div class="name"><span>' + esc(t.label) + '</span></div>' +
+      '<div class="meta">' + esc(est + shut + (t.note ? ' - ' + t.note : '')) + '</div>' +
+      (notes.length ? '<ul class="notes">' + notes.map(n =>
+        '<li>' + esc(n.text) + '<span>' + esc(n.by || '') + (n.pending ? ' - saving' : '') + '</span></li>').join('') + '</ul>' : '') +
+      '<form data-id="' + esc(t.id) + '">' +
+        '<input placeholder="what do you need to know first?" enterkeyhint="done" autocapitalize="sentences">' +
+        '<button type="submit">Add</button>' +
+      '</form></div>'
+  }).join('') || '<div class="task">No open tasks.</div>'
+
+  for (const form of document.querySelectorAll('form')) form.onsubmit = onAdd
+}
+
+async function flush() {
+  if (queue.length === 0) return true
+  const rest = []
+  for (const q of queue) {
+    try {
+      const res = await fetch('/task/' + encodeURIComponent(q.id) + '/note', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: q.text, by: q.by, clientId: q.clientId }),
+      })
+      if (!res.ok) rest.push(q)
+    } catch { rest.push(q) }
+  }
+  queue = rest
+  save(QUEUE_KEY, queue)
+  return queue.length === 0
+}
+
+async function sync() {
+  const drained = await flush()
+  try {
+    const res = await fetch('/tasks', { cache: 'no-store' })
+    if (res.ok) tasks = (await res.json()).tasks || []
+    say(drained ? '' : queue.length + ' waiting to sync', !drained)
+  } catch {
+    say(queue.length ? queue.length + ' waiting to sync' : 'offline - notes are saved', true)
+  }
+  render()
+}
+
+function onAdd(e) {
+  e.preventDefault()
+  const input = e.target.querySelector('input')
+  const body = input.value.trim()
+  if (!body) return
+  queue.push({ id: e.target.dataset.id, text: body, by: who, clientId: uid(), at: Date.now() })
+  save(QUEUE_KEY, queue)
+  input.value = ''
+  render()
+  sync()
+}
+
+sync()
+setInterval(sync, 20000)
+</script>

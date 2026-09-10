@@ -1,0 +1,22 @@
+{
+  "boards": [
+    {
+      "id": "studio",
+      "name": "Demo Studio",
+      "space": "ops",
+      "metrics": [
+        {
+          "id": "studio.temperature",
+          "label": "Temperature",
+          "unit": "F",
+          "ttlSeconds": 300,
+          "thresholds": {
+            "warn": { "outside": [65, 78] },
+            "alert": { "outside": [58, 84] }
+          }
+        }
+      ]
+    }
+  ],
+  "slack": { "channels": {} }
+}
