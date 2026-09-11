@@ -219,6 +219,22 @@ export interface BlockPlan {
   tasks: TaskRow[]
 }
 
+export interface CoachCue {
+  id: string
+  title: string
+  lines: string[]
+  kind: 'reminder' | 'recap' | 'task' | 'list' | 'ops'
+  priority: number
+  quiet: boolean
+  createdAt: number
+  expiresAt: number
+  nextAfterMs: number
+}
+
+export type CoachCueResponse =
+  | { ok: true; cue: CoachCue; changed: boolean; nextAfterMs: number }
+  | { ok: false; error: string }
+
 export interface ChecklistStats {
   checklistId: string
   name: string

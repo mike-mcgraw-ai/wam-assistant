@@ -1,8 +1,8 @@
-# A usable HUD
+# The first AI coach
 
-Public version: `v0.1.0`  
-Face build: `0.28.3`  
-Originally completed: `2026-09-10`  
+Public version: `v0.2.0`  
+Face build: `0.30.0`  
+Originally completed: `2026-09-11`  
 Sanitized and published: `2026-09-29`
 
-Running-order planning and the constraints of a nine-line, two-gesture display.
+Local state becomes a compact proactive cue without displacing the Life view.

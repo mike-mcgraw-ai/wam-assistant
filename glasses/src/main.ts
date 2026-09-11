@@ -19,6 +19,7 @@ import {
   checkItem,
   completeInboxItem,
   completeTask,
+  fetchCoachCue,
   fetchPlan,
   fetchSnapshot,
   startChecklist,
@@ -34,6 +35,7 @@ import {
   render,
   startable,
   type UiState,
+  type View,
 } from './render'
 import { newGame, nudge, serve, tick as pongTick } from './pong'
 
@@ -69,6 +71,7 @@ const MENU = {
   LISTS: 6,
   DIAG: 7,
   BACK: 8,
+  COACH: 11,
   START: 10,
   EXIT: 9,
 } as const
@@ -101,6 +104,8 @@ const state: UiState = {
   alertsOnly: false,
   plan: null,
   planLoading: false,
+  cue: null,
+  cueReturn: null,
   pong: null,
   events: 0,
   lastEvent: '-',
@@ -113,6 +118,7 @@ const state: UiState = {
 }
 
 const bridge = await waitForEvenAppBridge()
+let lastInputAt = Date.now()
 
 // ---- rendering -------------------------------------------------------------
 
@@ -165,6 +171,50 @@ async function refresh(): Promise<void> {
   }
 }
 
+function copyView(view: View): View {
+  return { ...view } as View
+}
+
+function homeView(): View {
+  return state.space === 'life' ? { kind: 'plan', cursor: 0 } : { kind: 'index', cursor: 0 }
+}
+
+function dismissCue(): void {
+  state.view = state.cueReturn ? copyView(state.cueReturn) : homeView()
+  state.cueReturn = null
+  clampCursor()
+}
+
+function canAutoRefreshCue(): boolean {
+  if (!config.autoCue || state.space !== 'ops' || state.planLoading) return false
+  if (Date.now() - lastInputAt < config.cueIdleMs) return false
+  return state.view.kind === 'index' || state.view.kind === 'cue'
+}
+
+async function refreshCoachCue(auto = false): Promise<void> {
+  if (auto && !canAutoRefreshCue()) return
+
+  const result = await fetchCoachCue(state.space, state.cue?.id ?? null)
+  if (!result.ok) return
+
+  const changed = !state.cue || state.cue.id !== result.cue.id
+  state.cue = result.cue
+
+  if (state.view.kind === 'cue' || (!auto && state.view.kind === 'index')) {
+    await paint()
+    return
+  }
+  if (auto && changed && canAutoRefreshCue()) await paint()
+}
+
+async function openCoachCue(): Promise<void> {
+  await refreshCoachCue(false)
+  state.cueReturn = state.view.kind === 'cue' ? state.cueReturn : copyView(state.view)
+  state.view = { kind: 'cue' }
+  state.scrollTop = 0
+  await paint()
+}
+
 // ---- navigation ------------------------------------------------------------
 
 function rowCount(): number {
@@ -186,6 +236,7 @@ function rowCount(): number {
       return startable(state).length
     case 'inbox':
       return inboxItems(state, state.view.group).length
+    case 'cue':
     case 'pong':
     case 'fonttest':
       return 0
@@ -194,7 +245,7 @@ function rowCount(): number {
 
 function clampCursor(): void {
   const view = state.view
-  if (view.kind === 'pong' || view.kind === 'fonttest') return
+  if (view.kind === 'pong' || view.kind === 'fonttest' || view.kind === 'cue') return
   const count = rowCount()
   view.cursor = count === 0 ? 0 : Math.min(view.cursor, count - 1)
   followCursor()
@@ -225,6 +276,11 @@ function move(delta: number): void {
 
   if (view.kind === 'fonttest') {
     view.page = (view.page + 1) % 5
+    return
+  }
+
+  if (view.kind === 'cue') {
+    dismissCue()
     return
   }
 
@@ -329,6 +385,7 @@ async function toggle(runId: string, itemId: string): Promise<void> {
  */
 async function switchSpace(): Promise<void> {
   state.space = otherSpace(state.space)
+  state.cue = null
   try {
     localStorage.setItem('opsboard.space', state.space)
   } catch {
@@ -343,6 +400,7 @@ async function switchSpace(): Promise<void> {
   state.view = { kind: 'index', cursor: 0 }
   state.scrollTop = 0
   clampCursor()
+  await refreshCoachCue(false)
   await paint()
 }
 
@@ -450,6 +508,12 @@ async function activate(): Promise<void> {
   const view = state.view
 
   if (view.kind !== 'index') state.lastEvent = `clk:${view.kind}`
+
+  if (view.kind === 'cue') {
+    dismissCue()
+    await paint()
+    return
+  }
 
   if (view.kind === 'board') {
     // Nothing to open on a metric; the cursor is for reading long boards.
@@ -613,6 +677,12 @@ async function activate(): Promise<void> {
 }
 
 async function back(): Promise<void> {
+  if (state.view.kind === 'cue') {
+    dismissCue()
+    await paint()
+    return
+  }
+
   if (state.view.kind === 'pong') {
     stopPong()
     state.view = { kind: 'index', cursor: 0 }
@@ -657,6 +727,7 @@ async function onMenu(itemID: number): Promise<void> {
       break
     case MENU.REFRESH:
       await refresh()
+      if (state.space === 'ops') await refreshCoachCue(false)
       break
     case MENU.FITS:
       await openPlan()
@@ -667,7 +738,8 @@ async function onMenu(itemID: number): Promise<void> {
         state.view.kind !== 'board' &&
         state.view.kind !== 'plan' &&
         state.view.kind !== 'pong' &&
-        state.view.kind !== 'fonttest'
+        state.view.kind !== 'fonttest' &&
+        state.view.kind !== 'cue'
       ) {
         state.view.cursor = 0
       }
@@ -684,7 +756,11 @@ async function onMenu(itemID: number): Promise<void> {
       state.view = { kind: 'index', cursor: 0 }
       state.scrollTop = 0
       clampCursor()
+      if (state.space === 'ops') await refreshCoachCue(false)
       await paint()
+      break
+    case MENU.COACH:
+      await openCoachCue()
       break
     case MENU.DIAG:
       state.diagnostics = !state.diagnostics
@@ -732,13 +808,14 @@ const page = new CreateStartUpPageContainer({
     menuItems: [
       // First item: the label cannot change after create, so it names both
       // ends rather than the destination.
-      // Five. Everything cut was either a second way to do something that
+      // Six. Everything cut was either a second way to do something that
       // already had one — Running order is where the space switch lands, All
       // boards is what double-tap does, Start a list belongs on the Lists
       // screen — or was only ever there for the build (Pong, Flagged only).
       // The handlers all survive, so putting one back is one line.
       new MenuItemProperty({ itemName: 'Ops / Life', itemID: MENU.SWITCH }),
       new MenuItemProperty({ itemName: 'Lists', itemID: MENU.LISTS }),
+      new MenuItemProperty({ itemName: 'Coach', itemID: MENU.COACH }),
       new MenuItemProperty({ itemName: 'Refresh', itemID: MENU.REFRESH }),
       new MenuItemProperty({ itemName: 'Diagnostics', itemID: MENU.DIAG }),
     ],
@@ -785,6 +862,7 @@ bridge.onEvenHubEvent((event: EvenHubEvent) => {
   console.log('[event]', JSON.stringify(event))
 
   state.events += 1
+  lastInputAt = Date.now()
 
   // ---- contextual menu -------------------------------------------------
   const menuItemID = event.menuItemClickEvent?.itemID
@@ -801,7 +879,7 @@ bridge.onEvenHubEvent((event: EvenHubEvent) => {
   // be mistaken for taps.
   if (sysType === OsEventTypeList.FOREGROUND_ENTER_EVENT) {
     state.lastEvent = 'fg-in'
-    void refresh()
+    void refresh().then(() => refreshCoachCue(false))
     return
   }
   if (
@@ -874,6 +952,8 @@ await refresh()
  */
 if (state.space === 'life') {
   await openPlan()
+} else {
+  await refreshCoachCue(false)
 }
 
 /**
@@ -884,3 +964,4 @@ if (state.space === 'life') {
  * server holds the truth — so recovery is just: refetch on the way back in.
  */
 setInterval(() => void refresh(), config.pollMs)
+setInterval(() => void refreshCoachCue(true), config.cueMs)

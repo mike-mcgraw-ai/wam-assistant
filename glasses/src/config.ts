@@ -60,6 +60,10 @@ const DEFAULTS = {
   serverUrl: defaultServerUrl(),
   /** How often to re-poll while the app is open, in ms. */
   pollMs: 15_000,
+  /** How often the foreground Coach is allowed to surface a fresh cue. */
+  cueMs: 2 * 60_000,
+  /** Do not interrupt active use; wait this long since the last input. */
+  cueIdleMs: 25_000,
   /** Give up on a request after this long; the glasses should never hang. */
   timeoutMs: 6_000,
   /**
@@ -98,6 +102,9 @@ export const config = {
    */
   readToken: stored('opsboard.readToken') || '',
   pollMs: Number(stored('opsboard.pollMs')) || DEFAULTS.pollMs,
+  cueMs: Number(stored('opsboard.cueMs')) || DEFAULTS.cueMs,
+  cueIdleMs: Number(stored('opsboard.cueIdleMs')) || DEFAULTS.cueIdleMs,
+  autoCue: stored('opsboard.autoCue') !== 'off',
   timeoutMs: DEFAULTS.timeoutMs,
   rowsPerPage: DEFAULTS.rowsPerPage,
   maxLines: DEFAULTS.maxLines,

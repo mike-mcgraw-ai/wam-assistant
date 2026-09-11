@@ -5,7 +5,7 @@
  *
  *   npm run preview
  */
-import { fetchSnapshot } from '../src/api'
+import { fetchCoachCue, fetchSnapshot } from '../src/api'
 import { render, type UiState } from '../src/render'
 import { LINE_CHARS } from '../src/format'
 import { config } from '../src/config'
@@ -37,6 +37,17 @@ const base: UiState = {
   lastOkAt: Date.now(),
   fromCache: false,
   alertsOnly: false,
+  plan: null,
+  planLoading: false,
+  cue: null,
+  cueReturn: null,
+  pong: null,
+  events: 0,
+  lastEvent: '-',
+  diagnostics: false,
+  space: 'life',
+  scrollTop: 0,
+  armedTaskId: null,
 }
 
 frame('INDEX', render(base))
@@ -44,6 +55,17 @@ frame('INDEX (flagged only)', render({ ...base, alertsOnly: true }))
 frame('INDEX (network down)', render({ ...base, error: 'timeout' }))
 frame('INDEX (cold start, cached)', render({ ...base, fromCache: true }))
 
+const lifeCue = await fetchCoachCue('life')
+if (lifeCue.ok) {
+  frame('LIFE INDEX (no auto AI widget)', render({ ...base, cue: lifeCue.cue }))
+  frame('COACH (manual)', render({ ...base, cue: lifeCue.cue, view: { kind: 'cue' } }))
+}
+
+const opsCue = await fetchCoachCue('ops')
+if (opsCue.ok) {
+  frame('OPS DASHBOARD (AI widget)', render({ ...base, space: 'ops', cue: opsCue.cue }))
+}
+
 for (const board of result.snapshot.boards) {
-  frame(`BOARD ${board.id}`, render({ ...base, view: { kind: 'board', boardId: board.id, page: 0 } }))
+  frame(`BOARD ${board.id}`, render({ ...base, view: { kind: 'board', boardId: board.id, cursor: 0 } }))
 }

@@ -10,6 +10,7 @@ import type {
   BlockPlan,
   Board,
   ChecklistRun,
+  CoachCue,
   InboxGroup,
   InboxItem,
   Snapshot,
@@ -42,6 +43,7 @@ export type View =
   | { kind: 'picker'; cursor: number }
   | { kind: 'plan'; cursor: number }
   | { kind: 'task'; taskId: string; cursor: number }
+  | { kind: 'cue' }
   | { kind: 'pong' }
   | { kind: 'fonttest'; page: number }
   | { kind: 'inbox'; group: string; cursor: number }
@@ -60,6 +62,10 @@ export interface UiState {
   /** last plan fetched for the current window, null while loading or failed */
   plan: BlockPlan | null
   planLoading: boolean
+  /** latest foreground Coach cue returned by the hub */
+  cue: CoachCue | null
+  /** screen to return to after a manual Coach cue is dismissed */
+  cueReturn: View | null
   /** non-null only while the game is on screen */
   pong: PongState | null
   /**
@@ -222,6 +228,16 @@ function renderIndexRow(row: IndexRow, selected: boolean, space: Space): string 
   }
 }
 
+function aiWidgetLine(state: UiState): string | null {
+  const cue = state.cue
+  if (state.space !== 'ops' || !cue || cue.quiet) return null
+  if (cue.expiresAt && Date.now() > cue.expiresAt + config.cueMs) return null
+
+  const marker = cue.priority >= 4 ? '!' : cue.kind === 'ops' ? 'X' : '*'
+  const body = cue.lines.find(Boolean)
+  return clip(`${marker} AI ${cue.title}${body ? `: ${body}` : ''}`, LINE_CHARS)
+}
+
 function header(state: UiState, right: string): string {
   if (state.diagnostics) return diagHeader(state, right)
   return plainHeader(state, right)
@@ -360,14 +376,17 @@ function renderIndex(state: UiState, cursor: number): string {
   }
 
   const rows = indexRows(state)
+  const cue = aiWidgetLine(state)
+  const visibleRows = cue ? config.rowsPerPage - 1 : config.rowsPerPage
 
-  const win = windowFollow(cursor, rows.length, config.rowsPerPage, state.scrollTop)
+  const win = windowFollow(cursor, rows.length, visibleRows, state.scrollTop)
 
   // One header row: date, time and which space. Back to text rather than an
   // image — at this size the image bought nothing over the firmware font, cost
   // more vertical space than it saved, and lagged a second behind a switch
   // while its bytes went over BLE.
   const lines: string[] = [clockLine(state), spaceLine(state)]
+  if (cue) lines.push(cue)
   const { start, end } = win
 
   // Nothing outstanding anywhere in this space.
@@ -378,7 +397,7 @@ function renderIndex(state: UiState, cursor: number): string {
   const flagged = visibleBoards(state).some(b => b.status !== 'ok')
   const listItems = inboxGroups(state).reduce((n, g) => n + g.items.length, 0)
 
-  if (checksLeft === 0 && !flagged && listItems === 0 && !state.alertsOnly && rows.length > 0) {
+  if (checksLeft === 0 && !flagged && listItems === 0 && !cue && !state.alertsOnly && rows.length > 0) {
     // Everything genuinely done and green. Worth marking rather than showing
     // a wall of ticked boxes.
     return assemble([header(state, 'all ok'), '', ALL_CLEAR], config.maxChars, config.maxLines)
@@ -581,6 +600,18 @@ function renderTaskDetail(state: UiState, taskId: string, cursor: number): strin
   return assemble(lines, config.maxChars, config.maxLines)
 }
 
+function renderCue(state: UiState): string {
+  const cue = state.cue
+  if (!cue) return assemble([header(state, 'Coach'), '', 'No cue yet.'], config.maxChars, config.maxLines)
+
+  const lines: string[] = [header(state, cue.title), '']
+  for (const line of cue.lines) {
+    for (const wrapped of wrap(line, LINE_CHARS)) lines.push(wrapped)
+  }
+
+  return assemble(lines, config.maxChars, config.maxLines)
+}
+
 /** Single entry point: UI state in, one string for the text container out. */
 export function render(state: UiState): string {
   switch (state.view.kind) {
@@ -596,6 +627,8 @@ export function render(state: UiState): string {
       return renderPicker(state, state.view.cursor)
     case 'plan':
       return renderPlan(state, state.view.cursor)
+    case 'cue':
+      return renderCue(state)
     case 'pong':
       return state.pong ? renderPong(state.pong) : 'PONG\n\nloading...'
     case 'fonttest':

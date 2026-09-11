@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 // @ts-ignore - reaching across into the server package for a self-contained demo
 import { Store } from '../../server/src/state.js'
 // @ts-ignore
@@ -8,8 +9,8 @@ import { agenda, planBlock, reach } from '../../server/src/plan.js'
 import { render, type UiState } from '../src/render'
 import { LINE_CHARS } from '../src/format'
 
-const boardsCfg = JSON.parse(readFileSync(new URL('../../server/src/boards.config.json', import.meta.url), 'utf8'))
-const checksCfg = JSON.parse(readFileSync(new URL('../../server/src/checklists.config.json', import.meta.url), 'utf8'))
+const boardsCfg = JSON.parse(readFileSync(join(process.cwd(), '..', 'server', 'src', 'boards.config.json'), 'utf8'))
+const checksCfg = JSON.parse(readFileSync(join(process.cwd(), '..', 'server', 'src', 'checklists.config.json'), 'utf8'))
 
 const store: any = new Store(boardsCfg, '')
 const checklists: any = new Checklists(checksCfg, {})
@@ -100,8 +101,11 @@ const base: UiState = {
   view: { kind: 'index', cursor: 0 },
   snapshot, error: null, loading: false,
   lastOkAt: now, fromCache: false, alertsOnly: false,
-  plan: null, planLoading: false, pong: null,
+  plan: null, planLoading: false,
+  cue: null, cueReturn: null,
+  pong: null,
   events: 0, lastEvent: '-', diagnostics: false, space: 'ops',
+  scrollTop: 0, armedTaskId: null,
 }
 
 // Build a 60-minute plan the way the server would.
@@ -119,9 +123,23 @@ const withPlan = {
 }
 
 const amRun = snapshot.checklists.active.find((r: any) => r.checklistId === 'am-rounds')
+const demoCue = {
+  id: 'demo-ops',
+  title: 'Ops alert',
+  lines: ['HVAC: CH-1 locked out 14:02', 'Open the board for detail.'],
+  kind: 'ops' as const,
+  priority: 3,
+  quiet: false,
+  createdAt: now,
+  expiresAt: now + 120_000,
+  nextAfterMs: 120_000,
+}
 
 frame('Ops index', render(withPlan))
+frame('Ops index — AI widget', render({ ...withPlan, cue: demoCue }))
+frame('Coach — manual', render({ ...withPlan, cue: demoCue, view: { kind: 'cue' } }))
 frame('Life index', render({ ...withPlan, space: 'life', view: { kind: 'index', cursor: 0 } }))
+frame('Life index — no auto AI widget', render({ ...withPlan, space: 'life', cue: demoCue, view: { kind: 'index', cursor: 0 } }))
 frame('Shared list — Groceries', render({ ...withPlan, space: 'life', view: { kind: 'inbox', group: 'Groceries', cursor: 0 } }))
 
 frame('Index — "Flagged only" on', render({ ...base, alertsOnly: true }))

@@ -13,6 +13,7 @@ import { Triage, sweepInbox } from './triage.js'
 import { Jobs, JOB } from './jobs.js'
 import { Notifier, sweepWaits } from './notify.js'
 import { applyMessage, verifySignature, startSocketMode } from './slack.js'
+import { buildCue } from './cues.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -26,6 +27,12 @@ const CONFIG_PATH = process.env.CONFIG_PATH || join(HERE, 'boards.config.json')
 
 const CHECKLISTS_PATH = process.env.CHECKLISTS_PATH || join(HERE, 'checklists.config.json')
 const DATA_DIR = process.env.DATA_DIR || join(HERE, '..', 'data')
+const AI_CUE_INTERVAL_MS = Math.max(30_000, Number(process.env.AI_CUE_INTERVAL_MS || 2 * 60_000))
+const AI_CUE_NOTIFY = process.env.AI_CUE_NOTIFY === '1'
+const AI_CUE_SPACES = (process.env.AI_CUE_SPACES || 'ops')
+  .split(',')
+  .map(s => s.trim())
+  .filter(s => s === 'ops' || s === 'life')
 
 const config = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'))
 const store = new Store(config, PERSIST)
@@ -238,6 +245,26 @@ function buildPlan(minutes, requestedIds, space) {
     // "how far do I get with just this one" without a second request.
     reach: chores.map(c => ({ choreId: c.id, name: c.name, ...reach(c, minutes) })),
   }
+}
+
+function cueSpace(value) {
+  return value === 'life' ? 'life' : 'ops'
+}
+
+function buildCurrentCue(space, now = Date.now()) {
+  const safeSpace = cueSpace(space)
+  const checklistsState = checklists.snapshot(now)
+  return buildCue({
+    space: safeSpace,
+    snapshot: store.snapshot(now),
+    plan: buildPlan(720, [], safeSpace),
+    checklistsState,
+    inboxGroups: inbox.grouped(),
+    dueWaits: checklists.dueWaits(now),
+    jobsSummary: jobs.summary(now),
+    now,
+    intervalMs: AI_CUE_INTERVAL_MS,
+  })
 }
 
 if (!INGEST_TOKEN) {
@@ -474,7 +501,20 @@ const server = http.createServer(async (req, res) => {
 
   // ---- health -----------------------------------------------------------
   if (req.method === 'GET' && url.pathname === '/health') {
-    return json(res, 200, { ok: true, metrics: store.index.size, uptime: process.uptime() })
+    return json(res, 200, { ok: true, metrics: store.index.size, uptime: process.uptime(), aiCueIntervalMs: AI_CUE_INTERVAL_MS })
+  }
+
+  // ---- foreground coach cue --------------------------------------------
+  if (req.method === 'GET' && url.pathname === '/ai/cue') {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    const cue = buildCurrentCue(url.searchParams.get('space'))
+    const since = url.searchParams.get('since') || ''
+    return json(res, 200, {
+      ok: true,
+      cue,
+      changed: cue.id !== since,
+      nextAfterMs: cue.nextAfterMs,
+    })
   }
 
   // ---- read: the glasses poll this -------------------------------------
@@ -646,6 +686,20 @@ server.listen(PORT, HOST, () => {
 setInterval(() => {
   sweepWaits(checklists, notifier).catch(err => console.warn(`[notify] sweep: ${err.message}`))
 }, 30_000)
+
+if (AI_CUE_NOTIFY) {
+  const notified = new Map()
+  setInterval(() => {
+    for (const space of AI_CUE_SPACES.length ? AI_CUE_SPACES : ['ops']) {
+      const cue = buildCurrentCue(space)
+      if (cue.quiet || notified.get(space) === cue.id) continue
+      notified.set(space, cue.id)
+      notifier
+        .send('WAM', `${cue.title}: ${cue.lines.join(' / ')}`)
+        .catch(err => console.warn(`[cue] notify: ${err.message}`))
+    }
+  }, AI_CUE_INTERVAL_MS)
+}
 
 /**
  * Backstop sweep.

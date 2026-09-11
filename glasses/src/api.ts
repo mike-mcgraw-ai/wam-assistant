@@ -1,5 +1,5 @@
 import { config } from './config'
-import type { BlockPlan, ChecklistsState, Snapshot } from './types'
+import type { BlockPlan, ChecklistsState, CoachCueResponse, Snapshot } from './types'
 
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
   const headers: Record<string, string> = { Accept: 'application/json', ...extra }
@@ -161,6 +161,35 @@ export async function fetchPlan(space: string): Promise<
     return { ok: true, plan }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'network error'
+    return { ok: false, error: message.slice(0, 40) }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+export async function fetchCoachCue(space: string, since: string | null = null): Promise<CoachCueResponse> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), config.timeoutMs)
+  const params = new URLSearchParams({ space })
+  if (since) params.set('since', since)
+
+  try {
+    const res = await fetch(`${config.serverUrl}/ai/cue?${params.toString()}`, {
+      headers: authHeaders(),
+      signal: controller.signal,
+      cache: 'no-store',
+    })
+    const payload = await res.json().catch(() => null)
+    if (!res.ok) return { ok: false, error: payload?.error ?? `server ${res.status}` }
+    if (!payload?.cue) return { ok: false, error: 'bad payload' }
+    return payload as CoachCueResponse
+  } catch (err: unknown) {
+    const message =
+      err instanceof DOMException && err.name === 'AbortError'
+        ? 'timeout'
+        : err instanceof Error
+          ? err.message
+          : 'network error'
     return { ok: false, error: message.slice(0, 40) }
   } finally {
     clearTimeout(timer)

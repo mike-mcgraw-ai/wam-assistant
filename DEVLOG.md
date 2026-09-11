@@ -5,3 +5,4 @@ These are the real completion dates of private device builds. The sanitized port
 | Portfolio | Completed | Face build | Capability and lesson |
 |---|---:|---:|---|
 | v0.1.0 | 2026-09-10 | 0.28.3 | **A usable HUD:** Running-order planning and the constraints of a nine-line, two-gesture display. |
+| v0.2.0 | 2026-09-11 | 0.30.0 | **The first AI coach:** Local state becomes a compact proactive cue without displacing the Life view. |
