@@ -29,6 +29,7 @@ import {
   fetchSnapshot,
   sendCoachAudio,
   startChecklist,
+  finishChecklist,
   startCoachSession,
 } from './api'
 import { loadSnapshot, saveSnapshot } from './storage'
@@ -36,6 +37,7 @@ import {
   findRun,
   indexRows,
   planRows,
+  choreRows,
   taskDetailRows,
   inboxItems,
   otherSpace,
@@ -95,10 +97,12 @@ const cached = loadSnapshot()
  * a step every single time for a choice that changes maybe twice a day.
  */
 function lastSpace(): 'ops' | 'life' {
+  // Life by default. The running order is the screen this exists for, and it
+  // is what you want on your face when you put them on without thinking.
   try {
-    return localStorage.getItem('opsboard.space') === 'life' ? 'life' : 'ops'
+    return localStorage.getItem('opsboard.space') === 'ops' ? 'ops' : 'life'
   } catch {
-    return 'ops'
+    return 'life'
   }
 }
 
@@ -126,6 +130,7 @@ const state: UiState = {
   armedTaskId: null,
   foreground: true,
   lastAudioAt: null,
+  audio: { open: false, frames: 0, chunks: 0, sent: 0, rejected: 0, lastRms: 0, kind: '-', raw: 0, error: null },
 }
 
 const bridge = await waitForEvenAppBridge()
@@ -300,6 +305,7 @@ async function startAudioCapture(sessionId: string): Promise<void> {
     return false
   })
   audioOpen = opened === true
+  state.audio = { open: audioOpen, frames: 0, chunks: 0, sent: 0, rejected: 0, lastRms: 0, kind: '-', raw: 0, error: audioOpen ? null : 'audioControl false' }
   if (!audioOpen) {
     localCoachCue('Mic did not open', ['Glasses audioControl returned false.'])
   }
@@ -311,6 +317,7 @@ async function stopAudioCapture(): Promise<void> {
   if (sessionId && audioFrames.length) await flushAudioChunk(sessionId, true)
   if (audioOpen) await bridge.audioControl(false).catch(() => false)
   audioOpen = false
+  state.audio.open = false
   audioFrames = []
   audioBytes = 0
   audioChunkStartedAt = 0
@@ -333,7 +340,15 @@ async function flushAudioChunk(sessionId = audioSessionId, force = false): Promi
   audioBytes = 0
   audioChunkStartedAt = 0
 
-  if (audioRms(combined) < config.audioMinRms) return
+  const rms = audioRms(combined)
+  state.audio.lastRms = Math.round(rms)
+  state.audio.chunks += 1
+  if (rms < config.audioMinRms) {
+    // Dropped as silence. Counted, because a threshold set too high looks
+    // exactly like a microphone that is not working.
+    state.audio.rejected += 1
+    return
+  }
 
   audioUploading = true
   // Stamped before the send, not after: this marks "heard speech", and the
@@ -351,6 +366,8 @@ async function flushAudioChunk(sessionId = audioSessionId, force = false): Promi
     at: Date.now(),
   })
   audioUploading = false
+  if (result.ok) state.audio.sent += 1
+  else state.audio.error = String(result.error ?? 'send failed').slice(0, 24)
 
   if (!result.ok) {
     localCoachCue('Transcription off', [result.error])
@@ -365,25 +382,99 @@ async function flushAudioChunk(sessionId = audioSessionId, force = false): Promi
   }
 }
 
+/**
+ * Get bytes out of whatever the host actually sent.
+ *
+ * The SDK is explicit that `audioPcm` arrives as a Uint8Array, a plain
+ * number[], or a base64 STRING depending on the host — and a string passes a
+ * `.length` check, survives `.slice()`, and then produces nonsense when read as
+ * PCM. That reads as permanent silence rather than as an error, which is the
+ * worst way for this to fail. `kind` records which shape turned up so the Coach
+ * screen can say.
+ */
+function toBytes(frame: unknown): Uint8Array | null {
+  if (frame instanceof Uint8Array) {
+    state.audio.kind = 'u8'
+    // Copy. The host may hand back the same buffer every frame, in which case
+    // keeping the reference means every frame in a chunk aliases the last one
+    // — which reads as noise, then as silence. 0.53.0 dropped this .slice()
+    // and that is when the microphone stopped working.
+    return frame.slice()
+  }
+  if (Array.isArray(frame)) {
+    state.audio.kind = 'arr'
+    return Uint8Array.from(frame as number[])
+  }
+  if (typeof frame === 'string') {
+    state.audio.kind = 'b64'
+    try {
+      const binary = atob(frame)
+      const out = new Uint8Array(binary.length)
+      for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i)
+      return out
+    } catch {
+      state.audio.error = 'bad base64'
+      return null
+    }
+  }
+  if (frame && typeof (frame as { byteLength?: number }).byteLength === 'number') {
+    state.audio.kind = 'buf'
+    return new Uint8Array(frame as ArrayBuffer)
+  }
+  state.audio.kind = typeof frame
+  return null
+}
+
 function handleAudio(audio: AudioEvent): void {
-  if (!audioOpen || !audioSessionId) return
+  // Take the session from state when the local copy has been cleared. The two
+  // drifted apart — stop clears `audioSessionId` and then awaits, and a start
+  // that lands in between leaves the mic open with no id to post against, so
+  // every frame was dropped with "no session id" while audio kept arriving.
+  // The live session is the truth; the local copy is only a cache.
+  const sessionId =
+    audioSessionId ?? (state.coachSession?.active ? state.coachSession.id : null)
+  if (!audioOpen || !sessionId) {
+    state.audio.error = !audioOpen ? 'mic not open' : 'no session id'
+    return
+  }
+  if (!audioSessionId) audioSessionId = sessionId
   audioLastRole = audio.speakerRole || AudioSpeakerRole.Unknown
   audioLastDirection = audio.direction ?? null
 
-  const frame = audio.audioPcm
-  if (!frame?.length) return
+  // Read the PCM carrier-agnostically.
+  //
+  // `event.audioEvent` is whatever the host serialised, not necessarily an
+  // AudioEvent instance, so the field may not be `audioPcm` at all. This is the
+  // same trap as taps arriving on `sysEvent` rather than `textEvent`: the type
+  // says one thing and the wire says another, and the failure is silent. When
+  // nothing matches, the object's own keys are recorded so the Coach screen can
+  // name the field we should be reading.
+  const raw = audio as unknown as Record<string, unknown>
+  const candidate =
+    raw.audioPcm ?? raw.audio_pcm ?? raw.pcm ?? raw.audioData ?? raw.data ?? raw.bytes
+  const frame = toBytes(candidate)
+  if (!frame?.length) {
+    if (state.audio.kind === '-' || !state.audio.kind.startsWith('?')) {
+      state.audio.kind = `?${Object.keys(raw).join(',').slice(0, 28)}`
+    }
+    return
+  }
   if (!audioChunkStartedAt) audioChunkStartedAt = Date.now()
-  audioFrames.push(frame.slice())
+  audioFrames.push(frame)
+  state.audio.frames += 1
   audioBytes += frame.length
 
   void flushAudioChunk()
 }
 
 async function syncAudioToCoachSession(): Promise<void> {
+  // Only ever stops. Opening the microphone is something you ask for with
+  // Listen, never something a poll decides on your behalf: a session left
+  // active on the hub meant the glasses started recording the moment the app
+  // launched, and the first thing it captured was wind. Nothing that listens
+  // should start itself.
   if (state.coachSession?.active) {
-    if (audioSessionId !== state.coachSession.id || !audioOpen) {
-      await startAudioCapture(state.coachSession.id)
-    }
+    if (audioSessionId && audioSessionId !== state.coachSession.id) await stopAudioCapture()
     return
   }
   if (audioSessionId || audioOpen) await stopAudioCapture()
@@ -397,36 +488,29 @@ async function toggleListening(): Promise<void> {
     return
   }
 
-  const returnTo = state.view.kind === 'cue' ? state.cueReturn : copyView(state.view)
   state.coachSession = current.session
 
+  // Already listening? Show the numbers. Listen from the menu is how you check
+  // on it, and having that stop the recording meant the only way to look was to
+  // end the thing you were looking at. Stopping is a click on this screen.
   if (current.session?.active) {
-    await stopAudioCapture()
-    const stopped = await endCoachSession(current.session.id)
-    if (!stopped.ok) {
-      state.error = stopped.error
-      await paint()
-      return
-    }
-    state.coachSession = stopped.session
-    localCoachCue('Listen off', [
-      `${stopped.session.modeName} stopped`,
-      `${stopped.session.segmentCount} transcript line${stopped.session.segmentCount === 1 ? '' : 's'}`,
-    ])
-  } else {
-    const started = await startCoachSession(state.space)
-    if (!started.ok) {
-      state.error = started.error
-      await paint()
-      return
-    }
-    state.coachSession = started.session
-    await startAudioCapture(started.session.id)
-    const cue = await fetchCoachCue(state.space, null)
-    if (cue.ok) state.cue = cue.cue
-    else localCoachCue('Listening', [`${started.session.modeName} mode`, audioOpen ? 'Mic on. Speak now.' : 'Waiting for transcript.'])
-    if (!audioOpen) localCoachCue('Mic did not open', ['Glasses audioControl returned false.'])
+    state.cueReturn = state.view.kind === 'cue' ? state.cueReturn : copyView(state.view)
+    state.view = { kind: 'cue' }
+    state.scrollTop = 0
+    await paint()
+    return
   }
+
+  const returnTo = state.view.kind === 'cue' ? state.cueReturn : copyView(state.view)
+  const started = await startCoachSession(state.space)
+  if (!started.ok) {
+    state.error = started.error
+    await paint()
+    return
+  }
+  state.coachSession = started.session
+  await startAudioCapture(started.session.id)
+  if (!audioOpen) localCoachCue('Mic did not open', ['Glasses audioControl returned false.'])
 
   state.error = null
   state.cueReturn = returnTo
@@ -450,6 +534,8 @@ function rowCount(): number {
       return planRows(state).length
     case 'task':
       return taskDetailRows(state, state.view.taskId).length
+    case 'chores':
+      return choreRows(state).length
     case 'checklist':
       return findRun(state, state.view.runId)?.items.length ?? 0
     case 'picker':
@@ -521,9 +607,8 @@ function move(delta: number): void {
 
   // Step over the blank between the tasks and the list. Landing on it would
   // mean one flick out of every list doing nothing at all.
-  if (view.kind === 'plan' || view.kind === 'task') {
-    const rows: Array<{ kind: string }> =
-      view.kind === 'plan' ? planRows(state) : taskDetailRows(state, view.taskId)
+  if (view.kind === 'task') {
+    const rows = taskDetailRows(state, view.taskId)
     const step = delta >= 0 ? 1 : -1
     while (rows[next]?.kind === 'space' && next > 0 && next < count - 1) next += step
     if (rows[next]?.kind === 'space') next = view.cursor
@@ -775,6 +860,16 @@ async function activate(): Promise<void> {
   if (view.kind !== 'index') state.lastEvent = `clk:${view.kind}`
 
   if (view.kind === 'cue') {
+    // Click here ends the session. Deliberate, on the screen showing what it
+    // has captured, rather than as a side effect of opening the menu.
+    if (state.coachSession?.active) {
+      const stopped = await endCoachSession(state.coachSession.id)
+      await stopAudioCapture()
+      if (stopped.ok) state.coachSession = stopped.session
+      else state.error = stopped.error
+      await paint()
+      return
+    }
     dismissCue()
     await paint()
     return
@@ -858,6 +953,45 @@ async function activate(): Promise<void> {
     return
   }
 
+  if (view.kind === 'chores') {
+    // One level down: the chore's own steps. This is the drill-down the
+    // running order deliberately is not — there you act on whatever fits the
+    // gap you have; here you work a single chore through.
+    const row = choreRows(state)[view.cursor]
+    if (row?.kind === 'run' && row.run.complete) {
+      // Arm, then confirm. Resetting is not destructive — the finished run
+      // stays in history and keeps feeding the medians — but starting a fresh
+      // laundry by accident is noise you would have to undo step by step.
+      if (state.armedTaskId !== row.run.runId) {
+        state.armedTaskId = row.run.runId
+        await paint()
+        return
+      }
+      state.armedTaskId = null
+      // A run only leaves `active` once finished, so a reset is finish-then-
+      // start; starting alone would hand back the same completed run.
+      await finishChecklist(row.run.runId)
+      const fresh = await startChecklist(row.run.checklistId)
+      if (fresh.ok && state.snapshot) state.snapshot.checklists = fresh.checklists
+      else if (!fresh.ok) state.error = fresh.error
+      const plan = await fetchPlan(state.space)
+      if (plan.ok) state.plan = plan.plan
+      clampCursor()
+      await paint()
+      return
+    }
+    if (row?.kind === 'run') {
+      await enterChecklist(row.run.runId)
+      return
+    }
+    if (row?.kind === 'start') {
+      await openChecklist(row.list.id)
+      return
+    }
+    await paint()
+    return
+  }
+
   if (view.kind === 'plan') {
     const row = planRows(state)[view.cursor]
 
@@ -865,8 +999,29 @@ async function activate(): Promise<void> {
     // already looking at was navigation for its own sake — on the running
     // order you can see the step, so clicking it should be what starts it.
     // Same two-click rule as everywhere: first starts, second completes.
+    if (row?.kind === 'chores') {
+      state.view = { kind: 'chores', cursor: 0 }
+      state.scrollTop = 0
+      clampCursor()
+      await paint()
+      return
+    }
+
     if (row?.kind === 'agenda' && row.row.kind === 'do') {
       await stepFromPlan(row.row.choreId, row.row.stepId)
+      return
+    }
+
+    // Clicking something already done puts it back. The undo for a misclick,
+    // and the only one available from the glasses.
+    if (row?.kind === 'agenda' && row.row.kind === 'done') {
+      const undone = await checkItem(row.row.runId, row.row.stepId, false)
+      if (undone.ok && state.snapshot) state.snapshot.checklists = undone.checklists
+      else if (!undone.ok) state.error = undone.error
+      const plan = await fetchPlan(state.space)
+      if (plan.ok) state.plan = plan.plan
+      clampCursor()
+      await paint()
       return
     }
 
@@ -966,7 +1121,7 @@ async function back(): Promise<void> {
 
   // In Life the running order is home: it is what the screen is for, and there
   // is no index behind it any more. Going "back" from it means leaving.
-  if (state.view.kind === 'task') {
+  if (state.view.kind === 'task' || state.view.kind === 'chores') {
     await openPlan()
     return
   }
@@ -980,6 +1135,14 @@ async function back(): Promise<void> {
   // from the root page. This deliberately does not.
   if (state.view.kind === 'plan' && state.space === 'life') {
     await switchSpace()
+    return
+  }
+
+  if (state.view.kind === 'checklist' && state.space === 'life') {
+    state.view = { kind: 'chores', cursor: 0 }
+    state.scrollTop = 0
+    clampCursor()
+    await paint()
     return
   }
 
@@ -1150,6 +1313,10 @@ bridge.onEvenHubEvent((event: EvenHubEvent) => {
   }
 
   if (event.audioEvent) {
+    // Counted here, ahead of every check of ours. If this stays at zero the
+    // host is not delivering audio at all and nothing downstream matters; if
+    // it climbs while `frames` does not, we are the ones throwing it away.
+    state.audio.raw += 1
     const audio = event.audioEvent
     const now = Date.now()
     if (now - audioLogLastAt > 5_000) {
@@ -1292,3 +1459,14 @@ if (state.space === 'life') {
  */
 setInterval(() => void refresh(), config.pollMs)
 setInterval(() => void refreshCoachCue(true), config.cueMs)
+
+/**
+ * Repaint the Coach screen while a session is live.
+ *
+ * Its numbers change every couple of seconds and nothing else repaints it, so
+ * it sat frozen for the whole session — which reads as "the microphone is
+ * doing nothing" whether or not it is.
+ */
+setInterval(() => {
+  if (state.view.kind === 'cue' && state.coachSession?.active && state.foreground) void paint()
+}, 2000)

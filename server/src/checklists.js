@@ -302,6 +302,9 @@ export class Checklists {
         /** a `do` step whose clock is running but which is not finished */
         running: Boolean(timing?.startedAt) && !run.checked[item.id],
         elapsedMs: timing?.startedAt && !run.checked[item.id] ? now - timing.startedAt : null,
+        /** how long it actually took, once done — the number worth keeping */
+        tookMs:
+          timing?.startedAt && timing?.completedAt ? timing.completedAt - timing.startedAt : null,
         /**
          * A `do` step running far longer than it should be.
          *
@@ -355,6 +358,8 @@ export class Checklists {
       done,
       total: items.length,
       complete: done === items.length,
+      /** when the most recent step was ticked — "finished 2h ago" */
+      lastAt,
       startedAt: run.startedAt,
       finishedAt: run.finishedAt,
       ageSeconds: Math.round((now - run.startedAt) / 1000),

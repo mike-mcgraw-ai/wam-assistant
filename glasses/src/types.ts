@@ -24,6 +24,18 @@ export interface Board {
   metrics: Metric[]
 }
 
+export interface SttStats {
+  queued: number
+  ok: number
+  empty: number
+  failed: number
+  lastError: string | null
+  lastText: string | null
+  lastMs: number
+  provider: string
+  configured: boolean
+}
+
 export interface Snapshot {
   generatedAt: string
   boards: Board[]
@@ -32,6 +44,8 @@ export interface Snapshot {
   stats?: ChecklistStats[]
   /** grouped shared-list items; absent on older server builds */
   inbox?: InboxGroup[]
+  /** what the transcriber has been doing; absent on older server builds */
+  stt?: SttStats
 }
 
 export type StepKind = 'do' | 'wait'
@@ -72,6 +86,8 @@ export interface ChecklistRun {
   done: number
   total: number
   complete: boolean
+  /** when the most recent step was ticked; null if none */
+  lastAt: number | null
   startedAt: number
   finishedAt: number | null
   ageSeconds: number
@@ -207,6 +223,20 @@ export interface TaskNote {
   at: number
 }
 
+export interface DoneRow {
+  kind: 'done'
+  chore: string
+  choreId: string
+  runId: string
+  step: string
+  stepId: string
+  at: number
+  /** how long it actually took */
+  ms: number | null
+  cumulativeBusyMs: null
+  cumulativeWallMs: null
+}
+
 export interface BlockPlan {
   minutes: number
   budgetMs: number
@@ -215,7 +245,7 @@ export interface BlockPlan {
   idleMs: number
   progress: Array<{ choreId: string; name: string; stepsDone: number; total: number; complete: boolean }>
   reach: PlanReach[]
-  agenda: AgendaRow[]
+  agenda: (AgendaRow | DoneRow)[]
   tasks: TaskRow[]
 }
 

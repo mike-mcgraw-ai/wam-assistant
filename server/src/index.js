@@ -221,6 +221,43 @@ function taskRows(space) {
  * the line is what you can get done. Big-ticket tasks are deliberately not in
  * it — they live above the list, not in it.
  */
+/**
+ * What you have already done, kept on screen.
+ *
+ * Completed steps leave the schedule — their time is off the totals — but they
+ * do not leave the page. Two reasons, both from use: an accidental click has
+ * to be undoable, and a list that only ever shrinks gives you no evidence you
+ * did anything. These rows are that evidence, with the time each one actually
+ * took.
+ *
+ * They sit at the bottom, because this is a look back and the work is what you
+ * came to the screen for.
+ */
+function doneRows(space, now = Date.now()) {
+  const rows = []
+  for (const run of checklists.snapshot(now).active) {
+    if (space && (run.space ?? 'ops') !== space) continue
+    for (const item of run.items) {
+      if (!item.done || !item.at) continue
+      // Today only. Yesterday's dishes are history, not progress.
+      if (now - item.at > 16 * 3600_000) continue
+      rows.push({
+        kind: 'done',
+        chore: run.name,
+        choreId: run.checklistId,
+        runId: run.runId,
+        step: item.label,
+        stepId: item.id,
+        at: item.at,
+        ms: item.tookMs ?? null,
+        cumulativeBusyMs: null,
+        cumulativeWallMs: null,
+      })
+    }
+  }
+  return rows.sort((a, b) => a.at - b.at)
+}
+
 function withRunningTotal(rows) {
   let busy = 0
   for (const row of rows) {
@@ -248,6 +285,26 @@ function withRunningTotal(rows) {
   return rows
 }
 
+/**
+ * Put finished steps back where they belong.
+ *
+ * They were appended at the bottom, which meant undoing a misclick was a long
+ * scroll away and the step reappeared somewhere unrelated to where it sat in
+ * the chore. A done step goes immediately before the first remaining step of
+ * its own chore, so the list still reads as that chore's sequence. A chore
+ * with nothing left goes at the end, because there is nothing for it to sit
+ * in front of.
+ */
+function withDoneInline(rows, done) {
+  const out = [...rows]
+  for (const row of done) {
+    const at = out.findIndex(r => r.kind === 'do' && r.choreId === row.choreId)
+    if (at === -1) out.push(row)
+    else out.splice(at, 0, row)
+  }
+  return out
+}
+
 function buildPlan(minutes, requestedIds, space) {
   const all = choresForPlan(requestedIds, space)
   const chores = all.filter(c => c.schedulable)
@@ -259,7 +316,7 @@ function buildPlan(minutes, requestedIds, space) {
     // than as rows in it. Scheduling by efficiency would bury every one of
     // them behind a dishwasher; folding them into the total corrupts it.
     tasks: taskRows(space),
-    agenda: withRunningTotal(agenda(plan, unestimated)),
+    agenda: withDoneInline(withRunningTotal(agenda(plan, unestimated)), doneRows(space)),
     // Solo reach per chore, so the "what fits" screen can answer
     // "how far do I get with just this one" without a second request.
     reach: chores.map(c => ({ choreId: c.id, name: c.name, ...reach(c, minutes) })),
@@ -358,11 +415,20 @@ if (!INGEST_TOKEN) {
 const transcribeQueue = []
 let transcribing = false
 
+/**
+ * What the transcriber has actually been doing.
+ *
+ * The glasses can prove audio left the building; without this there was no way
+ * to see what happened to it after, short of reading the server's terminal.
+ */
+const sttStats = { queued: 0, ok: 0, empty: 0, failed: 0, lastError: null, lastText: null, lastMs: 0 }
+
 function enqueueTranscription(sessionId, pcm, body) {
   // A backlog means the model is slower than the speech. Dropping the oldest
   // is better than falling further behind for the rest of the conversation.
   if (transcribeQueue.length > 8) transcribeQueue.shift()
   transcribeQueue.push({ sessionId, pcm, body })
+  sttStats.queued += 1
   void drainTranscriptions()
 }
 
@@ -372,14 +438,23 @@ async function drainTranscriptions() {
   try {
     while (transcribeQueue.length) {
       const { sessionId, pcm, body } = transcribeQueue.shift()
+      const startedAt = Date.now()
       try {
         const out = await transcribePcm(pcm, { sampleRate: body.sampleRate, channels: body.channels })
+        sttStats.lastMs = Date.now() - startedAt
         if (!out.ok) {
+          sttStats.failed += 1
+          sttStats.lastError = String(out.error || 'failed').slice(0, 60)
           console.warn(`[stt] ${out.error}`)
           continue
         }
         const text = String(out.text || '').trim()
-        if (!text) continue
+        if (!text) {
+          sttStats.empty += 1
+          continue
+        }
+        sttStats.ok += 1
+        sttStats.lastText = text.slice(0, 60)
         const result = coach.addSegment(sessionId, {
           text,
           speaker: body.speakerRole === 'self' ? 'me' : body.speaker || 'someone',
@@ -389,6 +464,8 @@ async function drainTranscriptions() {
         })
         if (result.ok && !result.duplicate) queueCoachCue(result.session.space, { reason: 'audio' })
       } catch (err) {
+        sttStats.failed += 1
+        sttStats.lastError = String(err.message || err).slice(0, 60)
         console.warn(`[stt] ${err.message}`)
       }
     }
@@ -495,7 +572,18 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
+  if (req.method === 'GET' && url.pathname === '/status') {
+    try {
+      const html = readFileSync(join(WEB_DIR, 'status.html'))
+      cors(res)
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
+      return res.end(html)
+    } catch {
+      return json(res, 404, { error: 'not found' })
+    }
+  }
+
+  if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/dashboard' || url.pathname === '/index.html')) {
     try {
       const html = readFileSync(join(WEB_DIR, 'index.html'))
       cors(res)
@@ -653,6 +741,18 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { items: inbox.active(), pending: inbox.pending().length })
   }
 
+  if (req.method === 'POST' && url.pathname === '/tasks') {
+    let body = {}
+    try {
+      const raw = await readBody(req)
+      if (raw) body = JSON.parse(raw)
+    } catch (err) {
+      return json(res, 400, { error: `bad body: ${err.message}` })
+    }
+    const result = tasks.addTask(body)
+    return json(res, result.ok ? 200 : 400, { ...result, tasks: tasks.list() })
+  }
+
   const taskMatch = url.pathname.match(/^\/task\/([^/]+)\/(done|reopen|note)$/)
   if (req.method === 'POST' && taskMatch) {
     const id = decodeURIComponent(taskMatch[1])
@@ -792,6 +892,7 @@ const server = http.createServer(async (req, res) => {
       stats: checklists.allStats(),
       inbox: inbox.grouped(),
       tasks: tasks.list(),
+      stt: { ...sttStats, ...transcriberInfo() },
       jobs: jobs.summary(),
     })
   }

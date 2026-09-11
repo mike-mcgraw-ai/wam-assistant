@@ -76,6 +76,14 @@ const DEFAULTS = {
    * Rows of content, between header and footer.
    * 9 visible lines total: header + blank + 6 rows + footer.
    */
+  /**
+   * Show the marker key and the click hint on the running order.
+   *
+   * Two rows out of nine, which is expensive — this is here because the
+   * markers are new, and it is one line to turn off once they are not.
+   */
+  hints: true,
+
   rowsPerPage: 7,
   /**
    * Hard ceilings per rendered page.
@@ -116,6 +124,8 @@ export const config = {
   audioMinRms: Number(stored('opsboard.audioMinRms')) || DEFAULTS.audioMinRms,
   timeoutMs: DEFAULTS.timeoutMs,
   rowsPerPage: DEFAULTS.rowsPerPage,
+  // Off with: localStorage.setItem('opsboard.hints', 'off')
+  hints: stored('opsboard.hints') !== 'off',
   maxLines: DEFAULTS.maxLines,
   maxChars: DEFAULTS.maxChars,
 }

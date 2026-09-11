@@ -48,6 +48,7 @@ export class Tasks {
      * @type {Map<string, Array<{id: string, text: string, by: string, at: number}>>}
      */
     this.notes_ = new Map()
+    this.customTasks = []
     this.#load()
   }
 
@@ -59,6 +60,7 @@ export class Tasks {
       for (const [id, value] of Object.entries(raw.notes || {})) {
         if (Array.isArray(value)) this.notes_.set(id, value)
       }
+      if (Array.isArray(raw.customTasks)) this.customTasks = raw.customTasks.filter(task => task?.id && task?.label)
     } catch (err) {
       console.warn(`[tasks] could not read store: ${err.message}`)
     }
@@ -71,7 +73,11 @@ export class Tasks {
       writeFileSync(
         this.storePath,
         JSON.stringify(
-          { done: Object.fromEntries(this.done), notes: Object.fromEntries(this.notes_) },
+          {
+            done: Object.fromEntries(this.done),
+            notes: Object.fromEntries(this.notes_),
+            customTasks: this.customTasks,
+          },
           null,
           2,
         ),
@@ -89,6 +95,14 @@ export class Tasks {
     } catch {
       // best effort
     }
+  }
+
+  taskDefs() {
+    return [...(this.config.tasks || []), ...this.customTasks]
+  }
+
+  #taskById(id) {
+    return this.taskDefs().find(t => t.id === id)
   }
 
   /**
@@ -138,7 +152,7 @@ export class Tasks {
    */
   list(now = Date.now()) {
     const hideClosed = this.config.filters?.hideClosed === true
-    return (this.config.tasks || [])
+    return this.taskDefs()
       .filter(t => !this.done.has(t.id))
       .map(t => {
         const win = this.#windowState(t, now)
@@ -175,7 +189,7 @@ export class Tasks {
 
   /** Seeded notes from config first, then anything added since. */
   notes(id) {
-    const task = (this.config.tasks || []).find(t => t.id === id)
+    const task = this.#taskById(id)
     const seeded = (task?.notes || []).map((text, i) => ({
       id: `seed-${i}`,
       text,
@@ -185,6 +199,52 @@ export class Tasks {
     return [...seeded, ...(this.notes_.get(id) ?? [])]
   }
 
+  addTask(input = {}, now = Date.now()) {
+    const label = String(input.label ?? input.text ?? '').trim().slice(0, 80)
+    if (!label) return { ok: false, error: 'empty task' }
+
+    const clientId = String(input.clientId || '').trim()
+    if (clientId) {
+      const existing = this.customTasks.find(t => t.clientId === clientId)
+      if (existing) return { ok: true, duplicate: true, task: existing }
+    }
+
+    const base =
+      label
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 40) || `task-${now.toString(36)}`
+    const ids = new Set(this.taskDefs().map(t => t.id))
+    let id = base
+    let suffix = 2
+    while (ids.has(id)) {
+      id = `${base}-${suffix}`
+      suffix += 1
+    }
+
+    const estimate = Number(input.estimateMinutes)
+    const task = {
+      id,
+      label,
+      weight: input.weight === 'normal' ? 'normal' : 'big',
+      window: ['business', 'evening', 'anytime'].includes(input.window) ? input.window : 'anytime',
+      space: input.space === 'ops' ? 'ops' : 'life',
+      ...(Number.isFinite(estimate) && estimate > 0 ? { estimateMinutes: Math.round(estimate) } : {}),
+      ...(String(input.note || '').trim() ? { note: String(input.note).trim().slice(0, 120) } : {}),
+      ...(clientId ? { clientId } : {}),
+    }
+
+    this.customTasks.push(task)
+    this.#log({ type: 'task_add', id, label, by: input.by || 'me', at: now })
+    this.#persist()
+
+    const firstNote = String(input.firstNote || '').trim()
+    if (firstNote) this.addNote(id, firstNote, input.by, `${clientId || id}:note`, now)
+
+    return { ok: true, task }
+  }
+
   /**
    * Add a note.
    *
@@ -192,7 +252,7 @@ export class Tasks {
    * retries, and a retry must not leave you with the same sentence twice.
    */
   addNote(id, text, by = 'me', clientId = null, now = Date.now()) {
-    if (!(this.config.tasks || []).some(t => t.id === id)) {
+    if (!this.#taskById(id)) {
       return { ok: false, error: `unknown task "${id}"` }
     }
     const body = String(text ?? '').trim().slice(0, 400)
@@ -220,7 +280,7 @@ export class Tasks {
   }
 
   complete(id, done = true, now = Date.now()) {
-    if (!(this.config.tasks || []).some(t => t.id === id)) {
+    if (!this.#taskById(id)) {
       return { ok: false, error: `unknown task "${id}"` }
     }
     if (done) this.done.set(id, { doneAt: now })

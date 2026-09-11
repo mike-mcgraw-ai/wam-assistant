@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#101214">
+<title>WAM Status</title>
+<style>
+  :root{
+    --bg:#101214; --panel:#1a1d20; --line:#343941;
+    --ink:#f1f4f2; --dim:#9aa39e; --accent:#35d386; --warn:#e0b341;
+    color-scheme:dark;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    padding:env(safe-area-inset-top) 0 calc(env(safe-area-inset-bottom) + 84px);
+  }
+  header{
+    position:sticky; top:0; z-index:2; background:#0a0b0c;
+    display:flex; align-items:center; justify-content:space-between;
+    padding:14px 16px; border-bottom:1px solid var(--line);
+  }
+  h1{font-size:18px; margin:0; font-weight:700}
+  main{padding:16px; max-width:760px; margin:0 auto}
+  section{
+    background:var(--panel); border:1px solid var(--line);
+    border-radius:12px; padding:14px; margin:0 0 14px;
+  }
+  h2{font-size:15px; margin:0 0 10px; color:var(--dim); font-weight:700}
+  .big{font-size:24px; font-weight:800}
+  .ok{color:var(--accent)}
+  .warn{color:var(--warn)}
+  .meta{color:var(--dim); font-size:13px; margin-top:4px}
+  .row{display:flex; justify-content:space-between; gap:12px; padding:7px 0; border-top:1px solid var(--line)}
+  .row:first-child{border-top:0}
+  .row span:last-child{text-align:right; color:var(--dim)}
+  button{
+    border:1px solid var(--line); border-radius:10px; background:#25282c;
+    color:var(--accent); font:inherit; font-weight:700; padding:10px 13px;
+  }
+  .phone-nav{
+    position:fixed; left:0; right:0; bottom:0; z-index:5;
+    display:grid; grid-template-columns:repeat(4,1fr); gap:1px;
+    padding:8px 8px calc(env(safe-area-inset-bottom) + 8px);
+    background:#08090a; border-top:1px solid var(--line);
+  }
+  .phone-nav a{
+    color:var(--dim); text-decoration:none; text-align:center;
+    padding:9px 4px; border-radius:10px; font-size:13px; font-weight:700;
+  }
+  .phone-nav a.active{background:var(--accent); color:#061a12}
+</style>
+</head>
+<body>
+<header>
+  <h1>Status</h1>
+  <button id="refresh" type="button">Refresh</button>
+</header>
+
+<main>
+  <section>
+    <div id="state" class="big warn">Checking...</div>
+    <div id="when" class="meta"></div>
+  </section>
+
+  <section>
+    <h2>Hub</h2>
+    <div class="row"><span>Metrics</span><span id="metrics">--</span></div>
+    <div class="row"><span>Uptime</span><span id="uptime">--</span></div>
+    <div class="row"><span>AI cue interval</span><span id="cue">--</span></div>
+  </section>
+
+  <section>
+    <h2>Listening</h2>
+    <div class="row"><span>STT provider</span><span id="sttProvider">--</span></div>
+    <div class="row"><span>STT ready</span><span id="sttReady">--</span></div>
+    <div class="row"><span>Model</span><span id="sttModel">--</span></div>
+    <div class="row"><span>Coach Ops</span><span id="coachOps">--</span></div>
+    <div class="row"><span>Coach Life</span><span id="coachLife">--</span></div>
+  </section>
+</main>
+
+<nav class="phone-nav" aria-label="WAM phone pages">
+  <a href="/dashboard">List</a>
+  <a href="/notes">Notes</a>
+  <a href="/coach">Coach</a>
+  <a class="active" href="/status">Status</a>
+</nav>
+
+<script>
+const $ = id => document.getElementById(id)
+const fmtSeconds = value => {
+  const seconds = Math.max(0, Math.floor(Number(value) || 0))
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  if (hours) return `${hours}h ${minutes}m`
+  if (minutes) return `${minutes}m`
+  return `${seconds}s`
+}
+async function load() {
+  try {
+    const res = await fetch('/health', { cache: 'no-store' })
+    if (!res.ok) throw new Error('server ' + res.status)
+    const health = await res.json()
+    $('state').textContent = health.ok ? 'Hub online' : 'Hub returned a problem'
+    $('state').className = 'big ' + (health.ok ? 'ok' : 'warn')
+    $('when').textContent = 'Updated ' + new Date().toLocaleTimeString()
+    $('metrics').textContent = health.metrics ?? '--'
+    $('uptime').textContent = fmtSeconds(health.uptime)
+    $('cue').textContent = Math.round((health.aiCueIntervalMs || 0) / 1000) + 's'
+    $('sttProvider').textContent = health.stt?.provider || '--'
+    $('sttReady').textContent = health.stt?.configured ? 'yes' : 'no'
+    $('sttModel').textContent = health.stt?.model || '--'
+    $('coachOps').textContent = health.coach?.ops ? 'listening' : 'off'
+    $('coachLife').textContent = health.coach?.life ? 'listening' : 'off'
+  } catch (err) {
+    $('state').textContent = 'Hub unreachable'
+    $('state').className = 'big warn'
+    $('when').textContent = err.message
+  }
+}
+$('refresh').onclick = load
+load()
+setInterval(load, 15000)
+</script>
+</body>
+</html>

@@ -18,6 +18,7 @@ import type {
   Space,
   StartableChecklist,
   TaskRow,
+  DoneRow,
 } from './types'
 import {
   assemble,
@@ -28,6 +29,11 @@ import {
   inboxItemRow,
   agendaRow,
   taskRow,
+  ruleRight,
+  ruleCentred,
+  ago,
+  clockShort,
+  countdown,
   wrap,
   mins,
   bar,
@@ -44,6 +50,7 @@ export type View =
   | { kind: 'checklist'; runId: string; cursor: number }
   | { kind: 'picker'; cursor: number }
   | { kind: 'plan'; cursor: number }
+  | { kind: 'chores'; cursor: number }
   | { kind: 'task'; taskId: string; cursor: number }
   | { kind: 'cue' }
   | { kind: 'pong' }
@@ -113,6 +120,25 @@ export interface UiState {
    * exactly how it felt the first time.
    */
   lastAudioAt: number | null
+  /**
+   * Counters down the audio path.
+   *
+   * A listening session that produces nothing has six places it can fail and
+   * looked identical at all of them. These say which one.
+   */
+  audio: {
+    open: boolean
+    frames: number
+    chunks: number
+    sent: number
+    rejected: number
+    lastRms: number
+    /** what shape the host actually delivered PCM in */
+    kind: string
+    /** audio events delivered by the host, counted before any of our gating */
+    raw: number
+    error: string | null
+  }
 }
 
 /**
@@ -147,11 +173,11 @@ export type IndexRow =
  */
 export type PlanRow =
   | { kind: 'task'; task: TaskRow }
-  | { kind: 'space' }
-  | { kind: 'agenda'; row: AgendaRow }
+  | { kind: 'chores' }
+  | { kind: 'agenda'; row: AgendaRow | DoneRow }
 
 /** Is this agenda row a step whose clock is already going? */
-function isRunning(state: UiState, row: AgendaRow): boolean {
+function isRunning(state: UiState, row: AgendaRow | DoneRow): boolean {
   if (row.kind !== 'do') return false
   const run = state.snapshot?.checklists?.active.find(r => r.checklistId === row.choreId && !r.complete)
   const item = run?.items.find(i => i.id === row.stepId)
@@ -164,14 +190,84 @@ export function planRows(state: UiState): PlanRow[] {
 
   const tasks: PlanRow[] = (plan.tasks ?? []).map(task => ({ kind: 'task', task }))
   const agenda: PlanRow[] = plan.agenda.map(row => ({ kind: 'agenda', row }))
-  const gap: PlanRow[] = tasks.length && agenda.length ? [{ kind: 'space' }] : []
+  // The old blank separator, now carrying a name and a destination. A row
+  // that only created space was the cheapest thing on the page to improve.
+  const gap: PlanRow[] = agenda.length ? [{ kind: 'chores' }] : []
 
   return [...tasks, ...gap, ...agenda]
 }
 
 /** Rows the cursor is allowed to stop on. */
 export function selectable(row: PlanRow | undefined): boolean {
-  return row !== undefined && row.kind !== 'space'
+  return row !== undefined
+}
+
+/**
+ * Every chore, whole, as one block — not the interleaved running order.
+ *
+ * The running order answers "what can I do in the time I have". This answers
+ * "what is actually on my plate", which is a different question and was only
+ * reachable by opening chores one at a time.
+ */
+export type ChoreRow =
+  | { kind: 'run'; run: ChecklistRun }
+  | { kind: 'start'; list: StartableChecklist }
+
+/**
+ * The chores, one row each, with a progress bar.
+ *
+ * A level between the running order and the steps. The running order answers
+ * "what can I do in the time I have" and is interleaved across chores; this
+ * answers "what is on my plate", one chore per row, and drills into the steps.
+ * Flattening the two into one screen made a long list you had to page through
+ * to find anything.
+ */
+export function choreRows(state: UiState): ChoreRow[] {
+  const rows: ChoreRow[] = []
+  // Finished chores stay on the list. A chore that vanishes the moment you
+  // tick the last step takes its own evidence with it, and leaves you no way
+  // to start it again — which for laundry is a daily problem, not an edge case.
+  for (const run of state.snapshot?.checklists?.active ?? []) {
+    if (!inSpace(run.space, state.space)) continue
+    rows.push({ kind: 'run', run })
+  }
+  const running = new Set(rows.map(r => (r.kind === 'run' ? r.run.checklistId : '')))
+  for (const list of startable(state)) {
+    if (!running.has(list.id)) rows.push({ kind: 'start', list })
+  }
+  return rows
+}
+
+function renderChores(state: UiState, cursor: number): string {
+  const rows = choreRows(state)
+  if (rows.length === 0) {
+    return assemble([clockLine(state), spaceLine(state), '', 'No chores.'], config.maxChars, config.maxLines)
+  }
+
+  const win = windowFollow(cursor, rows.length, config.rowsPerPage - 3, state.scrollTop)
+  const lines: string[] = [clockLine(state), ruleRight('Chores', false)]
+  for (let i = win.start; i < win.end; i += 1) {
+    const row = rows[i]
+    if (row.kind === 'run') {
+      if (row.run.complete) {
+        const armed = state.armedTaskId === row.run.runId
+        const right = armed ? 'reset?' : `${ago(row.run.lastAt ?? null)} ago`
+        lines.push(
+          clip(
+            `${i === cursor ? '>' : ' '}${bar(row.run.total, row.run.total)} ${pad(row.run.name, 12)} ${right}`,
+            LINE_CHARS,
+          ),
+        )
+      } else lines.push(checklistRow(row.run, i === cursor))
+    }
+    else {
+      lines.push(
+        clip(`${i === cursor ? '>' : ' '}${bar(0, row.list.total)} ${pad(row.list.name, 12)} 0/${row.list.total}`, LINE_CHARS),
+      )
+    }
+  }
+  lines.push('', 'click to open')
+  return assemble(lines, config.maxChars, config.maxLines)
 }
 
 /**
@@ -295,7 +391,10 @@ export function clockLine(_state: UiState, now = new Date()): string {
   const h24 = now.getHours()
   const h = h24 % 12 === 0 ? 12 : h24 % 12
   const time = `${h}:${String(now.getMinutes()).padStart(2, '0')}${h24 < 12 ? 'a' : 'p'}`
-  return clip(`${dateLabel(now)}  ${time}`, LINE_CHARS)
+  // The build number lives here now. Reading it used to mean toggling
+  // Diagnostics, which is a lot of ceremony for one line you check every time
+  // you install something.
+  return clip(`${dateLabel(now)}  ${time}  v${APP_VERSION}`, LINE_CHARS)
 }
 
 /**
@@ -329,10 +428,15 @@ export function spaceLine(state: UiState): string {
   // means a chunk of actual speech went up in the last few seconds; MIC. means
   // listening but hearing nothing. A recording indicator that cannot tell you
   // those apart is not worth the characters.
+  // Three states, because "trying" and "hearing" are different failures.
+  // MIC? opened but no audio has arrived at all; MIC. audio arriving but under
+  // the speech threshold; MIC* speech actually going up.
   const mic = state.coachSession?.active
     ? state.lastAudioAt && Date.now() - state.lastAudioAt < 4000
       ? '  MIC*'
-      : '  MIC.'
+      : state.audio.frames > 0
+        ? '  MIC.'
+        : '  MIC?'
     : ''
 
   const ai = aiWidgetText(state)
@@ -505,7 +609,19 @@ function renderChecklist(state: UiState, runId: string, cursor: number): string 
 
   // The only footer left in the app: a flagged row resets instead of ticking,
   // which is the one place the click does something you would not expect.
-  if (run.items[cursor]?.suspect) lines.push('click resets this step')
+  // What a click does, spelled out while this is still new. Deliberately not
+  // the double-tap: going back is the one gesture that is already obvious.
+  const item = run.items[cursor]
+  const tip = item?.suspect
+    ? 'running too long - click to reset'
+    : item?.done
+      ? `done ${clockShort(item.at)} - click to undo`
+      : item?.running
+        ? `running ${mins(item.elapsedMs)} - click to finish`
+        : item?.stepKind === 'wait' && item.endsAt !== null
+          ? `${countdown(item.remainingSeconds)} left - click to finish`
+          : 'click to start'
+  lines.push(tip)
   return assemble(lines, config.maxChars, config.maxLines)
 }
 
@@ -548,6 +664,38 @@ function renderInbox(state: UiState, group: string, cursor: number): string {
  * gestures are the same as everywhere else — a row spent restating either was
  * a row not spent on the list.
  */
+/**
+ * The bottom line, describing whatever the cursor is on.
+ *
+ * It replaces a fixed hint that said the same thing everywhere and an `...`
+ * overflow marker that said nothing at all. The last row of a nine-row screen
+ * is too expensive to spend on either. It carries both the state of the row
+ * and what a click will do to it.
+ */
+function planTip(state: UiState, rows: PlanRow[], cursor: number): string {
+  const ruleAt = rows.findIndex(r => r.kind === 'chores')
+  const row = rows[cursor]
+  if (!row) return 'Chores'
+
+  // Above the line the rule is just a heading for what is below it — the
+  // big-ticket rows say what they are, and a tip about them on a divider that
+  // does not belong to them reads as noise.
+  if (ruleAt !== -1 && cursor < ruleAt) return 'Chores'
+  if (row.kind === 'chores') return 'Chores - click to open'
+  if (row.kind === 'task') {
+    return state.armedTaskId === row.task.taskId
+      ? '! Task - click again to finish'
+      : '! Task - click to open'
+  }
+
+  const r = row.row
+  if (r.kind === 'gap') return '~ Waiting - nothing to start'
+  if (r.kind === 'done') return `[x] Done ${ago(r.at)} ago - click to undo`
+  if (isRunning(state, r)) return '[*] Going - click to finish'
+  if (!r.open) return '( ) Later - earlier step first'
+  return '[>] Ready - click to start'
+}
+
 function renderPlan(state: UiState, cursor: number): string {
   const plan = state.plan
   if (!plan) {
@@ -559,7 +707,15 @@ function renderPlan(state: UiState, cursor: number): string {
     return 'WAM\n\nNothing with known step times.\n\nAdd estimates in the config.'
   }
 
-  const win = windowFollow(cursor, rows.length, config.rowsPerPage, state.scrollTop)
+  // The rule carries the tip, but it scrolls off once you page past it. On
+  // those pages the tip moves to the bottom row instead, so what a click does
+  // is never more than a glance away — and no page pays for it twice.
+  const ruleAt = rows.findIndex(r => r.kind === 'chores')
+  const full = windowFollow(cursor, rows.length, config.rowsPerPage, state.scrollTop)
+  const ruleShown = ruleAt >= full.start && ruleAt < full.end
+  const win = ruleShown
+    ? full
+    : windowFollow(cursor, rows.length, config.rowsPerPage - 1, state.scrollTop)
 
   // A blank under the clock as well. The header used to butt straight into the
   // first task and the whole screen read as one wall of characters; the list
@@ -568,8 +724,8 @@ function renderPlan(state: UiState, cursor: number): string {
   for (let i = win.start; i < win.end; i += 1) {
     const row = rows[i]
     const point = i === cursor ? '>' : ' '
-    if (row.kind === 'space') {
-      lines.push('')
+    if (row.kind === 'chores') {
+      lines.push(ruleCentred(planTip(state, rows, cursor), i === cursor))
     } else if (row.kind === 'task') {
       const armed = state.armedTaskId === row.task.taskId
       lines.push(clip(`${point}${taskRow(row.task, armed)}`, LINE_CHARS))
@@ -577,6 +733,8 @@ function renderPlan(state: UiState, cursor: number): string {
       lines.push(clip(`${point}${agendaRow(row.row, isRunning(state, row.row))}`, LINE_CHARS))
     }
   }
+
+  if (!ruleShown) lines.push(planTip(state, rows, cursor))
 
   return assemble(lines, config.maxChars, config.maxLines)
 }
@@ -650,32 +808,50 @@ function renderCue(state: UiState): string {
   const cue = state.cue
   const lines: string[] = []
 
-  if (cue) {
-    lines.push(header(state, cue.title), '')
-    for (const line of cue.lines) {
-      for (const wrapped of wrap(line, LINE_CHARS)) lines.push(wrapped)
+  // The status goes first and unconditionally while a session is live. It used
+  // to sit in the no-cue branch, and starting Listen always sets a cue — so the
+  // one screen meant to show whether the microphone is working never showed it.
+  if (session?.active) {
+    const a = state.audio
+    const mic = !a.open ? 'CLOSED' : a.sent > 0 ? 'MIC*' : a.frames > 0 ? 'MIC.' : 'MIC?'
+    lines.push(
+      clipToWidth(`${mic}  ${clip(session.modeName, 14)}  ${session.segmentCount} lines`),
+      clipToWidth(`raw ${a.raw}  frames ${a.frames}  chunks ${a.chunks}  sent ${a.sent}`),
+      clipToWidth(`quiet ${a.rejected}  rms ${a.lastRms}/${config.audioMinRms}  pcm ${a.kind}`),
+    )
+    if (a.error) lines.push(clipToWidth(`err ${a.error}`))
+
+    // The other half of the path. The glasses can prove audio left; this says
+    // what the hub did with it.
+    const stt = state.snapshot?.stt
+    if (stt) {
+      lines.push(
+        clipToWidth(`stt ${stt.provider}${stt.configured ? '' : ' UNSET'}  ok ${stt.ok}  empty ${stt.empty}  fail ${stt.failed}  ${stt.lastMs}ms`),
+      )
+      if (stt.lastError) lines.push(clipToWidth(`stt err ${stt.lastError}`))
     }
-  } else if (session?.active) {
-    lines.push(header(state, `${clip(session.modeName, 20)}  ${session.segmentCount} lines`), '')
-  } else {
+  } else if (!cue) {
     return assemble([header(state, 'Coach'), '', 'Not listening.'], config.maxChars, config.maxLines)
   }
 
-  // The transcript, newest last so it reads like a conversation. Without this
-  // the screen said "3 transcript lines" and showed none of them, which tells
-  // you the machinery is running but nothing about whether it heard you right.
+  if (cue) {
+    lines.push('')
+    for (const line of cue.lines) {
+      for (const wrapped of wrap(line, LINE_CHARS)) lines.push(wrapped)
+    }
+  }
+
   const segments = session?.recentSegments ?? []
   if (segments.length > 0) {
-    if (cue) lines.push('')
+    lines.push('')
     const room = Math.max(2, config.maxLines - lines.length)
-    const recent = segments.slice(-room)
-    for (const seg of recent) {
-      const who = seg.speaker === 'me' ? '>' : '-'
-      const wrapped = wrap(`${who} ${seg.text}`, LINE_CHARS)
-      for (const line of wrapped) lines.push(line)
+    for (const seg of segments.slice(-room)) {
+      for (const line of wrap(`${seg.speaker === 'me' ? '>' : '-'} ${seg.text}`, LINE_CHARS)) {
+        lines.push(line)
+      }
     }
   } else if (session?.active) {
-    lines.push('Listening. Nothing heard yet.')
+    lines.push('', 'Nothing heard yet.')
   }
 
   return assemble(lines, config.maxChars, config.maxLines)
@@ -690,6 +866,8 @@ export function render(state: UiState): string {
       return renderBoard(state, state.view.boardId, state.view.cursor)
     case 'task':
       return renderTaskDetail(state, state.view.taskId, state.view.cursor)
+    case 'chores':
+      return renderChores(state, state.view.cursor)
     case 'checklist':
       return renderChecklist(state, state.view.runId, state.view.cursor)
     case 'picker':

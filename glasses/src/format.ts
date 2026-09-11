@@ -1,5 +1,5 @@
-import { layout, measure, USABLE_PX } from './metrics'
-import type { AgendaRow, Board, ChecklistItem, ChecklistRun, ChecklistStats, InboxGroup, InboxItem, Metric, Status, TaskRow } from './types'
+import { layout, measure, charWidth, USABLE_PX } from './metrics'
+import type { AgendaRow, DoneRow, Board, ChecklistItem, ChecklistRun, ChecklistStats, InboxGroup, InboxItem, Metric, Status, TaskRow } from './types'
 
 /**
  * Text formatting for a 576x288 monochrome canvas.
@@ -75,6 +75,12 @@ export function clipToWidth(text: string): string {
 
 export function clip(text: string, width: number): string {
   return text.length > width ? text.slice(0, width) : text
+}
+
+/** How long since a moment: "12m" / "3h" / "2d". */
+export function ago(at: number | null): string {
+  if (!at) return '--'
+  return age(Math.max(0, Math.round((Date.now() - at) / 1000)))
 }
 
 /** "3m" / "2h" / "--" — short enough to sit at the end of a row. */
@@ -198,7 +204,16 @@ export function checklistItemRow(item: ChecklistItem, selected: boolean): string
   else if (item.stepKind === 'wait' && item.waitMinutes) right = `~${item.waitMinutes}m`
   else if (item.estimateMinutes) right = `~${item.estimateMinutes}m`
 
-  return clip(`${cursor}${box} ${pad(item.label, 24)} ${right}`, LINE_CHARS)
+  // Pixel layout, not a 24-character cap. The cap chopped "Move to dryer" to
+  // "Move to drye" with a third of the display still empty — a limit invented
+  // to be safe rather than measured.
+  return clipToWidth(
+    layout([
+      { text: `${cursor}${box}`, at: 0 },
+      { text: item.label, at: COL.label - 130 },
+      { text: right, end: COL.right },
+    ]),
+  )
 }
 
 /** "0:47" — offset from the start of a planned block. */
@@ -257,7 +272,21 @@ export const COL = {
   taskWhen: 360,
 }
 
-export function agendaRow(row: AgendaRow, running = false): string {
+export function agendaRow(row: AgendaRow | DoneRow, running = false): string {
+  // Done, and staying visible. Its time is off the totals but the row remains
+  // so an accidental click can be taken back and so the page shows the work
+  // you actually did — a list that only shrinks is no evidence of anything.
+  if (row.kind === 'done') {
+    return clipToWidth(
+      layout([
+        { text: mins(row.ms), end: COL.dur },
+        { text: '[x]', at: COL.marker },
+        { text: row.step, at: COL.label },
+        { text: clockShort(row.at), end: COL.right },
+      ]),
+    )
+  }
+
   const dur = row.ms === null ? '--' : mins(row.ms)
   const work = row.cumulativeBusyMs == null ? '--' : mins(row.cumulativeBusyMs)
   const wall = row.cumulativeWallMs == null ? '--' : mins(row.cumulativeWallMs)
@@ -333,6 +362,48 @@ export function taskRow(row: TaskRow, armed = false): string {
       { text: row.label, at: COL.taskLabel },
       { text: when, end: COL.taskWhen },
       { text: est, end: COL.right },
+    ]),
+  )
+}
+
+/**
+ * Centre a short label across the display.
+ *
+ * Pixel-centred, not space-padded to a character count — the font is
+ * proportional, so counting characters puts "Chores" visibly off-centre.
+ */
+/**
+ * A rule with the text set into the middle of it.
+ *
+ * The divider, the marker key and the tip were three separate things eating
+ * three rows out of nine. They are one row now: the dashes give the page its
+ * break, and what sits in the gap describes whatever the cursor is on.
+ */
+export function ruleCentred(text: string, selected = false): string {
+  const mark = selected ? '>' : ' '
+  const dash = charWidth('-')
+  const gap = charWidth(' ')
+  const body = measure(text) + gap * 2
+  const room = COL.right - measure(mark) - body
+  const left = Math.max(0, Math.floor(room / 2 / dash))
+  const right = Math.max(0, Math.floor((room - left * dash) / dash))
+  return clipToWidth(`${mark}${'-'.repeat(left)} ${text} ${'-'.repeat(right)}`)
+}
+
+export function ruleRight(text: string, selected = false): string {
+  // Right-aligned to the same column the times end in, with the run-up filled
+  // by a rule. Centring put it at no particular place — the visible text stops
+  // short of the display edge, so "middle" looked wrong — and a right edge
+  // shared with the numbers is the one your eye is already scanning down.
+  const mark = selected ? '>' : ' '
+  const dash = charWidth('-')
+  const labelStart = COL.right - measure(text)
+  const count = Math.max(0, Math.floor((labelStart - measure(mark) - charWidth(' ') * 2) / dash))
+  return clipToWidth(
+    layout([
+      { text: mark, at: 0 },
+      { text: '-'.repeat(count), at: measure(mark) + charWidth(' ') },
+      { text, end: COL.right },
     ]),
   )
 }
