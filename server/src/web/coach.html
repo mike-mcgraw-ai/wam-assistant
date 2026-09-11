@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#101214">
+<title>Coach</title>
+<style>
+  :root{
+    --bg:#101214; --panel:#1a1d20; --field:#25282c; --line:#343941;
+    --ink:#f1f4f2; --dim:#9aa39e; --accent:#35d386; --danger:#ff6464;
+    color-scheme:dark;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    padding:env(safe-area-inset-top) 0 calc(env(safe-area-inset-bottom) + 24px);
+  }
+  header{
+    position:sticky; top:0; z-index:2; background:#0a0b0c;
+    display:flex; align-items:center; justify-content:space-between;
+    padding:14px 16px; border-bottom:1px solid var(--line);
+  }
+  h1{font-size:18px; margin:0; font-weight:700}
+  a{color:var(--dim); text-decoration:none; font-size:13px}
+  main{padding:16px; max-width:760px; margin:0 auto}
+  section{
+    background:var(--panel); border:1px solid var(--line);
+    border-radius:12px; padding:14px; margin:0 0 14px;
+  }
+  h2{font-size:15px; margin:0 0 12px; color:var(--dim); font-weight:700}
+  label{display:block; color:var(--dim); font-size:13px; font-weight:700; margin:12px 0 6px}
+  input, textarea{
+    width:100%; border:1px solid var(--line); border-radius:10px;
+    background:var(--field); color:var(--ink); font:inherit; padding:12px;
+  }
+  textarea{min-height:150px; resize:vertical}
+  button{
+    border:1px solid var(--line); border-radius:10px; background:var(--field);
+    color:var(--accent); font:inherit; font-weight:700; padding:10px 13px;
+  }
+  button.primary{background:var(--accent); color:#061a12; border-color:transparent}
+  button.danger{color:var(--danger)}
+  .row{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+  .row > *{flex:1 1 auto}
+  .tabs,.chips{display:flex; gap:8px; flex-wrap:wrap}
+  .tab,.chip,.toggle{
+    flex:0 0 auto; padding:10px 13px; border-radius:10px;
+  }
+  .tab.on,.chip.on,.toggle.on{background:var(--accent); color:#061a12; border-color:transparent}
+  .grid{display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px}
+  .status{min-height:20px; color:var(--dim); font-size:13px; margin-top:8px}
+  .session{display:flex; align-items:center; justify-content:space-between; gap:10px}
+  .big{font-size:18px; font-weight:800}
+  .meta{color:var(--dim); font-size:13px}
+  .cue{border-left:3px solid var(--accent); padding-left:10px; margin-top:10px}
+  .segment{border-top:1px solid var(--line); padding:9px 0}
+  .segment:first-child{border-top:0}
+  @media (max-width:520px){.grid{grid-template-columns:1fr}.row{align-items:stretch}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Coach</h1>
+  <nav><a href="/">The List</a></nav>
+</header>
+
+<main>
+  <section>
+    <h2>Space</h2>
+    <div class="tabs">
+      <button class="tab" data-space="ops" type="button">Ops</button>
+      <button class="tab" data-space="life" type="button">Life</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Modes</h2>
+    <div id="modes" class="chips"></div>
+    <label for="name">Name</label>
+    <input id="name" autocomplete="off">
+    <label for="category">Category</label>
+    <input id="category" autocomplete="off" placeholder="Work, Family, Personal">
+    <label for="behavior">Behavior</label>
+    <textarea id="behavior"></textarea>
+
+    <label>Cue types</label>
+    <div id="cueTypes" class="grid"></div>
+
+    <label>How often Coach speaks up</label>
+    <div id="speakUp" class="chips">
+      <button class="chip" data-speak="low" type="button">Low</button>
+      <button class="chip" data-speak="medium" type="button">Medium</button>
+      <button class="chip" data-speak="high" type="button">High</button>
+    </div>
+
+    <div class="row">
+      <label><input id="promptLulls" type="checkbox"> Prompt on lulls</label>
+      <label><input id="periodicRecap" type="checkbox"> Periodic recap</label>
+    </div>
+    <div class="row">
+      <label>Recap minutes<input id="recapMinutes" type="number" min="1" max="15"></label>
+      <label>Lull seconds<input id="lullSeconds" type="number" min="20" max="300"></label>
+    </div>
+    <div class="row">
+      <button id="activate" type="button">Use for this space</button>
+      <button id="save" class="primary" type="button">Save mode</button>
+    </div>
+    <div id="modeStatus" class="status"></div>
+  </section>
+
+  <section>
+    <h2>Listening</h2>
+    <div class="session">
+      <div>
+        <div id="sessionTitle" class="big">Not listening</div>
+        <div id="sessionMeta" class="meta"></div>
+      </div>
+      <button id="sessionToggle" class="primary" type="button">Start</button>
+    </div>
+    <label for="speaker">Speaker</label>
+    <input id="speaker" autocomplete="off" value="someone">
+    <label for="segment">Transcript line</label>
+    <textarea id="segment" placeholder="Paste or dictate what was just said"></textarea>
+    <div class="row">
+      <button id="sendSegment" type="button">Add line</button>
+      <button id="cueNow" type="button">Cue now</button>
+    </div>
+    <div id="cue" class="cue"></div>
+    <div id="sessionStatus" class="status"></div>
+  </section>
+
+  <section>
+    <h2>Recent Transcript</h2>
+    <div id="segments" class="meta">No lines yet.</div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id)
+const esc = value => String(value ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))
+const uid = () => crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()
+const cueLabels = {
+  answers: 'Answers',
+  followups: 'Follow-ups',
+  explanations: 'Explanations',
+  factChecks: 'Fact-checks',
+  advice: 'Advice',
+  thoughts: 'Thoughts',
+}
+
+const state = {
+  space: localStorage.getItem('opsboard.space') === 'life' ? 'life' : 'ops',
+  modes: [],
+  activeModeBySpace: {},
+  mode: null,
+  session: null,
+  cue: null,
+}
+
+function headers(extra = {}) {
+  const token = localStorage.getItem('opsboard.readToken') || ''
+  return {
+    Accept: 'application/json',
+    ...extra,
+    ...(token ? { Authorization: 'Bearer ' + token } : {}),
+  }
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(path, { ...options, headers: headers(options.headers), cache: 'no-store' })
+  const payload = await res.json().catch(() => null)
+  if (!res.ok) throw new Error(payload?.error || 'server ' + res.status)
+  return payload
+}
+
+function activeModeId() {
+  return state.activeModeBySpace[state.space] || 'conversation'
+}
+
+function selectedMode() {
+  return state.mode || state.modes.find(mode => mode.id === activeModeId()) || state.modes[0] || null
+}
+
+function readModeForm() {
+  const mode = selectedMode()
+  if (!mode) return null
+  return {
+    ...mode,
+    name: $('name').value.trim(),
+    category: $('category').value.trim(),
+    behavior: $('behavior').value.trim(),
+    promptLulls: $('promptLulls').checked,
+    periodicRecap: $('periodicRecap').checked,
+    recapMinutes: Number($('recapMinutes').value) || 2,
+    lullSeconds: Number($('lullSeconds').value) || 60,
+  }
+}
+
+function say(id, msg) {
+  $(id).textContent = msg
+}
+
+function renderModes() {
+  const mode = selectedMode()
+  document.querySelectorAll('[data-space]').forEach(button => button.classList.toggle('on', button.dataset.space === state.space))
+  $('modes').innerHTML = state.modes.map(row =>
+    `<button class="chip ${row.id === mode?.id ? 'on' : ''}" data-mode="${esc(row.id)}" type="button">${esc(row.name)}</button>`
+  ).join('')
+
+  if (!mode) return
+  $('name').value = mode.name || ''
+  $('category').value = mode.category || ''
+  $('behavior').value = mode.behavior || ''
+  $('promptLulls').checked = mode.promptLulls === true
+  $('periodicRecap').checked = mode.periodicRecap === true
+  $('recapMinutes').value = mode.recapMinutes || 2
+  $('lullSeconds').value = mode.lullSeconds || 60
+
+  $('cueTypes').innerHTML = Object.entries(cueLabels).map(([key, label]) =>
+    `<button class="toggle ${mode.cueTypes?.[key] ? 'on' : ''}" data-cue-type="${key}" type="button">${mode.cueTypes?.[key] ? '✓ ' : ''}${label}</button>`
+  ).join('')
+  document.querySelectorAll('[data-speak]').forEach(button => button.classList.toggle('on', button.dataset.speak === mode.speakUp))
+}
+
+function renderSession() {
+  const session = state.session
+  $('sessionTitle').textContent = session?.active ? `Listening: ${session.modeName}` : 'Not listening'
+  $('sessionMeta').textContent = session?.active ? `${session.segmentCount} transcript line${session.segmentCount === 1 ? '' : 's'}` : `Mode: ${selectedMode()?.name || 'Conversation'}`
+  $('sessionToggle').textContent = session?.active ? 'Stop' : 'Start'
+  $('sessionToggle').classList.toggle('danger', session?.active)
+  $('sessionToggle').classList.toggle('primary', !session?.active)
+
+  const rows = session?.recentSegments || []
+  $('segments').innerHTML = rows.length ? rows.slice().reverse().map(row =>
+    `<div class="segment"><strong>${esc(row.speaker)}</strong> <span>${esc(row.text)}</span></div>`
+  ).join('') : 'No lines yet.'
+
+  if (state.cue) {
+    $('cue').innerHTML = `<strong>${esc(state.cue.title)}</strong><br>${(state.cue.lines || []).map(esc).join('<br>') || 'Quiet'}`
+  } else {
+    $('cue').innerHTML = ''
+  }
+}
+
+function render() {
+  renderModes()
+  renderSession()
+}
+
+async function loadAll() {
+  try {
+    const modes = await api('/coach/modes')
+    state.modes = modes.modes || []
+    state.activeModeBySpace = modes.activeModeBySpace || {}
+    state.mode = state.modes.find(mode => mode.id === activeModeId()) || state.modes[0] || null
+    await loadSession()
+    say('modeStatus', '')
+  } catch (err) {
+    say('modeStatus', err.message)
+    render()
+  }
+}
+
+async function loadSession() {
+  const payload = await api('/coach/session/current?space=' + encodeURIComponent(state.space))
+  state.session = payload.session || null
+  render()
+}
+
+async function saveMode() {
+  const mode = readModeForm()
+  if (!mode) return
+  try {
+    const saved = await api('/coach/modes/' + encodeURIComponent(mode.id), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(mode),
+    })
+    state.mode = saved.mode
+    state.modes = state.modes.map(row => row.id === saved.mode.id ? saved.mode : row)
+    say('modeStatus', 'Saved')
+    render()
+  } catch (err) {
+    say('modeStatus', err.message)
+  }
+}
+
+async function activateMode() {
+  const mode = selectedMode()
+  if (!mode) return
+  try {
+    await api('/coach/modes/' + encodeURIComponent(mode.id) + '/activate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ space: state.space }),
+    })
+    state.activeModeBySpace[state.space] = mode.id
+    say('modeStatus', `${mode.name} is active for ${state.space}`)
+    await loadSession()
+  } catch (err) {
+    say('modeStatus', err.message)
+  }
+}
+
+async function toggleSession() {
+  try {
+    if (state.session?.active) {
+      const stopped = await api('/coach/session/' + encodeURIComponent(state.session.id) + '/end', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      })
+      state.session = stopped.session
+      state.cue = { title: 'Listen off', lines: [`${stopped.session.segmentCount} transcript lines`] }
+      say('sessionStatus', 'Stopped')
+    } else {
+      const started = await api('/coach/session/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ space: state.space, modeId: selectedMode()?.id, clientId: 'web-' + uid() }),
+      })
+      state.session = started.session
+      state.cue = { title: 'Listening', lines: [`${started.session.modeName} mode`] }
+      say('sessionStatus', 'Started')
+    }
+    render()
+  } catch (err) {
+    say('sessionStatus', err.message)
+  }
+}
+
+async function addSegment() {
+  const text = $('segment').value.trim()
+  if (!text) return
+  try {
+    if (!state.session?.active) await toggleSession()
+    if (!state.session?.active) return
+    await api('/coach/session/' + encodeURIComponent(state.session.id) + '/segment', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text,
+        speaker: $('speaker').value.trim() || 'someone',
+        clientId: 'seg-' + uid(),
+        at: Date.now(),
+      }),
+    })
+    $('segment').value = ''
+    say('sessionStatus', 'Line added')
+    await loadSession()
+    await cueNow()
+  } catch (err) {
+    say('sessionStatus', err.message)
+  }
+}
+
+async function cueNow() {
+  try {
+    const payload = await api('/ai/cue?space=' + encodeURIComponent(state.space))
+    state.cue = payload.cue
+    render()
+  } catch (err) {
+    say('sessionStatus', err.message)
+  }
+}
+
+document.addEventListener('click', event => {
+  const target = event.target.closest('button')
+  if (!target) return
+  if (target.dataset.space) {
+    state.space = target.dataset.space
+    localStorage.setItem('opsboard.space', state.space)
+    state.mode = state.modes.find(mode => mode.id === activeModeId()) || state.modes[0] || null
+    state.cue = null
+    loadSession().catch(err => say('sessionStatus', err.message))
+  } else if (target.dataset.mode) {
+    state.mode = state.modes.find(mode => mode.id === target.dataset.mode)
+    render()
+  } else if (target.dataset.cueType) {
+    const mode = selectedMode()
+    mode.cueTypes[target.dataset.cueType] = !mode.cueTypes[target.dataset.cueType]
+    render()
+  } else if (target.dataset.speak) {
+    selectedMode().speakUp = target.dataset.speak
+    render()
+  }
+})
+
+$('save').onclick = saveMode
+$('activate').onclick = activateMode
+$('sessionToggle').onclick = toggleSession
+$('sendSegment').onclick = addSegment
+$('cueNow').onclick = cueNow
+
+loadAll()
+</script>
+</body>
+</html>

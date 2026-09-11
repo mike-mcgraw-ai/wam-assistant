@@ -14,6 +14,8 @@ import { Jobs, JOB } from './jobs.js'
 import { Notifier, sweepWaits } from './notify.js'
 import { applyMessage, verifySignature, startSocketMode } from './slack.js'
 import { buildCue } from './cues.js'
+import { Coach } from './coach.js'
+import { transcribePcm, transcriberInfo } from './stt.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -62,6 +64,11 @@ const tasks = new Tasks(
 const jobs = new Jobs({
   storePath: join(DATA_DIR, 'jobs.json'),
   logPath: join(DATA_DIR, 'jobs.jsonl'),
+})
+
+const coach = new Coach({
+  storePath: join(DATA_DIR, 'coach.json'),
+  logPath: join(DATA_DIR, 'coach.jsonl'),
 })
 
 const AGENT_TOKEN = process.env.AGENT_TOKEN || ''
@@ -140,18 +147,30 @@ function choresForPlan(requestedIds, space, now = Date.now()) {
     .filter(s => requestedIds.length === 0 || requestedIds.includes(s.checklistId))
     .map(s => {
       const run = active.find(r => r.checklistId === s.checklistId && !r.complete)
-      let startIndex = 0
+
+      // Drop every completed step individually, rather than slicing from a
+      // cursor. The cursor model assumed you work top to bottom; Mike works a
+      // list out of order by design, so a step finished early stayed in the
+      // running order and kept adding its minutes to every total below it.
+      // What is left is what is left, whatever order it got done in.
+      const doneIds = new Set(
+        (run?.items ?? []).filter(i => i.done).map(i => i.id),
+      )
+      let steps = s.plan
+        .map((step, i) => ({ ...step, position: i + 1, total: s.plan.length }))
+        .filter(step => !doneIds.has(step.id))
+
       let readyAt = 0
 
-      if (run) {
-        const index = s.plan.findIndex(step => step.id === run.currentItemId)
-        startIndex = index === -1 ? 0 : index
-
-        // A wait already running blocks this chore until it finishes.
-        const current = run.items.find(i => i.id === run.currentItemId)
-        if (current?.stepKind === 'wait' && current.remainingSeconds !== null) {
-          readyAt = Math.max(0, current.remainingSeconds * 1000)
-          startIndex += 1
+      // A wait already running blocks this chore until it finishes, and is not
+      // work you have to come back and do — so it comes out of the list and
+      // becomes a delay on whatever follows it.
+      const first = steps[0]
+      if (first && first.stepKind === 'wait') {
+        const item = run?.items.find(i => i.id === first.id)
+        if (item && item.remainingSeconds !== null && item.endsAt) {
+          readyAt = Math.max(0, item.remainingSeconds * 1000)
+          steps = steps.slice(1)
         }
       }
 
@@ -159,8 +178,8 @@ function choresForPlan(requestedIds, space, now = Date.now()) {
         id: s.checklistId,
         name: s.name,
         space: s.space,
-        steps: s.plan,
-        startIndex,
+        steps,
+        startIndex: 0,
         readyAt,
         schedulable: s.schedulable,
       }
@@ -251,9 +270,60 @@ function cueSpace(value) {
   return value === 'life' ? 'life' : 'ops'
 }
 
+function latestCoachModelCue(space, coachSnapshot, now = Date.now()) {
+  const sessionId = coachSnapshot.session?.id
+  if (!sessionId) return null
+
+  const freshMs = Math.max(AI_CUE_INTERVAL_MS * 4, 2 * 60_000)
+  return [...jobs.jobs.values()]
+    .filter(job => job.capability === 'coach.cue' && job.status === JOB.DONE)
+    .filter(job => job.input?.space === space && job.input?.sessionId === sessionId)
+    .filter(job => job.updatedAt >= now - freshMs)
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .map(job => ({ ...job.result, sourceJobId: job.id, jobUpdatedAt: job.updatedAt }))
+    .find(result => result && typeof result === 'object') ?? null
+}
+
+function queueCoachCue(space, { reason = 'poll', priority = 'normal' } = {}) {
+  const safeSpace = cueSpace(space)
+  const now = Date.now()
+  const snapshot = coach.snapshot(safeSpace)
+  const session = snapshot.session
+  if (!session?.active) return null
+
+  const bucket = Math.floor(now / AI_CUE_INTERVAL_MS)
+  const latestSegment = session.recentSegments.at(-1)
+  return jobs.create({
+    capability: 'coach.cue',
+    input: {
+      space: safeSpace,
+      reason,
+      mode: snapshot.mode,
+      sessionId: session.id,
+      session: {
+        id: session.id,
+        title: session.title,
+        startedAt: session.startedAt,
+        updatedAt: session.updatedAt,
+        segmentCount: session.segmentCount,
+      },
+      recentSegments: session.recentSegments,
+      constraints: {
+        titleChars: 30,
+        lineChars: 44,
+        maxLines: 3,
+        allowedKinds: ['answer', 'followup', 'factcheck', 'advice', 'thought', 'recap'],
+      },
+    },
+    idempotencyKey: `coach.cue:${session.id}:${bucket}:${latestSegment?.id ?? 'empty'}`,
+    priority,
+  })
+}
+
 function buildCurrentCue(space, now = Date.now()) {
   const safeSpace = cueSpace(space)
   const checklistsState = checklists.snapshot(now)
+  const coachSnapshot = coach.snapshot(safeSpace)
   return buildCue({
     space: safeSpace,
     snapshot: store.snapshot(now),
@@ -262,6 +332,8 @@ function buildCurrentCue(space, now = Date.now()) {
     inboxGroups: inbox.grouped(),
     dueWaits: checklists.dueWaits(now),
     jobsSummary: jobs.summary(now),
+    coach: coachSnapshot,
+    modelCue: latestCoachModelCue(safeSpace, coachSnapshot, now),
     now,
     intervalMs: AI_CUE_INTERVAL_MS,
   })
@@ -276,6 +348,55 @@ if (!INGEST_TOKEN) {
  * gates have to pass. `*` is fine while READ_TOKEN is empty and the server is
  * on your LAN; set ALLOWED_ORIGIN once you know the plugin's origin.
  */
+/**
+ * One transcription at a time.
+ *
+ * whisper.cpp is CPU-bound, and a handful of chunks arriving together would
+ * otherwise launch a handful of processes and make every one of them slower.
+ * A queue of one keeps the Mac usable while it listens.
+ */
+const transcribeQueue = []
+let transcribing = false
+
+function enqueueTranscription(sessionId, pcm, body) {
+  // A backlog means the model is slower than the speech. Dropping the oldest
+  // is better than falling further behind for the rest of the conversation.
+  if (transcribeQueue.length > 8) transcribeQueue.shift()
+  transcribeQueue.push({ sessionId, pcm, body })
+  void drainTranscriptions()
+}
+
+async function drainTranscriptions() {
+  if (transcribing) return
+  transcribing = true
+  try {
+    while (transcribeQueue.length) {
+      const { sessionId, pcm, body } = transcribeQueue.shift()
+      try {
+        const out = await transcribePcm(pcm, { sampleRate: body.sampleRate, channels: body.channels })
+        if (!out.ok) {
+          console.warn(`[stt] ${out.error}`)
+          continue
+        }
+        const text = String(out.text || '').trim()
+        if (!text) continue
+        const result = coach.addSegment(sessionId, {
+          text,
+          speaker: body.speakerRole === 'self' ? 'me' : body.speaker || 'someone',
+          final: true,
+          clientId: body.clientId,
+          at: body.at,
+        })
+        if (result.ok && !result.duplicate) queueCoachCue(result.session.space, { reason: 'audio' })
+      } catch (err) {
+        console.warn(`[stt] ${err.message}`)
+      }
+    }
+  } finally {
+    transcribing = false
+  }
+}
+
 function cors(res) {
   res.setHeader('Access-Control-Allow-Origin', process.env.ALLOWED_ORIGIN || '*')
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
@@ -363,6 +484,17 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  if (req.method === 'GET' && url.pathname === '/coach') {
+    try {
+      const html = readFileSync(join(WEB_DIR, 'coach.html'))
+      cors(res)
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
+      return res.end(html)
+    } catch {
+      return json(res, 404, { error: 'not found' })
+    }
+  }
+
   if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
     try {
       const html = readFileSync(join(WEB_DIR, 'index.html'))
@@ -387,6 +519,118 @@ const server = http.createServer(async (req, res) => {
         theme_color: '#111417',
       }),
     )
+  }
+
+  // ---- coach modes and listening sessions -------------------------------
+  if (url.pathname === '/coach/modes' || url.pathname.startsWith('/coach/modes/')) {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+
+    if (req.method === 'GET' && url.pathname === '/coach/modes') {
+      return json(res, 200, {
+        ok: true,
+        modes: coach.listModes(),
+        activeModeBySpace: coach.activeModeBySpace,
+      })
+    }
+
+    const modeMatch = url.pathname.match(/^\/coach\/modes\/([^/]+)(?:\/activate)?$/)
+    if (req.method === 'POST' && modeMatch) {
+      const modeId = decodeURIComponent(modeMatch[1])
+      let body = {}
+      try {
+        const raw = await readBody(req)
+        if (raw) body = JSON.parse(raw)
+      } catch (err) {
+        return json(res, 400, { error: `bad body: ${err.message}` })
+      }
+
+      if (url.pathname.endsWith('/activate')) {
+        const result = coach.activateMode(cueSpace(body.space), modeId)
+        return json(res, result.ok ? 200 : 404, result)
+      }
+
+      const result = coach.saveMode(modeId, body)
+      return json(res, result.ok ? 200 : 404, result)
+    }
+
+    return json(res, 404, { error: 'not found' })
+  }
+
+  if (req.method === 'GET' && url.pathname === '/coach/session/current') {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    return json(res, 200, { ok: true, ...coach.snapshot(cueSpace(url.searchParams.get('space'))) })
+  }
+
+  if (req.method === 'POST' && url.pathname === '/coach/session/start') {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    let body = {}
+    try {
+      const raw = await readBody(req)
+      if (raw) body = JSON.parse(raw)
+    } catch (err) {
+      return json(res, 400, { error: `bad body: ${err.message}` })
+    }
+
+    const result = coach.startSession({
+      space: cueSpace(body.space),
+      modeId: body.modeId,
+      title: body.title,
+      clientId: body.clientId,
+      at: body.at,
+    })
+    return json(res, result.ok ? 200 : 400, result)
+  }
+
+  const coachSessionMatch = url.pathname.match(/^\/coach\/session\/([^/]+)\/(segment|audio|end)$/)
+  if (req.method === 'POST' && coachSessionMatch) {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    const [, sessionId, action] = coachSessionMatch
+    let body = {}
+    try {
+      const raw = await readBody(req, action === 'audio' ? 1024 * 1024 : 256 * 1024)
+      if (raw) body = JSON.parse(raw)
+    } catch (err) {
+      return json(res, 400, { error: `bad body: ${err.message}` })
+    }
+
+    if (action === 'end') {
+      const result = coach.endSession(decodeURIComponent(sessionId), body.at)
+      return json(res, result.ok ? 200 : 404, result)
+    }
+
+    if (action === 'audio') {
+      const encoded = String(body.pcmBase64 || body.audioPcm || '').replace(/^data:.*?;base64,/, '')
+      if (!encoded) return json(res, 400, { error: 'pcmBase64 required' })
+
+      let pcm
+      try {
+        pcm = Buffer.from(encoded, 'base64')
+      } catch {
+        return json(res, 400, { error: 'bad audio' })
+      }
+      if (pcm.length < 1600) return json(res, 200, { ok: true, skipped: true, reason: 'too short' })
+
+      // Accept now, transcribe after.
+      //
+      // This used to await the transcription before replying, which was
+      // tolerable against a cloud API and is not against local whisper: every
+      // chunk froze the glasses for as long as the model took, and the app sat
+      // there unresponsive with an empty cue screen. The device should never
+      // wait on inference. Queue it, answer immediately, and let the segment
+      // appear when it appears.
+      enqueueTranscription(decodeURIComponent(sessionId), pcm, body)
+      return json(res, 202, { ok: true, queued: true })
+    }
+
+    const result = coach.addSegment(decodeURIComponent(sessionId), {
+      text: body.text,
+      speaker: body.speaker,
+      final: body.final,
+      clientId: body.clientId,
+      at: body.at,
+    })
+    if (result.ok && !result.duplicate) queueCoachCue(result.session.space, { reason: 'segment' })
+    return json(res, result.ok ? 200 : 400, result)
   }
 
   // ---- inbox ------------------------------------------------------------
@@ -501,13 +745,25 @@ const server = http.createServer(async (req, res) => {
 
   // ---- health -----------------------------------------------------------
   if (req.method === 'GET' && url.pathname === '/health') {
-    return json(res, 200, { ok: true, metrics: store.index.size, uptime: process.uptime(), aiCueIntervalMs: AI_CUE_INTERVAL_MS })
+    return json(res, 200, {
+      ok: true,
+      metrics: store.index.size,
+      uptime: process.uptime(),
+      aiCueIntervalMs: AI_CUE_INTERVAL_MS,
+      coach: {
+        ops: Boolean(coach.currentSession('ops')),
+        life: Boolean(coach.currentSession('life')),
+      },
+      stt: transcriberInfo(),
+    })
   }
 
   // ---- foreground coach cue --------------------------------------------
   if (req.method === 'GET' && url.pathname === '/ai/cue') {
     if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
-    const cue = buildCurrentCue(url.searchParams.get('space'))
+    const space = cueSpace(url.searchParams.get('space'))
+    queueCoachCue(space, { reason: 'poll' })
+    const cue = buildCurrentCue(space)
     const since = url.searchParams.get('since') || ''
     return json(res, 200, {
       ok: true,

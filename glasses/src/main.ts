@@ -9,7 +9,10 @@ import {
   StartUpPageCreateResult,
   validateEvenHubPageContainer,
   formatEvenHubPageContainerValidationError,
+  AudioInputSource,
+  AudioSpeakerRole,
   type EvenHubEvent,
+  type AudioEvent,
 } from '@evenrealities/even_hub_sdk'
 
 import { config } from './config'
@@ -19,10 +22,14 @@ import {
   checkItem,
   completeInboxItem,
   completeTask,
+  endCoachSession,
   fetchCoachCue,
+  fetchCoachSession,
   fetchPlan,
   fetchSnapshot,
+  sendCoachAudio,
   startChecklist,
+  startCoachSession,
 } from './api'
 import { loadSnapshot, saveSnapshot } from './storage'
 import {
@@ -72,6 +79,7 @@ const MENU = {
   DIAG: 7,
   BACK: 8,
   COACH: 11,
+  LISTEN: 12,
   START: 10,
   EXIT: 9,
 } as const
@@ -105,6 +113,7 @@ const state: UiState = {
   plan: null,
   planLoading: false,
   cue: null,
+  coachSession: null,
   cueReturn: null,
   pong: null,
   events: 0,
@@ -115,10 +124,21 @@ const state: UiState = {
   space: lastSpace(),
   scrollTop: 0,
   armedTaskId: null,
+  foreground: true,
+  lastAudioAt: null,
 }
 
 const bridge = await waitForEvenAppBridge()
 let lastInputAt = Date.now()
+let audioSessionId: string | null = null
+let audioOpen = false
+let audioFrames: Uint8Array[] = []
+let audioBytes = 0
+let audioChunkStartedAt = 0
+let audioUploading = false
+let audioLastRole = AudioSpeakerRole.Unknown
+let audioLastDirection: number | null = null
+let audioLogLastAt = 0
 
 // ---- rendering -------------------------------------------------------------
 
@@ -147,6 +167,9 @@ async function refresh(): Promise<void> {
   // The poll timer and a menu Refresh can land together; a second concurrent
   // fetch would only race to write the same state.
   if (inFlight) return
+  // Nothing to update while the OS owns the screen. The foreground-enter
+  // handler calls this directly, so waking is still immediate.
+  if (!state.foreground && state.view.kind !== 'pong') return
   inFlight = true
   try {
     const result = await fetchSnapshot()
@@ -193,6 +216,9 @@ function canAutoRefreshCue(): boolean {
 
 async function refreshCoachCue(auto = false): Promise<void> {
   if (auto && !canAutoRefreshCue()) return
+  // Same rule as refresh(): an automatic cue poll while the OS has the screen
+  // is work nobody can see. A deliberate Coach/Listen open still passes.
+  if (auto && !state.foreground) return
 
   const result = await fetchCoachCue(state.space, state.cue?.id ?? null)
   if (!result.ok) return
@@ -208,8 +234,202 @@ async function refreshCoachCue(auto = false): Promise<void> {
 }
 
 async function openCoachCue(): Promise<void> {
+  await refreshCoachSession()
   await refreshCoachCue(false)
   state.cueReturn = state.view.kind === 'cue' ? state.cueReturn : copyView(state.view)
+  state.view = { kind: 'cue' }
+  state.scrollTop = 0
+  await paint()
+}
+
+async function refreshCoachSession(): Promise<void> {
+  const result = await fetchCoachSession(state.space)
+  if (result.ok) {
+    state.coachSession = result.session
+    state.error = null
+  } else {
+    state.error = result.error
+  }
+}
+
+function localCoachCue(title: string, lines: string[]): void {
+  const now = Date.now()
+  state.cue = {
+    id: `local-${now.toString(36)}`,
+    title,
+    lines,
+    kind: 'recap',
+    priority: 0,
+    quiet: false,
+    createdAt: now,
+    expiresAt: now + config.cueMs,
+    nextAfterMs: config.cueMs,
+  }
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  const chunk = 0x8000
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk))
+  }
+  return btoa(binary)
+}
+
+function audioRms(bytes: Uint8Array): number {
+  let sum = 0
+  let samples = 0
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  for (let i = 0; i + 1 < bytes.byteLength; i += 2) {
+    const sample = view.getInt16(i, true)
+    sum += sample * sample
+    samples += 1
+  }
+  return samples ? Math.sqrt(sum / samples) : 0
+}
+
+async function startAudioCapture(sessionId: string): Promise<void> {
+  audioFrames = []
+  audioBytes = 0
+  audioChunkStartedAt = 0
+  audioSessionId = sessionId
+  audioUploading = false
+
+  const opened = await bridge.audioControl(true, AudioInputSource.Glasses).catch(err => {
+    console.error('[audio] open', err)
+    return false
+  })
+  audioOpen = opened === true
+  if (!audioOpen) {
+    localCoachCue('Mic did not open', ['Glasses audioControl returned false.'])
+  }
+}
+
+async function stopAudioCapture(): Promise<void> {
+  const sessionId = audioSessionId
+  audioSessionId = null
+  if (sessionId && audioFrames.length) await flushAudioChunk(sessionId, true)
+  if (audioOpen) await bridge.audioControl(false).catch(() => false)
+  audioOpen = false
+  audioFrames = []
+  audioBytes = 0
+  audioChunkStartedAt = 0
+  audioUploading = false
+}
+
+async function flushAudioChunk(sessionId = audioSessionId, force = false): Promise<void> {
+  if (!sessionId || audioUploading || audioBytes === 0) return
+
+  const elapsed = audioChunkStartedAt ? Date.now() - audioChunkStartedAt : 0
+  if (!force && elapsed < config.audioChunkMs) return
+
+  const combined = new Uint8Array(audioBytes)
+  let offset = 0
+  for (const frame of audioFrames) {
+    combined.set(frame, offset)
+    offset += frame.length
+  }
+  audioFrames = []
+  audioBytes = 0
+  audioChunkStartedAt = 0
+
+  if (audioRms(combined) < config.audioMinRms) return
+
+  audioUploading = true
+  // Stamped before the send, not after: this marks "heard speech", and the
+  // indicator should light while the chunk is in flight rather than after the
+  // hub has answered.
+  state.lastAudioAt = Date.now()
+  const result = await sendCoachAudio(sessionId, {
+    pcmBase64: bytesToBase64(combined),
+    sampleRate: config.audioSampleRate,
+    channels: 1,
+    source: AudioInputSource.Glasses,
+    speakerRole: audioLastRole,
+    direction: audioLastDirection,
+    clientId: `aud-${Date.now().toString(36)}`,
+    at: Date.now(),
+  })
+  audioUploading = false
+
+  if (!result.ok) {
+    localCoachCue('Transcription off', [result.error])
+    if (state.view.kind === 'cue') await paint()
+    return
+  }
+
+  if (result.transcription?.text) {
+    await refreshCoachSession()
+    await refreshCoachCue(false)
+    if (state.view.kind === 'cue') await paint()
+  }
+}
+
+function handleAudio(audio: AudioEvent): void {
+  if (!audioOpen || !audioSessionId) return
+  audioLastRole = audio.speakerRole || AudioSpeakerRole.Unknown
+  audioLastDirection = audio.direction ?? null
+
+  const frame = audio.audioPcm
+  if (!frame?.length) return
+  if (!audioChunkStartedAt) audioChunkStartedAt = Date.now()
+  audioFrames.push(frame.slice())
+  audioBytes += frame.length
+
+  void flushAudioChunk()
+}
+
+async function syncAudioToCoachSession(): Promise<void> {
+  if (state.coachSession?.active) {
+    if (audioSessionId !== state.coachSession.id || !audioOpen) {
+      await startAudioCapture(state.coachSession.id)
+    }
+    return
+  }
+  if (audioSessionId || audioOpen) await stopAudioCapture()
+}
+
+async function toggleListening(): Promise<void> {
+  const current = await fetchCoachSession(state.space)
+  if (!current.ok) {
+    state.error = current.error
+    await paint()
+    return
+  }
+
+  const returnTo = state.view.kind === 'cue' ? state.cueReturn : copyView(state.view)
+  state.coachSession = current.session
+
+  if (current.session?.active) {
+    await stopAudioCapture()
+    const stopped = await endCoachSession(current.session.id)
+    if (!stopped.ok) {
+      state.error = stopped.error
+      await paint()
+      return
+    }
+    state.coachSession = stopped.session
+    localCoachCue('Listen off', [
+      `${stopped.session.modeName} stopped`,
+      `${stopped.session.segmentCount} transcript line${stopped.session.segmentCount === 1 ? '' : 's'}`,
+    ])
+  } else {
+    const started = await startCoachSession(state.space)
+    if (!started.ok) {
+      state.error = started.error
+      await paint()
+      return
+    }
+    state.coachSession = started.session
+    await startAudioCapture(started.session.id)
+    const cue = await fetchCoachCue(state.space, null)
+    if (cue.ok) state.cue = cue.cue
+    else localCoachCue('Listening', [`${started.session.modeName} mode`, audioOpen ? 'Mic on. Speak now.' : 'Waiting for transcript.'])
+    if (!audioOpen) localCoachCue('Mic did not open', ['Glasses audioControl returned false.'])
+  }
+
+  state.error = null
+  state.cueReturn = returnTo
   state.view = { kind: 'cue' }
   state.scrollTop = 0
   await paint()
@@ -355,13 +575,10 @@ async function toggle(runId: string, itemId: string): Promise<void> {
     if (state.snapshot) state.snapshot.checklists = result.checklists
     state.error = null
 
-    // Ticking one step means you have arrived at the next: start its clock,
-    // and arm it if it is a wait.
-    const updated = findRun(state, runId)
-    if (next && updated?.currentItemId) {
-      const began = await beginStep(runId, updated.currentItemId)
-      if (began.ok && state.snapshot) state.snapshot.checklists = began.checklists
-    }
+    // Nothing starts on its own. Completing a step used to begin the next
+    // one's clock, and every version of "which one is next" is wrong when you
+    // work a list out of order — it started a wash cycle for a wash already
+    // done. A timer starts when he clicks the step, and never otherwise.
   } else {
     item.done = previous.done
     item.at = previous.at
@@ -401,6 +618,54 @@ async function switchSpace(): Promise<void> {
   state.scrollTop = 0
   clampCursor()
   await refreshCoachCue(false)
+  await paint()
+}
+
+/**
+ * Start or complete a step without leaving the running order.
+ *
+ * The run is created on demand: clicking a step is a statement that you are
+ * doing it, so there is no separate "begin this chore" gesture to forget.
+ * Nothing else is started — the same rule as inside a checklist.
+ */
+async function stepFromPlan(choreId: string, stepId: string): Promise<void> {
+  let run = state.snapshot?.checklists?.active.find(r => r.checklistId === choreId && !r.complete)
+
+  if (!run) {
+    const started = await startChecklist(choreId)
+    if (!started.ok) {
+      state.error = started.error
+      await paint()
+      return
+    }
+    if (state.snapshot) state.snapshot.checklists = started.checklists
+    run = started.checklists.active.find(r => r.checklistId === choreId && !r.complete)
+  }
+
+  const item = run?.items.find(i => i.id === stepId)
+  if (!run || !item) {
+    state.error = 'step is gone'
+    await paint()
+    return
+  }
+
+  const armed = item.running || (item.stepKind === 'wait' && item.endsAt !== null)
+  const result = item.done || armed
+    ? await checkItem(run.runId, item.id, !item.done)
+    : await beginStep(run.runId, item.id)
+
+  if (result.ok) {
+    if (state.snapshot) state.snapshot.checklists = result.checklists
+    state.error = null
+  } else {
+    state.error = result.error
+  }
+
+  // The plan is recomputed from what is running, so it has to be refetched
+  // rather than patched — starting a wait changes every total below it.
+  const plan = await fetchPlan(state.space)
+  if (plan.ok) state.plan = plan.plan
+  clampCursor()
   await paint()
 }
 
@@ -536,9 +801,14 @@ async function activate(): Promise<void> {
       return
     }
 
-    // First click on an unstarted `do` step starts its clock; the next
-    // completes it. Two clicks, both deliberate.
-    if (item.stepKind === 'do' && !item.done && !item.running) {
+    // First click starts the step's clock; the second completes it. Two
+    // clicks, both deliberate, and the same gesture for every kind of step.
+    //
+    // Waits used to skip this and go straight to done on the first click, so
+    // clicking "Wash cycle" ticked it off instead of starting the countdown —
+    // no timer, no reminder, and no record of how long it actually took.
+    const armed = item.running || (item.stepKind === 'wait' && item.endsAt !== null)
+    if (!item.done && !armed) {
       const began = await beginStep(run.runId, item.id)
       if (began.ok && state.snapshot) state.snapshot.checklists = began.checklists
       await paint()
@@ -591,10 +861,12 @@ async function activate(): Promise<void> {
   if (view.kind === 'plan') {
     const row = planRows(state)[view.cursor]
 
-    // Opening a row jumps to the chore it belongs to — the plan says what to
-    // do next, so the obvious gesture is "take me there".
+    // Start it from here. Going into the chore to click the same step you were
+    // already looking at was navigation for its own sake — on the running
+    // order you can see the step, so clicking it should be what starts it.
+    // Same two-click rule as everywhere: first starts, second completes.
     if (row?.kind === 'agenda' && row.row.kind === 'do') {
-      await openChecklist(row.row.choreId)
+      await stepFromPlan(row.row.choreId, row.row.stepId)
       return
     }
 
@@ -699,8 +971,15 @@ async function back(): Promise<void> {
     return
   }
 
+  // Double-tap at the Life root switches to Ops rather than exiting. Getting
+  // back in means the phone's private-build menu, so the one gesture you make
+  // by accident must not be the one that ends the session. The glasses OS
+  // system menu still has close and display-off.
+  //
+  // Note for a future store submission: QA expects shutDownPageContainer(1)
+  // from the root page. This deliberately does not.
   if (state.view.kind === 'plan' && state.space === 'life') {
-    await bridge.shutDownPageContainer(1)
+    await switchSpace()
     return
   }
 
@@ -715,9 +994,8 @@ async function back(): Promise<void> {
     await paint()
     return
   }
-  // Root page: exitMode 1 raises the system confirmation dialog. Required —
-  // exiting silently from the root page is an explicit QA rejection reason.
-  await bridge.shutDownPageContainer(1)
+  // Ops root: switch rather than exit, same reasoning as the Life root above.
+  await switchSpace()
 }
 
 async function onMenu(itemID: number): Promise<void> {
@@ -727,6 +1005,7 @@ async function onMenu(itemID: number): Promise<void> {
       break
     case MENU.REFRESH:
       await refresh()
+      await refreshCoachSession()
       if (state.space === 'ops') await refreshCoachCue(false)
       break
     case MENU.FITS:
@@ -761,6 +1040,9 @@ async function onMenu(itemID: number): Promise<void> {
       break
     case MENU.COACH:
       await openCoachCue()
+      break
+    case MENU.LISTEN:
+      await toggleListening()
       break
     case MENU.DIAG:
       state.diagnostics = !state.diagnostics
@@ -815,6 +1097,7 @@ const page = new CreateStartUpPageContainer({
       // The handlers all survive, so putting one back is one line.
       new MenuItemProperty({ itemName: 'Ops / Life', itemID: MENU.SWITCH }),
       new MenuItemProperty({ itemName: 'Lists', itemID: MENU.LISTS }),
+      new MenuItemProperty({ itemName: 'Listen', itemID: MENU.LISTEN }),
       new MenuItemProperty({ itemName: 'Coach', itemID: MENU.COACH }),
       new MenuItemProperty({ itemName: 'Refresh', itemID: MENU.REFRESH }),
       new MenuItemProperty({ itemName: 'Diagnostics', itemID: MENU.DIAG }),
@@ -857,11 +1140,36 @@ function normaliseEventType(raw: unknown): OsEventTypeList | undefined {
 }
 
 bridge.onEvenHubEvent((event: EvenHubEvent) => {
-  // Keep logging the raw shape: this is how the sysEvent behaviour below was
-  // found in the first place, and the next surprise will show up here too.
+  state.events += 1
+
+  // Any event at all means the glasses are showing us, whatever we last
+  // believed. A missed FOREGROUND_ENTER would otherwise leave polling off for
+  // good, which surfaces as a permanent !OLD and numbers that never move.
+  if (event.sysEvent?.eventType !== OsEventTypeList.FOREGROUND_EXIT_EVENT) {
+    state.foreground = true
+  }
+
+  if (event.audioEvent) {
+    const audio = event.audioEvent
+    const now = Date.now()
+    if (now - audioLogLastAt > 5_000) {
+      audioLogLastAt = now
+      console.log('[audio]', JSON.stringify({
+        bytes: audio.audioPcm?.length ?? 0,
+        source: audio.source,
+        direction: audio.direction,
+        speakerRole: audio.speakerRole,
+      }))
+    }
+    state.lastEvent = `aud:${audio.audioPcm?.length ?? 0}`
+    handleAudio(audio)
+    return
+  }
+
+  // Keep logging non-audio input shapes: this is how the sysEvent behaviour
+  // below was found in the first place, and the next surprise will show up too.
   console.log('[event]', JSON.stringify(event))
 
-  state.events += 1
   lastInputAt = Date.now()
 
   // ---- contextual menu -------------------------------------------------
@@ -878,17 +1186,34 @@ bridge.onEvenHubEvent((event: EvenHubEvent) => {
   // Handled before input, because these arrive on sysEvent too and must not
   // be mistaken for taps.
   if (sysType === OsEventTypeList.FOREGROUND_ENTER_EVENT) {
+    // Back on your face. Refresh immediately rather than waiting out the poll
+    // interval — the first thing you see should not be the last thing from
+    // before you looked away.
+    state.foreground = true
     state.lastEvent = 'fg-in'
-    void refresh().then(() => refreshCoachCue(false))
+    void refresh()
+      .then(() => refreshCoachSession())
+      .then(() => syncAudioToCoachSession())
+      .then(() => refreshCoachCue(false))
     return
   }
   if (
     sysType === OsEventTypeList.FOREGROUND_EXIT_EVENT ||
     sysType === OsEventTypeList.SYSTEM_EXIT_EVENT ||
-    sysType === OsEventTypeList.ABNORMAL_EXIT_EVENT ||
-    sysType === OsEventTypeList.IMU_DATA_REPORT
+    sysType === OsEventTypeList.ABNORMAL_EXIT_EVENT
   ) {
+    // The OS has taken the screen back. Go quiet: no fetches, no paints. An
+    // armed confirm does not survive the trip — coming back to a row already
+    // asking "done?" is one tap from ticking off something you never did.
+    state.foreground = false
+    state.armedTaskId = null
     state.lastEvent = `sys${sysType}`
+    void stopAudioCapture()
+    return
+  }
+
+  if (sysType === OsEventTypeList.IMU_DATA_REPORT) {
+    state.lastEvent = 'imu'
     return
   }
 
@@ -943,6 +1268,8 @@ bridge.onEvenHubEvent((event: EvenHubEvent) => {
 bridge.onLaunchSource(source => console.log('[boot] launched from', source))
 
 await refresh()
+await refreshCoachSession()
+await syncAudioToCoachSession()
 /**
  * Life opens on the running order.
  *

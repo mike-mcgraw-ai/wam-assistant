@@ -40,6 +40,7 @@ const base: UiState = {
   plan: null,
   planLoading: false,
   cue: null,
+  coachSession: null,
   cueReturn: null,
   pong: null,
   events: 0,

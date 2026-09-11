@@ -223,7 +223,7 @@ export interface CoachCue {
   id: string
   title: string
   lines: string[]
-  kind: 'reminder' | 'recap' | 'task' | 'list' | 'ops'
+  kind: 'reminder' | 'recap' | 'task' | 'list' | 'ops' | 'answer' | 'followup' | 'factcheck' | 'advice' | 'thought'
   priority: number
   quiet: boolean
   createdAt: number
@@ -233,6 +233,61 @@ export interface CoachCue {
 
 export type CoachCueResponse =
   | { ok: true; cue: CoachCue; changed: boolean; nextAfterMs: number }
+  | { ok: false; error: string }
+
+export interface CoachMode {
+  id: string
+  name: string
+  category: string
+  keepPrivate: boolean
+  behavior: string
+  cueTypes: {
+    answers: boolean
+    followups: boolean
+    explanations: boolean
+    factChecks: boolean
+    advice: boolean
+    thoughts: boolean
+  }
+  speakUp: 'low' | 'medium' | 'high'
+  promptLulls: boolean
+  periodicRecap: boolean
+  recapMinutes: number
+  lullSeconds: number
+  files: string[]
+}
+
+export interface CoachSegment {
+  id: string
+  clientId: string | null
+  speaker: string
+  text: string
+  final: boolean
+  at: number
+}
+
+export interface CoachSessionSummary {
+  id: string
+  space: Space
+  modeId: string
+  modeName: string
+  title: string
+  startedAt: number
+  updatedAt: number
+  endedAt: number | null
+  active: boolean
+  segmentCount: number
+  recentSegments: CoachSegment[]
+  lastCueAt: number | null
+  lastRecapAt: number | null
+}
+
+export type CoachSessionResponse =
+  | { ok: true; space: Space; mode: CoachMode; modes?: CoachMode[]; session: CoachSessionSummary | null }
+  | { ok: false; error: string }
+
+export type CoachSessionWriteResponse =
+  | { ok: true; session: CoachSessionSummary; existing?: boolean }
   | { ok: false; error: string }
 
 export interface ChecklistStats {

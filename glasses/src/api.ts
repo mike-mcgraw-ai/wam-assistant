@@ -1,5 +1,12 @@
 import { config } from './config'
-import type { BlockPlan, ChecklistsState, CoachCueResponse, Snapshot } from './types'
+import type {
+  BlockPlan,
+  ChecklistsState,
+  CoachCueResponse,
+  CoachSessionResponse,
+  CoachSessionWriteResponse,
+  Snapshot,
+} from './types'
 
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
   const headers: Record<string, string> = { Accept: 'application/json', ...extra }
@@ -183,6 +190,112 @@ export async function fetchCoachCue(space: string, since: string | null = null):
     if (!res.ok) return { ok: false, error: payload?.error ?? `server ${res.status}` }
     if (!payload?.cue) return { ok: false, error: 'bad payload' }
     return payload as CoachCueResponse
+  } catch (err: unknown) {
+    const message =
+      err instanceof DOMException && err.name === 'AbortError'
+        ? 'timeout'
+        : err instanceof Error
+          ? err.message
+          : 'network error'
+    return { ok: false, error: message.slice(0, 40) }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+export async function fetchCoachSession(space: string): Promise<CoachSessionResponse> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), config.timeoutMs)
+
+  try {
+    const res = await fetch(`${config.serverUrl}/coach/session/current?space=${encodeURIComponent(space)}`, {
+      headers: authHeaders(),
+      signal: controller.signal,
+      cache: 'no-store',
+    })
+    const payload = await res.json().catch(() => null)
+    if (!res.ok) return { ok: false, error: payload?.error ?? `server ${res.status}` }
+    if (!payload?.mode) return { ok: false, error: 'bad payload' }
+    return payload as CoachSessionResponse
+  } catch (err: unknown) {
+    const message =
+      err instanceof DOMException && err.name === 'AbortError'
+        ? 'timeout'
+        : err instanceof Error
+          ? err.message
+          : 'network error'
+    return { ok: false, error: message.slice(0, 40) }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function postCoach(
+  path: string,
+  body: unknown,
+): Promise<CoachSessionWriteResponse> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), config.timeoutMs)
+
+  try {
+    const res = await fetch(`${config.serverUrl}${path}`, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+    const payload = await res.json().catch(() => null)
+    if (!res.ok) return { ok: false, error: payload?.error ?? `server ${res.status}` }
+    if (!payload?.session) return { ok: false, error: 'bad payload' }
+    return payload as CoachSessionWriteResponse
+  } catch (err: unknown) {
+    const message =
+      err instanceof DOMException && err.name === 'AbortError'
+        ? 'timeout'
+        : err instanceof Error
+          ? err.message
+          : 'network error'
+    return { ok: false, error: message.slice(0, 40) }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+export const startCoachSession = (space: string) =>
+  postCoach('/coach/session/start', {
+    space,
+    clientId: `glasses-${Date.now().toString(36)}`,
+  })
+
+export const endCoachSession = (sessionId: string) =>
+  postCoach(`/coach/session/${encodeURIComponent(sessionId)}/end`, {})
+
+export async function sendCoachAudio(
+  sessionId: string,
+  body: {
+    pcmBase64: string
+    sampleRate: number
+    channels: number
+    source: string
+    speakerRole: string
+    direction: number | null
+    clientId: string
+    at: number
+  },
+): Promise<{ ok: true; skipped?: boolean; transcription?: { text: string } } | { ok: false; error: string }> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), Math.max(config.timeoutMs, 20_000))
+
+  try {
+    const res = await fetch(`${config.serverUrl}/coach/session/${encodeURIComponent(sessionId)}/audio`, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+    const payload = await res.json().catch(() => null)
+    if (!res.ok) return { ok: false, error: payload?.error ?? `server ${res.status}` }
+    return payload
   } catch (err: unknown) {
     const message =
       err instanceof DOMException && err.name === 'AbortError'

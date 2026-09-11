@@ -66,6 +66,12 @@ const DEFAULTS = {
   cueIdleMs: 25_000,
   /** Give up on a request after this long; the glasses should never hang. */
   timeoutMs: 6_000,
+  /** The Even SDK does not declare the PCM sample rate; override if hardware proves otherwise. */
+  audioSampleRate: 16_000,
+  /** Send speech to the hub in short chunks. */
+  audioChunkMs: 4_500,
+  /** Ignore chunks quieter than this RMS level. */
+  audioMinRms: 180,
   /**
    * Rows of content, between header and footer.
    * 9 visible lines total: header + blank + 6 rows + footer.
@@ -105,6 +111,9 @@ export const config = {
   cueMs: Number(stored('opsboard.cueMs')) || DEFAULTS.cueMs,
   cueIdleMs: Number(stored('opsboard.cueIdleMs')) || DEFAULTS.cueIdleMs,
   autoCue: stored('opsboard.autoCue') !== 'off',
+  audioSampleRate: Number(stored('opsboard.audioSampleRate')) || DEFAULTS.audioSampleRate,
+  audioChunkMs: Number(stored('opsboard.audioChunkMs')) || DEFAULTS.audioChunkMs,
+  audioMinRms: Number(stored('opsboard.audioMinRms')) || DEFAULTS.audioMinRms,
   timeoutMs: DEFAULTS.timeoutMs,
   rowsPerPage: DEFAULTS.rowsPerPage,
   maxLines: DEFAULTS.maxLines,

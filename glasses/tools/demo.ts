@@ -102,7 +102,7 @@ const base: UiState = {
   snapshot, error: null, loading: false,
   lastOkAt: now, fromCache: false, alertsOnly: false,
   plan: null, planLoading: false,
-  cue: null, cueReturn: null,
+  cue: null, coachSession: null, cueReturn: null,
   pong: null,
   events: 0, lastEvent: '-', diagnostics: false, space: 'ops',
   scrollTop: 0, armedTaskId: null,
@@ -135,9 +135,47 @@ const demoCue = {
   nextAfterMs: 120_000,
 }
 
+const listenSession = {
+  id: 'demo-session',
+  space: 'ops' as const,
+  modeId: 'conversation',
+  modeName: 'Conversation',
+  title: 'Pitch meeting',
+  startedAt: now - 90_000,
+  updatedAt: now - 12_000,
+  endedAt: null,
+  active: true,
+  segmentCount: 1,
+  recentSegments: [
+    {
+      id: 'seg-1',
+      clientId: 'seg-1',
+      speaker: 'Dana',
+      text: 'What did the Q3 budget close at?',
+      final: true,
+      at: now - 12_000,
+    },
+  ],
+  lastCueAt: null,
+  lastRecapAt: null,
+}
+
+const questionCue = {
+  id: 'demo-question',
+  title: 'Question raised',
+  lines: ['Dana: What did the Q3 budget close at?', 'Answer lane queued.'],
+  kind: 'answer' as const,
+  priority: 3,
+  quiet: false,
+  createdAt: now,
+  expiresAt: now + 120_000,
+  nextAfterMs: 120_000,
+}
+
 frame('Ops index', render(withPlan))
 frame('Ops index — AI widget', render({ ...withPlan, cue: demoCue }))
 frame('Coach — manual', render({ ...withPlan, cue: demoCue, view: { kind: 'cue' } }))
+frame('Coach — listening question', render({ ...withPlan, cue: questionCue, coachSession: listenSession, view: { kind: 'cue' } }))
 frame('Life index', render({ ...withPlan, space: 'life', view: { kind: 'index', cursor: 0 } }))
 frame('Life index — no auto AI widget', render({ ...withPlan, space: 'life', cue: demoCue, view: { kind: 'index', cursor: 0 } }))
 frame('Shared list — Groceries', render({ ...withPlan, space: 'life', view: { kind: 'inbox', group: 'Groceries', cursor: 0 } }))

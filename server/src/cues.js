@@ -2,6 +2,14 @@ import { createHash } from 'node:crypto'
 
 const LINE = 44
 const DEFAULT_INTERVAL_MS = 2 * 60_000
+const MODEL_KINDS = new Set(['answer', 'followup', 'factcheck', 'advice', 'thought', 'recap'])
+const TYPE_FOR_KIND = {
+  answer: 'answers',
+  followup: 'followups',
+  factcheck: 'factChecks',
+  advice: 'advice',
+  thought: 'thoughts',
+}
 
 function clip(text, max = LINE) {
   return String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, max)
@@ -65,6 +73,93 @@ function lineSet(title, lines, { kind = 'recap', priority = 1, quiet = false } =
   return { title: clip(title, 30), lines: lines.map(line => clip(line)).filter(Boolean), kind, priority, quiet }
 }
 
+function cueTypeEnabled(mode, kind) {
+  const key = TYPE_FOR_KIND[kind]
+  if (!key) return true
+  return mode?.cueTypes?.[key] === true
+}
+
+function segmentSnippet(segment, max = 38) {
+  if (!segment) return ''
+  const who = segment.speaker && segment.speaker !== 'someone' ? `${segment.speaker}: ` : ''
+  return clip(`${who}${segment.text}`, max)
+}
+
+function looksLikeQuestion(text) {
+  const body = String(text || '').trim()
+  if (!body) return false
+  return (
+    body.includes('?') ||
+    /^(who|what|when|where|why|how|can|could|would|should|is|are|did|do|does)\b/i.test(body)
+  )
+}
+
+function latestQuestion(session) {
+  return (session?.recentSegments ?? []).slice().reverse().find(segment => looksLikeQuestion(segment.text))
+}
+
+function modelCueSet(raw, mode) {
+  if (!raw || typeof raw !== 'object' || raw.quiet === true) return null
+  const kind = MODEL_KINDS.has(raw.kind) ? raw.kind : 'thought'
+  if (!cueTypeEnabled(mode, kind)) return null
+
+  const lines = Array.isArray(raw.lines) ? raw.lines : [raw.body, raw.text]
+  return lineSet(raw.title || 'Coach', lines.slice(0, 3), {
+    kind,
+    priority: Math.max(1, Math.min(4, Number(raw.priority) || 2)),
+    quiet: false,
+  })
+}
+
+function coachSessionCue(coach, now) {
+  const session = coach?.session
+  const mode = coach?.mode
+  if (!session?.active || !mode) return null
+
+  const recent = session.recentSegments ?? []
+  const last = recent.at(-1)
+  const question = latestQuestion(session)
+
+  if (question && (cueTypeEnabled(mode, 'answer') || cueTypeEnabled(mode, 'followup'))) {
+    return lineSet(
+      'Question raised',
+      [segmentSnippet(question), cueTypeEnabled(mode, 'answer') ? 'Answer lane queued.' : 'Good follow-up moment.'],
+      { kind: cueTypeEnabled(mode, 'answer') ? 'answer' : 'followup', priority: 3 },
+    )
+  }
+
+  if (mode.promptLulls && last && now - last.at >= mode.lullSeconds * 1000 && cueTypeEnabled(mode, 'followup')) {
+    return lineSet(
+      'Conversation lull',
+      [`Ask about: ${clip(last.text, 32)}`, `${mode.name} mode`],
+      { kind: 'followup', priority: 2 },
+    )
+  }
+
+  const recapDue =
+    mode.periodicRecap &&
+    recent.length >= 2 &&
+    now - (session.lastRecapAt || session.startedAt) >= mode.recapMinutes * 60_000
+
+  if (recapDue) {
+    return lineSet(
+      `${mode.name} recap`,
+      recent.slice(-3).map(segment => segmentSnippet(segment)),
+      { kind: 'recap', priority: 2 },
+    )
+  }
+
+  if (recent.length === 0) {
+    return lineSet(
+      'Listening',
+      [`${mode.name} mode`, 'Waiting for transcript.'],
+      { kind: 'recap', priority: 0, quiet: true },
+    )
+  }
+
+  return null
+}
+
 export function buildCue({
   space = 'life',
   snapshot,
@@ -73,6 +168,8 @@ export function buildCue({
   inboxGroups,
   dueWaits = [],
   jobsSummary,
+  coach,
+  modelCue,
   now = Date.now(),
   intervalMs = DEFAULT_INTERVAL_MS,
 } = {}) {
@@ -111,6 +208,14 @@ export function buildCue({
         { kind: 'reminder', priority: 4 },
       )
     }
+  }
+
+  if (!cue) {
+    cue = modelCueSet(modelCue, coach?.mode)
+  }
+
+  if (!cue) {
+    cue = coachSessionCue(coach, now)
   }
 
   if (!cue) {

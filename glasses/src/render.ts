@@ -11,6 +11,7 @@ import type {
   Board,
   ChecklistRun,
   CoachCue,
+  CoachSessionSummary,
   InboxGroup,
   InboxItem,
   Snapshot,
@@ -31,6 +32,7 @@ import {
   mins,
   bar,
   clip,
+  clipToWidth,
   LINE_CHARS,
   metricRow,
   pad,
@@ -64,6 +66,8 @@ export interface UiState {
   planLoading: boolean
   /** latest foreground Coach cue returned by the hub */
   cue: CoachCue | null
+  /** active listening session for the current space, if one exists */
+  coachSession: CoachSessionSummary | null
   /** screen to return to after a manual Coach cue is dismissed */
   cueReturn: View | null
   /** non-null only while the game is on screen */
@@ -93,6 +97,22 @@ export interface UiState {
    * Any cursor movement disarms.
    */
   armedTaskId: string | null
+  /**
+   * Whether the glasses are currently showing us.
+   *
+   * The OS hands the screen back to its own dashboard when you stop looking
+   * and says so with FOREGROUND_EXIT_EVENT. Polling on through that is BLE
+   * traffic and battery spent drawing something nobody can see.
+   */
+  foreground: boolean
+  /**
+   * When a non-quiet audio chunk was last sent.
+   *
+   * There is no other way to tell a live microphone from a dead one. Without
+   * it, Listen looks identical whether it is hearing you or not — which is
+   * exactly how it felt the first time.
+   */
+  lastAudioAt: number | null
 }
 
 /**
@@ -129,6 +149,14 @@ export type PlanRow =
   | { kind: 'task'; task: TaskRow }
   | { kind: 'space' }
   | { kind: 'agenda'; row: AgendaRow }
+
+/** Is this agenda row a step whose clock is already going? */
+function isRunning(state: UiState, row: AgendaRow): boolean {
+  if (row.kind !== 'do') return false
+  const run = state.snapshot?.checklists?.active.find(r => r.checklistId === row.choreId && !r.complete)
+  const item = run?.items.find(i => i.id === row.stepId)
+  return Boolean(item && !item.done && (item.running || (item.stepKind === 'wait' && item.endsAt !== null)))
+}
 
 export function planRows(state: UiState): PlanRow[] {
   const plan = state.plan
@@ -228,14 +256,17 @@ function renderIndexRow(row: IndexRow, selected: boolean, space: Space): string 
   }
 }
 
-function aiWidgetLine(state: UiState): string | null {
+export function aiWidgetText(state: UiState): string | null {
   const cue = state.cue
   if (state.space !== 'ops' || !cue || cue.quiet) return null
   if (cue.expiresAt && Date.now() > cue.expiresAt + config.cueMs) return null
 
-  const marker = cue.priority >= 4 ? '!' : cue.kind === 'ops' ? 'X' : '*'
+  // The body is the news; the title is usually a category. "AI: Ops alert: 4
+  // stale" sitting two words from the word OPS spends the line saying where
+  // you already know you are.
   const body = cue.lines.find(Boolean)
-  return clip(`${marker} AI ${cue.title}${body ? `: ${body}` : ''}`, LINE_CHARS)
+  if (body) return body
+  return cue.title.replace(/^(ops|life)\s+/i, '')
 }
 
 function header(state: UiState, right: string): string {
@@ -280,6 +311,12 @@ export function clockLine(_state: UiState, now = new Date()): string {
  * looking at.
  */
 export function spaceLine(state: UiState): string {
+  const label = state.space === 'ops' ? 'OPS' : 'LIFE'
+
+  if (state.diagnostics) {
+    return clipToWidth(`   ${label}  v${APP_VERSION} ${state.events}:${state.lastEvent}`)
+  }
+
   const connection = state.fromCache
     ? '  ~CACHE'
     : state.error
@@ -287,10 +324,19 @@ export function spaceLine(state: UiState): string {
       : state.lastOkAt && Date.now() - state.lastOkAt > config.pollMs * 3
         ? '  !OLD'
         : ''
-  // Indented so it reads as a label over the block rather than as the first
-  // row of it. The list starts directly underneath — a blank line here cost a
-  // row out of nine and separated the label from the thing it labels.
-  return clip(`   ${state.space === 'ops' ? 'OPS' : 'LIFE'}${connection}`, LINE_CHARS)
+
+  // Microphone state, ASCII so the firmware cannot silently drop it. MIC*
+  // means a chunk of actual speech went up in the last few seconds; MIC. means
+  // listening but hearing nothing. A recording indicator that cannot tell you
+  // those apart is not worth the characters.
+  const mic = state.coachSession?.active
+    ? state.lastAudioAt && Date.now() - state.lastAudioAt < 4000
+      ? '  MIC*'
+      : '  MIC.'
+    : ''
+
+  const ai = aiWidgetText(state)
+  return clipToWidth(`   ${label}${connection}${mic}${ai ? `   AI: ${ai}` : ''}`)
 }
 
 export function dateLabel(now = new Date()): string {
@@ -376,8 +422,8 @@ function renderIndex(state: UiState, cursor: number): string {
   }
 
   const rows = indexRows(state)
-  const cue = aiWidgetLine(state)
-  const visibleRows = cue ? config.rowsPerPage - 1 : config.rowsPerPage
+  const cue = aiWidgetText(state)
+  const visibleRows = config.rowsPerPage
 
   const win = windowFollow(cursor, rows.length, visibleRows, state.scrollTop)
 
@@ -386,7 +432,6 @@ function renderIndex(state: UiState, cursor: number): string {
   // more vertical space than it saved, and lagged a second behind a switch
   // while its bytes went over BLE.
   const lines: string[] = [clockLine(state), spaceLine(state)]
-  if (cue) lines.push(cue)
   const { start, end } = win
 
   // Nothing outstanding anywhere in this space.
@@ -529,7 +574,7 @@ function renderPlan(state: UiState, cursor: number): string {
       const armed = state.armedTaskId === row.task.taskId
       lines.push(clip(`${point}${taskRow(row.task, armed)}`, LINE_CHARS))
     } else if (row.kind === 'agenda') {
-      lines.push(clip(`${point}${agendaRow(row.row)}`, LINE_CHARS))
+      lines.push(clip(`${point}${agendaRow(row.row, isRunning(state, row.row))}`, LINE_CHARS))
     }
   }
 
@@ -601,12 +646,36 @@ function renderTaskDetail(state: UiState, taskId: string, cursor: number): strin
 }
 
 function renderCue(state: UiState): string {
+  const session = state.coachSession
   const cue = state.cue
-  if (!cue) return assemble([header(state, 'Coach'), '', 'No cue yet.'], config.maxChars, config.maxLines)
+  const lines: string[] = []
 
-  const lines: string[] = [header(state, cue.title), '']
-  for (const line of cue.lines) {
-    for (const wrapped of wrap(line, LINE_CHARS)) lines.push(wrapped)
+  if (cue) {
+    lines.push(header(state, cue.title), '')
+    for (const line of cue.lines) {
+      for (const wrapped of wrap(line, LINE_CHARS)) lines.push(wrapped)
+    }
+  } else if (session?.active) {
+    lines.push(header(state, `${clip(session.modeName, 20)}  ${session.segmentCount} lines`), '')
+  } else {
+    return assemble([header(state, 'Coach'), '', 'Not listening.'], config.maxChars, config.maxLines)
+  }
+
+  // The transcript, newest last so it reads like a conversation. Without this
+  // the screen said "3 transcript lines" and showed none of them, which tells
+  // you the machinery is running but nothing about whether it heard you right.
+  const segments = session?.recentSegments ?? []
+  if (segments.length > 0) {
+    if (cue) lines.push('')
+    const room = Math.max(2, config.maxLines - lines.length)
+    const recent = segments.slice(-room)
+    for (const seg of recent) {
+      const who = seg.speaker === 'me' ? '>' : '-'
+      const wrapped = wrap(`${who} ${seg.text}`, LINE_CHARS)
+      for (const line of wrapped) lines.push(line)
+    }
+  } else if (session?.active) {
+    lines.push('Listening. Nothing heard yet.')
   }
 
   return assemble(lines, config.maxChars, config.maxLines)

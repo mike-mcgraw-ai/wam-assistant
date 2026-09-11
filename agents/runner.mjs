@@ -113,6 +113,59 @@ Never invent items that were not said.
 Notes:
 `
 
+const COACH_CUE_PROMPT = `You are writing a tiny heads-up cue for smart glasses.
+
+Return ONLY a JSON object, no prose:
+{
+  "title": "30 characters max",
+  "lines": ["up to 3 lines, 44 characters max each"],
+  "kind": "answer" | "followup" | "factcheck" | "advice" | "thought" | "recap",
+  "priority": 0 | 1 | 2 | 3 | 4,
+  "quiet": false
+}
+
+Use the mode instructions and the recent transcript. Help only when a cue would
+be useful mid-conversation: a short answer, a tactful correction, a good
+follow-up, concrete supportive advice, a thought worth holding, or a recap.
+Do not invent facts, names, times, durations, or estimates. Do not tell the user
+to do anything irreversible without explicit confirmation. If there is no useful
+cue, return {"quiet":true,"title":"Listening","lines":[],"kind":"thought","priority":0}.
+`
+
+function trimText(value, max) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max)
+}
+
+function normalizeCoachCue(parsed, constraints = {}) {
+  if (!parsed || typeof parsed !== 'object') throw new Error('expected a JSON object')
+  const allowed = new Set(Array.isArray(constraints.allowedKinds) ? constraints.allowedKinds : [])
+  const fallbackKind = allowed.has('thought') ? 'thought' : [...allowed][0] || 'thought'
+  const kind = allowed.has(parsed.kind) ? parsed.kind : fallbackKind
+
+  if (parsed.quiet === true) {
+    return { title: 'Listening', lines: [], kind, priority: 0, quiet: true }
+  }
+
+  const title = trimText(parsed.title || 'Coach', Number(constraints.titleChars) || 30)
+  const rawLines = Array.isArray(parsed.lines) ? parsed.lines : [parsed.body, parsed.text]
+  const lines = rawLines
+    .map(line => trimText(line, Number(constraints.lineChars) || 44))
+    .filter(Boolean)
+    .slice(0, Number(constraints.maxLines) || 3)
+
+  if (lines.length === 0) {
+    return { title: 'Listening', lines: [], kind, priority: 0, quiet: true }
+  }
+
+  return {
+    title,
+    lines,
+    kind,
+    priority: Math.max(0, Math.min(4, Number(parsed.priority) || 2)),
+    quiet: false,
+  }
+}
+
 const handlers = {
   async triage(job) {
     const items = job.input?.items ?? []
@@ -126,6 +179,42 @@ const handlers = {
     // it write onto the wrong item.
     const known = new Set(items.map(i => i.id))
     return parsed.filter(r => known.has(r.itemId ?? r.id))
+  },
+
+  async 'coach.cue'(job) {
+    const input = job.input ?? {}
+    const segments = Array.isArray(input.recentSegments) ? input.recentSegments : []
+    if (segments.length === 0) {
+      return { title: 'Listening', lines: [], kind: 'thought', priority: 0, quiet: true }
+    }
+
+    const transcript = segments
+      .slice(-16)
+      .map(segment => `${segment.speaker || 'someone'}: ${trimText(segment.text, 500)}`)
+      .join('\n')
+    const mode = input.mode ?? {}
+    const prompt = `${COACH_CUE_PROMPT}
+
+Mode:
+${JSON.stringify({
+  name: mode.name,
+  behavior: mode.behavior,
+  cueTypes: mode.cueTypes,
+  speakUp: mode.speakUp,
+  promptLulls: mode.promptLulls,
+  periodicRecap: mode.periodicRecap,
+}, null, 2)}
+
+Session:
+${JSON.stringify(input.session ?? {}, null, 2)}
+
+Recent transcript:
+${transcript}
+`
+
+    const reply = await think(prompt, 90_000)
+    const parsed = extractJson(reply)
+    return normalizeCoachCue(parsed, input.constraints)
   },
 }
 

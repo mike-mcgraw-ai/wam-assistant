@@ -158,6 +158,10 @@ export function checklistRow(run: ChecklistRun, selected: boolean): string {
 /** "28m" / "1h55" — compact enough to sit in a row with a label. */
 export function mins(ms: number | null): string {
   if (ms === null) return '--'
+  // Under a minute, show seconds. Rounding to minutes meant a step you just
+  // started read "0m", which looks like a broken clock rather than a running
+  // one — and short steps are exactly the ones worth proving are being timed.
+  if (ms < 60_000) return `${Math.max(0, Math.round(ms / 1000))}s`
   const total = Math.round(ms / 60000)
   if (total < 60) return `${total}m`
   return `${Math.floor(total / 60)}h${String(total % 60).padStart(2, '0')}`
@@ -253,12 +257,15 @@ export const COL = {
   taskWhen: 360,
 }
 
-export function agendaRow(row: AgendaRow): string {
+export function agendaRow(row: AgendaRow, running = false): string {
   const dur = row.ms === null ? '--' : mins(row.ms)
   const work = row.cumulativeBusyMs == null ? '--' : mins(row.cumulativeBusyMs)
   const wall = row.cumulativeWallMs == null ? '--' : mins(row.cumulativeWallMs)
 
-  const marker = row.kind === 'gap' ? ' ~ ' : row.open ? '[>]' : '( )'
+  // [*] is the one you started. Without it the running order looked identical
+  // before and after a click, which is no way to run a list you are dipping in
+  // and out of.
+  const marker = row.kind === 'gap' ? ' ~ ' : running ? '[*]' : row.open ? '[>]' : '( )'
   const label =
     row.kind === 'gap'
       ? `open${row.nextFree ? ` ${clip(row.nextFree.chore, 14)}` : ''}`
