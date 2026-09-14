@@ -60,6 +60,8 @@ const DEFAULTS = {
   serverUrl: defaultServerUrl(),
   /** How often to re-poll while the app is open, in ms. */
   pollMs: 15_000,
+  /** How often Listen asks the hub for fresh transcript lines. */
+  listenPollMs: 1_000,
   /** How often the foreground Coach is allowed to surface a fresh cue. */
   cueMs: 2 * 60_000,
   /** Do not interrupt active use; wait this long since the last input. */
@@ -69,9 +71,11 @@ const DEFAULTS = {
   /** The Even SDK does not declare the PCM sample rate; override if hardware proves otherwise. */
   audioSampleRate: 16_000,
   /** Send speech to the hub in short chunks. */
-  audioChunkMs: 4_500,
+  audioChunkMs: 2_000,
   /** Ignore chunks quieter than this RMS level. */
   audioMinRms: 180,
+  /** Show Listen's mic/STT counters instead of giving the transcript the room. */
+  listenDebug: false,
   /**
    * Rows of content, between header and footer.
    * 9 visible lines total: header + blank + 6 rows + footer.
@@ -83,6 +87,21 @@ const DEFAULTS = {
    * markers are new, and it is one line to turn off once they are not.
    */
   hints: true,
+
+  /**
+   * Is the Ops half of the app switched on?
+   *
+   * Off. Ops is the work half — boards, the index, the metric screens — and
+   * none of it is what these glasses are for day to day. Sidelined rather than
+   * deleted: every Ops screen, route and config file is still in the repo, and
+   * this flag is the whole of what stands between them and coming back.
+   *
+   * With it off the app has one space, Life, and the running order is home.
+   * Nothing in the Life path has to know Ops exists.
+   *
+   * Back on with: localStorage.setItem('opsboard.ops', 'on')
+   */
+  ops: false,
 
   rowsPerPage: 7,
   /**
@@ -116,16 +135,21 @@ export const config = {
    */
   readToken: stored('opsboard.readToken') || '',
   pollMs: Number(stored('opsboard.pollMs')) || DEFAULTS.pollMs,
+  listenPollMs: Number(stored('opsboard.listenPollMs')) || DEFAULTS.listenPollMs,
   cueMs: Number(stored('opsboard.cueMs')) || DEFAULTS.cueMs,
   cueIdleMs: Number(stored('opsboard.cueIdleMs')) || DEFAULTS.cueIdleMs,
   autoCue: stored('opsboard.autoCue') !== 'off',
   audioSampleRate: Number(stored('opsboard.audioSampleRate')) || DEFAULTS.audioSampleRate,
   audioChunkMs: Number(stored('opsboard.audioChunkMs')) || DEFAULTS.audioChunkMs,
   audioMinRms: Number(stored('opsboard.audioMinRms')) || DEFAULTS.audioMinRms,
+  // On with: localStorage.setItem('opsboard.listenDebug', 'on')
+  listenDebug: stored('opsboard.listenDebug') === 'on' || DEFAULTS.listenDebug,
   timeoutMs: DEFAULTS.timeoutMs,
   rowsPerPage: DEFAULTS.rowsPerPage,
   // Off with: localStorage.setItem('opsboard.hints', 'off')
   hints: stored('opsboard.hints') !== 'off',
+  // On with: localStorage.setItem('opsboard.ops', 'on')
+  ops: stored('opsboard.ops') === 'on' || DEFAULTS.ops,
   maxLines: DEFAULTS.maxLines,
   maxChars: DEFAULTS.maxChars,
 }

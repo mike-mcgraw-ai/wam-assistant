@@ -145,8 +145,16 @@ const listenSession = {
   updatedAt: now - 12_000,
   endedAt: null,
   active: true,
-  segmentCount: 1,
+  segmentCount: 3,
   recentSegments: [
+    {
+      id: 'seg-0',
+      clientId: 'seg-0',
+      speaker: 'me',
+      text: 'The Q3 budget ties back to the vendor line because that is where the growth really landed.',
+      final: true,
+      at: now - 28_000,
+    },
     {
       id: 'seg-1',
       clientId: 'seg-1',
@@ -155,7 +163,25 @@ const listenSession = {
       final: true,
       at: now - 12_000,
     },
+    {
+      id: 'seg-2',
+      clientId: 'seg-2',
+      speaker: 'me',
+      text: 'Remind me to send Dana the 2024 taxes note after this.',
+      final: true,
+      at: now - 4_000,
+    },
   ],
+  runningNote: {
+    title: 'Running note',
+    lines: [
+      'Dot: Q3 budget ties back to vendor growth.',
+      'Open: What did the Q3 budget close at?',
+      'Next: Send Dana the 2024 taxes note.',
+    ],
+    updatedAt: now - 4_000,
+    segmentCount: 3,
+  },
   lastCueAt: null,
   lastRecapAt: null,
 }

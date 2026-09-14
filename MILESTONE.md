@@ -1,8 +1,8 @@
-# The glasses can listen
+# Chunks become thoughts
 
-Public version: `v0.4.0`  
-Face build: `0.58.0`  
-Originally completed: `2026-09-11`  
+Public version: `v0.5.0`  
+Face build: `0.68.0`  
+Originally completed: `2026-09-14`  
 Sanitized and published: `2026-09-29`
 
-Microphone transport, local speech-to-text, and visible audio diagnostics.
+Phone mirroring, paragraph coalescing, and durable running notes.

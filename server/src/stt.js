@@ -4,12 +4,13 @@ const DEFAULT_DEEPGRAM_MODEL = 'nova-3'
 const DEFAULT_GROQ_MODEL = 'whisper-large-v3-turbo'
 
 import { execFile } from 'node:child_process'
-import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 
 const run = promisify(execFile)
+let debugSeq = 0
 
 function env(name, fallback = '') {
   return String(process.env[name] || fallback).trim()
@@ -19,6 +20,13 @@ function envBool(name, fallback) {
   const raw = env(name)
   if (!raw) return fallback
   return !['0', 'false', 'off', 'no'].includes(raw.toLowerCase())
+}
+
+function safeFilePart(value, fallback = 'clip') {
+  return String(value || fallback)
+    .replace(/[^a-zA-Z0-9_.-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48) || fallback
 }
 
 function le16(value) {
@@ -84,8 +92,26 @@ function sttConfig() {
     localModel: env('STT_LOCAL_MODEL'),
     localThreads: Number(process.env.STT_LOCAL_THREADS) || 4,
     localTimeoutMs: Number(process.env.STT_LOCAL_TIMEOUT_MS) || 120_000,
+    debugDir: env('STT_DEBUG_DIR'),
     sampleRate: Number(process.env.STT_SAMPLE_RATE || process.env.AUDIO_SAMPLE_RATE) || 16_000,
     channels: Number(process.env.STT_CHANNELS || process.env.AUDIO_CHANNELS) || 1,
+  }
+}
+
+function writeDebugWav(wav, config) {
+  if (!config.debugDir) return null
+  try {
+    mkdirSync(config.debugDir, { recursive: true })
+    debugSeq = (debugSeq + 1) % 10_000
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    const session = safeFilePart(config.sessionId, 'session')
+    const client = safeFilePart(config.clientId, String(debugSeq).padStart(4, '0'))
+    const path = join(config.debugDir, `${stamp}-${session}-${client}-${config.sampleRate}hz-${config.channels}ch.wav`)
+    writeFileSync(path, wav)
+    return path
+  } catch (err) {
+    console.warn(`[stt] could not write debug wav: ${err.message}`)
+    return null
   }
 }
 
@@ -183,6 +209,7 @@ export function transcriberInfo() {
     sampleRate: config.sampleRate,
     channels: config.channels,
     configured: hasTranscriber(),
+    debugDir: config.debugDir || null,
   }
 }
 
@@ -206,6 +233,7 @@ export async function transcribePcm(pcm, options = {}) {
   }
 
   const wav = wavFromPcm(pcm, { sampleRate: config.sampleRate, channels: config.channels })
+  const debugPath = writeDebugWav(wav, config)
   try {
     const text =
       config.provider === 'local'
@@ -218,8 +246,9 @@ export async function transcribePcm(pcm, options = {}) {
       text,
       provider: config.provider,
       model: config.provider === 'local' ? config.localModel : config.model,
+      debugPath,
     }
   } catch (err) {
-    return { ok: false, code: 502, error: err.message }
+    return { ok: false, code: 502, error: err.message, debugPath }
   }
 }

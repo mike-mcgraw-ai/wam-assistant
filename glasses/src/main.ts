@@ -23,6 +23,7 @@ import {
   completeInboxItem,
   completeTask,
   endCoachSession,
+  fetchSessionSummary,
   fetchCoachCue,
   fetchCoachSession,
   fetchPlan,
@@ -36,6 +37,7 @@ import { loadSnapshot, saveSnapshot } from './storage'
 import {
   findRun,
   indexRows,
+  noteRows,
   planRows,
   choreRows,
   taskDetailRows,
@@ -82,6 +84,7 @@ const MENU = {
   BACK: 8,
   COACH: 11,
   LISTEN: 12,
+  NOTES: 13,
   START: 10,
   EXIT: 9,
 } as const
@@ -99,6 +102,8 @@ const cached = loadSnapshot()
 function lastSpace(): 'ops' | 'life' {
   // Life by default. The running order is the screen this exists for, and it
   // is what you want on your face when you put them on without thinking.
+  // With Ops sidelined there is only one space, whatever is remembered.
+  if (!config.ops) return 'life'
   try {
     return localStorage.getItem('opsboard.space') === 'ops' ? 'ops' : 'life'
   } catch {
@@ -107,7 +112,12 @@ function lastSpace(): 'ops' | 'life' {
 }
 
 const state: UiState = {
-  view: { kind: 'index', cursor: 0 },
+  // Follow the remembered space from the first frame. This was a flat `index`,
+  // so Life launched onto the index for as long as the first fetch took — the
+  // screen with Ledger, "Start a list" and "The running order" on it, which is
+  // exactly the screen Life is not supposed to have. openPlan() replaced it a
+  // moment later, which made it read as a glitch rather than a wrong default.
+  view: lastSpace() === 'life' ? { kind: 'plan', cursor: 0 } : { kind: 'index', cursor: 0 },
   snapshot: cached,
   error: null,
   loading: cached === null,
@@ -147,13 +157,54 @@ let audioLogLastAt = 0
 
 // ---- rendering -------------------------------------------------------------
 
+/**
+ * Send the frame to the hub as well, for the mirror.
+ *
+ * Fire and forget, and deliberately unawaited: a slow or missing hub must
+ * never delay what reaches the glasses. The mirror is a nicety; the display is
+ * the product.
+ */
+function mirror(content: string): void {
+  void fetch(`${config.serverUrl}/screen`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: content }),
+  }).catch(() => {})
+}
+
+/**
+ * Display asleep.
+ *
+ * Not an exit. Exiting would drop us back to the glasses OS, and getting back
+ * in means digging the private build out of the phone's menu — so the app
+ * stays running with nothing on the panel, and the next input brings it back.
+ *
+ * Kept out of UiState because no screen renders differently for it: sleep is
+ * something paint() does instead of rendering, not a screen of its own.
+ */
+let asleep = false
+
+/** Blank panel: no content, and the firmware's own fully-dim level. */
+const SLEEP_CONTENT = ' '
+const BRIGHT = 4
+const DIM = 0
+
 async function paint(): Promise<void> {
   try {
+    // Rendered once, used twice: the glasses and the mirror must never be
+    // able to show different frames.
+    const content = asleep ? SLEEP_CONTENT : render(state)
+    // The mirror shows what the glasses show, sleep included — an iPad still
+    // lit while the glasses are dark is two devices disagreeing about state.
+    mirror(content)
     await bridge.textContainerUpgrade(
       new TextContainerUpgrade({
         containerID: CONTAINER_ID,
         containerName: CONTAINER_NAME,
-        content: render(state),
+        content,
+        // Omitting this would keep whatever brightness the container has, so
+        // it has to be set explicitly in both directions.
+        textColor: asleep ? DIM : BRIGHT,
       }),
     )
   } catch (err) {
@@ -167,6 +218,30 @@ async function paint(): Promise<void> {
 
 let paintErrors = 0
 let inFlight = false
+
+async function sleepDisplay(): Promise<void> {
+  if (asleep) return
+  asleep = true
+  // An armed confirm must not survive the nap. Waking and tapping once should
+  // never complete something you armed before you put them down.
+  state.armedTaskId = null
+  await paint()
+}
+
+/**
+ * Wake on any input, and swallow that input.
+ *
+ * The gesture that wakes the screen must not also do something on it: waking
+ * into a tap that ticked off a step is how you lose trust in the thing.
+ * Returns true when the event was spent waking up.
+ */
+async function wakeDisplay(): Promise<boolean> {
+  if (!asleep) return false
+  asleep = false
+  await refresh()
+  if (!inFlight) await paint()
+  return true
+}
 
 async function refresh(): Promise<void> {
   // The poll timer and a menu Refresh can land together; a second concurrent
@@ -192,8 +267,10 @@ async function refresh(): Promise<void> {
     }
     state.loading = false
     // Keep polling while the game is up — you want current data the moment
-    // you quit — but do not repaint over the field.
-    if (state.view.kind !== 'pong') await paint()
+    // you quit — but do not repaint over the field. Asleep, keep fetching and
+    // send nothing: a dark panel repainted every fifteen seconds is BLE spent
+    // on a frame nobody can see.
+    if (state.view.kind !== 'pong' && !asleep) await paint()
   } finally {
     inFlight = false
   }
@@ -255,6 +332,13 @@ async function refreshCoachSession(): Promise<void> {
   } else {
     state.error = result.error
   }
+}
+
+function refreshTranscriptAfterChunk(): void {
+  window.setTimeout(() => {
+    if (state.view.kind !== 'cue' || !state.coachSession?.active || !state.foreground || asleep) return
+    void refreshCoachSession().then(() => paint())
+  }, Math.max(250, Math.min(1_500, Math.floor(config.listenPollMs * 0.7))))
 }
 
 function localCoachCue(title: string, lines: string[]): void {
@@ -366,8 +450,12 @@ async function flushAudioChunk(sessionId = audioSessionId, force = false): Promi
     at: Date.now(),
   })
   audioUploading = false
-  if (result.ok) state.audio.sent += 1
-  else state.audio.error = String(result.error ?? 'send failed').slice(0, 24)
+  if (result.ok) {
+    state.audio.sent += 1
+    refreshTranscriptAfterChunk()
+  } else {
+    state.audio.error = String(result.error ?? 'send failed').slice(0, 24)
+  }
 
   if (!result.ok) {
     localCoachCue('Transcription off', [result.error])
@@ -480,29 +568,88 @@ async function syncAudioToCoachSession(): Promise<void> {
   if (audioSessionId || audioOpen) await stopAudioCapture()
 }
 
-async function toggleListening(): Promise<void> {
+/**
+ * Listen, from the menu, only ever opens the Listen screen.
+ *
+ * It used to start a session when none was running, which made opening the
+ * screen to look at it the same gesture as recording — so checking on it while
+ * stopped started it, and the only way back out was to open the menu again and
+ * pick Listen a second time to cancel. Menu opens; the click on this screen
+ * starts and stops. One gesture, one meaning.
+ */
+async function openListening(): Promise<void> {
   const current = await fetchCoachSession(state.space)
-  if (!current.ok) {
-    state.error = current.error
-    await paint()
+  if (current.ok) state.coachSession = current.session
+  else state.error = current.error
+
+  if (state.view.kind !== 'cue') {
+    state.cueReturn = copyView(state.view)
+    listenContext = currentTaskContext()
+  }
+  state.view = { kind: 'cue' }
+  state.scrollTop = 0
+  await paint()
+}
+
+/**
+ * What was on screen when Listen was opened.
+ *
+ * Captured at open rather than at start, because opening Listen is what takes
+ * you off the task row — by the time you click to record, the screen no longer
+ * knows what you were looking at.
+ */
+/**
+ * What a captured line is about.
+ *
+ * `taskId` is what the hub routes on today. `choreId` is sent for a note taken
+ * inside a chore's steps; the hub does not read it yet and falls back to the
+ * capture task, which is the right failure — a note in the wrong place beats a
+ * note nowhere. See docs/NOTES-AI-HANDOFF.md.
+ */
+type ListenContext = { taskId?: string; choreId?: string; label: string } | null
+
+let listenContext: ListenContext = null
+
+function currentTaskContext(): ListenContext {
+  const view = state.view
+  if (view.kind === 'task') {
+    const task = state.plan?.tasks?.find(t => t.taskId === view.taskId)
+    return task ? { taskId: task.taskId, label: task.label } : null
+  }
+  if (view.kind === 'plan') {
+    const row = planRows(state)[view.cursor]
+    if (row?.kind === 'task') return { taskId: row.task.taskId, label: row.task.label }
+  }
+  return null
+}
+
+/**
+ * Start talking about something, from wherever you are.
+ *
+ * The subject travels with the session rather than being worked out later from
+ * what you said: standing inside Laundry and saying "the dryer takes longer
+ * than we thought" is about laundry, and nothing in the sentence says so.
+ *
+ * Clicking it again stops. Both land on the Listen screen, because the screen
+ * that shows whether the microphone is actually working is the one you want in
+ * front of you the moment you start or stop.
+ */
+async function talkAbout(context: ListenContext): Promise<void> {
+  if (state.coachSession?.active) {
+    await openListening()
+    await activate()
     return
   }
+  listenContext = context
+  state.cueReturn = state.view.kind === 'cue' ? state.cueReturn : copyView(state.view)
+  state.view = { kind: 'cue' }
+  state.scrollTop = 0
+  await beginListening()
+}
 
-  state.coachSession = current.session
-
-  // Already listening? Show the numbers. Listen from the menu is how you check
-  // on it, and having that stop the recording meant the only way to look was to
-  // end the thing you were looking at. Stopping is a click on this screen.
-  if (current.session?.active) {
-    state.cueReturn = state.view.kind === 'cue' ? state.cueReturn : copyView(state.view)
-    state.view = { kind: 'cue' }
-    state.scrollTop = 0
-    await paint()
-    return
-  }
-
-  const returnTo = state.view.kind === 'cue' ? state.cueReturn : copyView(state.view)
-  const started = await startCoachSession(state.space)
+/** Start recording. Only ever from a click on the Listen screen. */
+async function beginListening(): Promise<void> {
+  const started = await startCoachSession(state.space, listenContext)
   if (!started.ok) {
     state.error = started.error
     await paint()
@@ -511,11 +658,7 @@ async function toggleListening(): Promise<void> {
   state.coachSession = started.session
   await startAudioCapture(started.session.id)
   if (!audioOpen) localCoachCue('Mic did not open', ['Glasses audioControl returned false.'])
-
   state.error = null
-  state.cueReturn = returnTo
-  state.view = { kind: 'cue' }
-  state.scrollTop = 0
   await paint()
 }
 
@@ -536,12 +679,17 @@ function rowCount(): number {
       return taskDetailRows(state, state.view.taskId).length
     case 'chores':
       return choreRows(state).length
-    case 'checklist':
-      return findRun(state, state.view.runId)?.items.length ?? 0
+    case 'checklist': {
+      const run = findRun(state, state.view.runId)
+      // +1: the "note on this list" row that follows the last step.
+      return run ? run.items.length + 1 : 0
+    }
     case 'picker':
       return startable(state).length
     case 'inbox':
       return inboxItems(state, state.view.group).length
+    case 'notes':
+      return noteRows(state).length
     case 'cue':
     case 'pong':
     case 'fonttest':
@@ -586,7 +734,20 @@ function move(delta: number): void {
   }
 
   if (view.kind === 'cue') {
-    dismissCue()
+    // Scroll winds back through the transcript. It used to dismiss the screen,
+    // which made reading back through what was said impossible: the gesture
+    // for "let me see more" was the gesture for "close this".
+    //
+    // With nothing captured there is nothing to wind through, so a plain cue
+    // popup keeps the old flick-to-dismiss.
+    const captured = (state.coachSession?.recentSegments ?? []).length
+    if (captured === 0) {
+      dismissCue()
+      return
+    }
+    // Up (negative) goes back in time. Clamped in the renderer, which is the
+    // only place that knows how many wrapped lines there actually are.
+    view.scroll = Math.max(0, (view.scroll ?? 0) - delta)
     return
   }
 
@@ -686,6 +847,10 @@ async function toggle(runId: string, itemId: string): Promise<void> {
  * something specific. Ops lands on its index, where the boards are.
  */
 async function switchSpace(): Promise<void> {
+  // Nowhere to switch to. Callers are the root double-tap and the menu item;
+  // the menu item is not built while Ops is off, and the double-tap has its
+  // own Life-only destination, so this is belt and braces.
+  if (!config.ops) return
   state.space = otherSpace(state.space)
   state.cue = null
   try {
@@ -863,15 +1028,26 @@ async function activate(): Promise<void> {
     // Click here ends the session. Deliberate, on the screen showing what it
     // has captured, rather than as a side effect of opening the menu.
     if (state.coachSession?.active) {
-      const stopped = await endCoachSession(state.coachSession.id)
+      const sessionId = state.coachSession.id
+      const stopped = await endCoachSession(sessionId)
       await stopAudioCapture()
       if (stopped.ok) state.coachSession = stopped.session
       else state.error = stopped.error
+      // Land on the transcript immediately; the summary replaces the cue when
+      // and if the hub produces one. Waiting for it before painting would mean
+      // staring at a live-looking screen for however long inference takes.
       await paint()
+      const summary = await fetchSessionSummary(sessionId)
+      if (summary && state.view.kind === 'cue') {
+        localCoachCue(summary.title, summary.lines)
+        await paint()
+      }
       return
     }
-    dismissCue()
-    await paint()
+    // Stopped: this click starts it. Leaving is the double-tap, same as every
+    // other screen. Click used to dismiss, which left no way to start from
+    // here at all and pushed starting back into the menu.
+    await beginListening()
     return
   }
 
@@ -883,6 +1059,10 @@ async function activate(): Promise<void> {
 
   if (view.kind === 'checklist') {
     const run = findRun(state, view.runId)
+    if (run && view.cursor === run.items.length) {
+      await talkAbout({ choreId: run.checklistId, label: run.name })
+      return
+    }
     const item = run?.items[view.cursor]
     if (!run || !item) return
 
@@ -928,6 +1108,11 @@ async function activate(): Promise<void> {
 
   if (view.kind === 'task') {
     const row = taskDetailRows(state, view.taskId)[view.cursor]
+    if (row?.kind === 'listen') {
+      const task = state.plan?.tasks?.find(t => t.taskId === view.taskId)
+      await talkAbout(task ? { taskId: task.taskId, label: task.label } : null)
+      return
+    }
     if (row?.kind !== 'done') {
       // A note line is for reading. Nothing happens.
       await paint()
@@ -994,6 +1179,13 @@ async function activate(): Promise<void> {
 
   if (view.kind === 'plan') {
     const row = planRows(state)[view.cursor]
+
+    // The LIFE line. No subject — this is the "I just thought of something"
+    // capture, the one that used to need the long-press menu.
+    if (row?.kind === 'listen') {
+      await talkAbout(null)
+      return
+    }
 
     // Start it from here. Going into the chore to click the same step you were
     // already looking at was navigation for its own sake — on the running
@@ -1121,7 +1313,7 @@ async function back(): Promise<void> {
 
   // In Life the running order is home: it is what the screen is for, and there
   // is no index behind it any more. Going "back" from it means leaving.
-  if (state.view.kind === 'task' || state.view.kind === 'chores') {
+  if (state.view.kind === 'task' || state.view.kind === 'chores' || state.view.kind === 'notes') {
     await openPlan()
     return
   }
@@ -1134,6 +1326,15 @@ async function back(): Promise<void> {
   // Note for a future store submission: QA expects shutDownPageContainer(1)
   // from the root page. This deliberately does not.
   if (state.view.kind === 'plan' && state.space === 'life') {
+    // Sleep, the way the stock dashboard does it: double-tap your way back to
+    // the top, double-tap once more and the display goes dark. The next input
+    // wakes it. This is the only thing the root double-tap does — the space
+    // switch it used to do has nowhere to go with Ops off, and exiting is not
+    // on the table when getting back in means the phone.
+    if (!config.ops) {
+      await sleepDisplay()
+      return
+    }
     await switchSpace()
     return
   }
@@ -1162,6 +1363,9 @@ async function back(): Promise<void> {
 }
 
 async function onMenu(itemID: number): Promise<void> {
+  // Picking something off the long-press menu is a decision, not a wake-up
+  // tap: bring the screen back and then do what was asked.
+  asleep = false
   switch (itemID) {
     case MENU.SWITCH:
       await switchSpace()
@@ -1192,20 +1396,32 @@ async function onMenu(itemID: number): Promise<void> {
       startPong()
       break
     case MENU.LISTS:
-      // The index: shared list, checklists you can start, the boards. Off the
-      // Life screen and in here, because during ordinary use it says nothing
-      // the running order has not already said.
-      state.view = { kind: 'index', cursor: 0 }
+      // In Life this is the Chores drill-down — one row per chore with its
+      // progress bar. It used to open the old index here, which is the screen
+      // with "Start a list" and "The running order" on it: rows that either
+      // duplicate the running order or lead back to it. In Ops the index IS
+      // the home screen, so there it stays what it was.
+      if (state.space === 'life') {
+        state.view = { kind: 'chores', cursor: 0 }
+      } else {
+        state.view = { kind: 'index', cursor: 0 }
+        await refreshCoachCue(false)
+      }
       state.scrollTop = 0
       clampCursor()
-      if (state.space === 'ops') await refreshCoachCue(false)
+      await paint()
+      break
+    case MENU.NOTES:
+      state.view = { kind: 'notes', cursor: 0 }
+      state.scrollTop = 0
+      clampCursor()
       await paint()
       break
     case MENU.COACH:
       await openCoachCue()
       break
     case MENU.LISTEN:
-      await toggleListening()
+      await openListening()
       break
     case MENU.DIAG:
       state.diagnostics = !state.diagnostics
@@ -1251,17 +1467,18 @@ const page = new CreateStartUpPageContainer({
   ],
   menuObject: new MenuContainerProperty({
     menuItems: [
-      // First item: the label cannot change after create, so it names both
-      // ends rather than the destination.
-      // Six. Everything cut was either a second way to do something that
-      // already had one — Running order is where the space switch lands, All
-      // boards is what double-tap does, Start a list belongs on the Lists
-      // screen — or was only ever there for the build (Pong, Flagged only).
-      // The handlers all survive, so putting one back is one line.
-      new MenuItemProperty({ itemName: 'Ops / Life', itemID: MENU.SWITCH }),
-      new MenuItemProperty({ itemName: 'Lists', itemID: MENU.LISTS }),
+      // The first item's label cannot change after create, so the first item
+      // is the one whose meaning will not change: capture.
+      //
+      // Ops is off (config.ts `ops`), so the space switch is gone from here.
+      // Its handler survives — turning the flag on puts the item back.
+      ...(config.ops
+        ? [new MenuItemProperty({ itemName: 'Ops / Life', itemID: MENU.SWITCH })]
+        : []),
       new MenuItemProperty({ itemName: 'Listen', itemID: MENU.LISTEN }),
-      new MenuItemProperty({ itemName: 'Coach', itemID: MENU.COACH }),
+      new MenuItemProperty({ itemName: 'Notes', itemID: MENU.NOTES }),
+      new MenuItemProperty({ itemName: 'Lists', itemID: MENU.LISTS }),
+      new MenuItemProperty({ itemName: 'Running order', itemID: MENU.FITS }),
       new MenuItemProperty({ itemName: 'Refresh', itemID: MENU.REFRESH }),
       new MenuItemProperty({ itemName: 'Diagnostics', itemID: MENU.DIAG }),
     ],
@@ -1339,6 +1556,26 @@ bridge.onEvenHubEvent((event: EvenHubEvent) => {
 
   lastInputAt = Date.now()
 
+  // ---- wake ------------------------------------------------------------
+  // Before anything is dispatched. Any input at all brings the screen back and
+  // is spent doing so, which is what makes sleep safe to reach for: nothing
+  // you press to wake up can act on the screen you cannot see. Lifecycle
+  // events below are not input and fall through on their own.
+  if (asleep && event.menuItemClickEvent?.itemID === undefined) {
+    const sys = event.sysEvent?.eventType
+    const lifecycle =
+      sys === OsEventTypeList.FOREGROUND_ENTER_EVENT ||
+      sys === OsEventTypeList.FOREGROUND_EXIT_EVENT ||
+      sys === OsEventTypeList.SYSTEM_EXIT_EVENT ||
+      sys === OsEventTypeList.ABNORMAL_EXIT_EVENT ||
+      sys === OsEventTypeList.IMU_DATA_REPORT
+    if (!lifecycle) {
+      state.lastEvent = 'wake'
+      void wakeDisplay()
+      return
+    }
+  }
+
   // ---- contextual menu -------------------------------------------------
   const menuItemID = event.menuItemClickEvent?.itemID
   if (menuItemID !== undefined) {
@@ -1357,6 +1594,9 @@ bridge.onEvenHubEvent((event: EvenHubEvent) => {
     // interval — the first thing you see should not be the last thing from
     // before you looked away.
     state.foreground = true
+    // Putting them back on is the end of any nap. The OS has just handed the
+    // screen back; leaving it dark would read as a dead app.
+    asleep = false
     state.lastEvent = 'fg-in'
     void refresh()
       .then(() => refreshCoachSession())
@@ -1468,5 +1708,9 @@ setInterval(() => void refreshCoachCue(true), config.cueMs)
  * doing nothing" whether or not it is.
  */
 setInterval(() => {
-  if (state.view.kind === 'cue' && state.coachSession?.active && state.foreground) void paint()
-}, 2000)
+  if (state.view.kind !== 'cue' || !state.coachSession?.active || !state.foreground || asleep) return
+  // Refetch, not just repaint. The counters are local so they moved, but the
+  // transcript lines live on the hub and nothing was asking for them — so the
+  // screen said "Nothing heard yet" no matter what the hub had transcribed.
+  void refreshCoachSession().then(() => paint())
+}, config.listenPollMs)

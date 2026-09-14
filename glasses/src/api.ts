@@ -261,10 +261,24 @@ async function postCoach(
   }
 }
 
-export const startCoachSession = (space: string) =>
+/**
+ * Start listening, and tell the hub what was on screen when you did.
+ *
+ * `context` is how a captured line finds its subject without you saying it.
+ * Standing on "Replace car tire" and starting to talk means the line is almost
+ * certainly about the tire; the hub's router uses this as the default and
+ * overrides it only when the line is plainly about something else.
+ *
+ * It is a hint, never an instruction — the router owns the decision.
+ */
+export const startCoachSession = (
+  space: string,
+  context: { taskId?: string; choreId?: string; label: string } | null = null,
+) =>
   postCoach('/coach/session/start', {
     space,
     clientId: `glasses-${Date.now().toString(36)}`,
+    ...(context ? { context } : {}),
   })
 
 export const endCoachSession = (sessionId: string) =>
@@ -304,6 +318,39 @@ export async function sendCoachAudio(
           ? err.message
           : 'network error'
     return { ok: false, error: message.slice(0, 40) }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * What the hub made of a finished Listen session.
+ *
+ * Separate from the transcript on purpose. The transcript is what was said;
+ * this is what it amounted to — the thing actually worth reading back on a
+ * nine-line screen while walking.
+ *
+ * Returns `null` rather than an error when the hub does not have the route or
+ * has nothing to say, because a session that ends with no summary is normal
+ * and must not paint an error over a transcript that is perfectly fine.
+ */
+export async function fetchSessionSummary(
+  sessionId: string,
+): Promise<{ title: string; lines: string[] } | null> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), config.timeoutMs)
+  try {
+    const res = await fetch(
+      `${config.serverUrl}/coach/session/${encodeURIComponent(sessionId)}/summary`,
+      { headers: authHeaders(), signal: controller.signal, cache: 'no-store' },
+    )
+    if (!res.ok) return null
+    const payload = await res.json().catch(() => null)
+    const lines = Array.isArray(payload?.lines) ? payload.lines.map(String) : []
+    if (lines.length === 0) return null
+    return { title: String(payload?.title || 'Summary'), lines }
+  } catch {
+    return null
   } finally {
     clearTimeout(timer)
   }

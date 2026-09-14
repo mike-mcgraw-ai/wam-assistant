@@ -296,6 +296,13 @@ export interface CoachSegment {
   at: number
 }
 
+export interface CoachRunningNote {
+  title: string
+  lines: string[]
+  updatedAt: number | null
+  segmentCount: number
+}
+
 export interface CoachSessionSummary {
   id: string
   space: Space
@@ -308,6 +315,7 @@ export interface CoachSessionSummary {
   active: boolean
   segmentCount: number
   recentSegments: CoachSegment[]
+  runningNote: CoachRunningNote | null
   lastCueAt: number | null
   lastRecapAt: number | null
 }

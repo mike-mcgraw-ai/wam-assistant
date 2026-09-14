@@ -105,6 +105,19 @@ export class Tasks {
     return this.taskDefs().find(t => t.id === id)
   }
 
+  has(id) {
+    return Boolean(this.#taskById(id))
+  }
+
+  ensureTask(input = {}, now = Date.now()) {
+    const id = String(input.id || '').trim()
+    if (id) {
+      const existing = this.#taskById(id)
+      if (existing) return { ok: true, task: existing, existing: true }
+    }
+    return this.addTask(input, now)
+  }
+
   /**
    * Is this task actionable right now?
    *
@@ -209,7 +222,13 @@ export class Tasks {
       if (existing) return { ok: true, duplicate: true, task: existing }
     }
 
+    const requestedId = String(input.id || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40)
     const base =
+      requestedId ||
       label
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, '-')

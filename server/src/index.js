@@ -55,6 +55,7 @@ const inbox = new Inbox({
 const triage = new Triage()
 
 let probeText = ''
+let screenFrame = { text: '', at: 0 }
 
 const tasks = new Tasks(
   JSON.parse(readFileSync(process.env.TASKS_PATH || join(HERE, 'tasks.config.json'), 'utf8')),
@@ -396,6 +397,217 @@ function buildCurrentCue(space, now = Date.now()) {
   })
 }
 
+const CAPTURE_TASK_ID = 'captured-notes'
+const ROUTE_STOP_WORDS = new Set([
+  'a',
+  'an',
+  'and',
+  'about',
+  'add',
+  'for',
+  'make',
+  'me',
+  'note',
+  'on',
+  'the',
+  'to',
+])
+
+function normalizeRouteText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function routeTokens(value) {
+  return normalizeRouteText(value)
+    .split(' ')
+    .filter(token => token.length > 1 && !ROUTE_STOP_WORDS.has(token))
+}
+
+function regexEscape(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function taskAliases(task) {
+  return [
+    task.id,
+    String(task.id || '').replace(/-/g, ' '),
+    task.label,
+    task.note,
+  ]
+    .map(normalizeRouteText)
+    .filter(Boolean)
+}
+
+function findTaskForText(text, space = null) {
+  const query = normalizeRouteText(text)
+  const words = new Set(routeTokens(query))
+  if (!query || words.size === 0) return null
+
+  let best = null
+  let bestScore = 0
+  for (const task of tasks.taskDefs()) {
+    if (space && (task.space ?? 'life') !== space) continue
+    let score = 0
+    for (const alias of taskAliases(task)) {
+      if (alias && query.includes(alias)) score = Math.max(score, 10 + alias.length / 100)
+    }
+    const taskWords = new Set(routeTokens(`${task.id} ${task.label} ${task.note ?? ''}`))
+    let common = 0
+    for (const word of taskWords) if (words.has(word)) common += 1
+    if (common) score = Math.max(score, common)
+    if (score > bestScore) {
+      best = task
+      bestScore = score
+    }
+  }
+  return bestScore >= 1 ? best : null
+}
+
+function stripTargetFromNote(rest, task) {
+  const aliases = taskAliases(task).sort((a, b) => b.length - a.length)
+  for (const alias of aliases) {
+    const pattern = new RegExp(`\\b${alias.split(' ').map(regexEscape).join('\\W+')}\\b\\s*(?:that\\s+)?`, 'i')
+    const match = String(rest).match(pattern)
+    if (!match) continue
+    const note = String(rest).slice((match.index ?? 0) + match[0].length).trim()
+    if (note) return note
+  }
+  return null
+}
+
+function parseTaskCommand(text) {
+  const raw = String(text || '').trim()
+  const patterns = [
+    /^(?:add|create|make)\s+(?:a\s+)?(?:task|to-?do|todo)\s+(?:to\s+)?(.+)$/i,
+    /^(?:remind me to|remember to|i need to|need to)\s+(.+)$/i,
+  ]
+  for (const pattern of patterns) {
+    const match = raw.match(pattern)
+    const label = match?.[1]?.trim()
+    if (label) return label.replace(/[.!?]+$/g, '').slice(0, 80)
+  }
+  return null
+}
+
+function parseNoteCommand(text, space) {
+  const raw = String(text || '').trim()
+  const match = raw.match(/^(?:(?:make|add|save|take)\s+)?(?:a\s+)?note\s+(?:on|for|about|to)\s+(.+)$/i)
+  if (!match) return null
+
+  const rest = match[1].trim()
+  const splitters = [/\s+that\s+/i, /\s+saying\s+/i, /\s+to say\s+/i, /\s+-\s+/, /\s*:\s*/]
+  for (const splitter of splitters) {
+    const parts = rest.split(splitter)
+    if (parts.length < 2) continue
+    const target = findTaskForText(parts[0], space)
+    const note = parts.slice(1).join(' ').trim()
+    if (target && note) return { task: target, text: note }
+  }
+
+  const task = findTaskForText(rest, space)
+  if (!task) return null
+  return { task, text: stripTargetFromNote(rest, task) || raw }
+}
+
+function ensureCaptureTask(space, at = Date.now()) {
+  return tasks.ensureTask(
+    {
+      id: CAPTURE_TASK_ID,
+      label: 'Captured notes',
+      weight: 'normal',
+      window: 'anytime',
+      space,
+      note: 'Unsorted Listen captures',
+      by: 'listen',
+      clientId: `system:${CAPTURE_TASK_ID}`,
+    },
+    at,
+  )
+}
+
+function routeCoachSegment(session, segment) {
+  if (!session || !segment?.text) return null
+  const text = String(segment.text).trim()
+  if (!text) return null
+  const space = cueSpace(session.space)
+  const at = segment.at || Date.now()
+
+  const taskText = parseTaskCommand(text)
+  if (taskText) {
+    const result = tasks.addTask({
+      label: taskText,
+      space,
+      window: 'anytime',
+      weight: 'big',
+      firstNote: text,
+      by: 'listen',
+      clientId: `${segment.id}:task`,
+    }, at)
+    return { kind: 'task', result }
+  }
+
+  const explicit = parseNoteCommand(text, space)
+  if (explicit?.task?.id) {
+    const result = tasks.addNote(explicit.task.id, explicit.text, 'listen', segment.id, at)
+    return { kind: 'note', taskId: explicit.task.id, result }
+  }
+
+  const contextTaskId = session.context?.taskId
+  if (contextTaskId && tasks.has(contextTaskId)) {
+    const result = tasks.addNote(contextTaskId, text, 'listen', segment.id, at)
+    return { kind: 'context', taskId: contextTaskId, result }
+  }
+
+  const capture = ensureCaptureTask(space, at)
+  const taskId = capture.task?.id || CAPTURE_TASK_ID
+  const result = tasks.addNote(taskId, text, 'listen', segment.id, at)
+  return { kind: 'capture', taskId, result }
+}
+
+function summaryText(text, max = 88) {
+  return String(text || '')
+    .replace(/^(?:add|create|make)\s+(?:a\s+)?(?:task|to-?do|todo)\s+(?:to\s+)?/i, '')
+    .replace(/^(?:remind me to|remember to|i need to|need to)\s+/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max)
+}
+
+function sessionSummary(session) {
+  const segments = (session?.segments ?? []).filter(segment => segment.final !== false)
+  if (segments.length === 0) return { title: 'Session recap', lines: [] }
+
+  const lines = []
+  const seen = new Set()
+  const add = (prefix, text) => {
+    const body = summaryText(text)
+    const key = normalizeRouteText(`${prefix} ${body}`)
+    if (!body || seen.has(key)) return
+    seen.add(key)
+    lines.push(`${prefix}: ${body}`)
+  }
+
+  for (const segment of segments.slice().reverse()) {
+    const text = segment.text
+    if (/\b(decided|decision|agreed|plan is|we will|we're going to|i will|i'll)\b/i.test(text)) {
+      add('Decision', text)
+    } else if (/\b(remind me to|remember to|need to|have to|should|follow up|call|text|email|send|book|schedule|pay|check|buy|file|finish|ask|tell)\b/i.test(text)) {
+      add('Next', text)
+    }
+    if (lines.length >= 5) break
+  }
+
+  if (lines.length === 0 && session.context?.label) {
+    lines.push(`Filed under: ${session.context.label}`)
+  }
+  if (lines.length === 0) lines.push(`Captured ${segments.length} line${segments.length === 1 ? '' : 's'}.`)
+  return { title: 'Session recap', lines: lines.slice(0, 5) }
+}
+
 if (!INGEST_TOKEN) {
   console.warn('[warn] INGEST_TOKEN is empty — /ingest is unauthenticated. Set one before this leaves your bench.')
 }
@@ -421,7 +633,16 @@ let transcribing = false
  * The glasses can prove audio left the building; without this there was no way
  * to see what happened to it after, short of reading the server's terminal.
  */
-const sttStats = { queued: 0, ok: 0, empty: 0, failed: 0, lastError: null, lastText: null, lastMs: 0 }
+const sttStats = {
+  queued: 0,
+  ok: 0,
+  empty: 0,
+  failed: 0,
+  lastError: null,
+  lastText: null,
+  lastMs: 0,
+  lastDebugFile: null,
+}
 
 function enqueueTranscription(sessionId, pcm, body) {
   // A backlog means the model is slower than the speech. Dropping the oldest
@@ -440,8 +661,14 @@ async function drainTranscriptions() {
       const { sessionId, pcm, body } = transcribeQueue.shift()
       const startedAt = Date.now()
       try {
-        const out = await transcribePcm(pcm, { sampleRate: body.sampleRate, channels: body.channels })
+        const out = await transcribePcm(pcm, {
+          sampleRate: body.sampleRate,
+          channels: body.channels,
+          sessionId,
+          clientId: body.clientId,
+        })
         sttStats.lastMs = Date.now() - startedAt
+        sttStats.lastDebugFile = out.debugPath || sttStats.lastDebugFile
         if (!out.ok) {
           sttStats.failed += 1
           sttStats.lastError = String(out.error || 'failed').slice(0, 60)
@@ -462,7 +689,10 @@ async function drainTranscriptions() {
           clientId: body.clientId,
           at: body.at,
         })
-        if (result.ok && !result.duplicate) queueCoachCue(result.session.space, { reason: 'audio' })
+        if (result.ok && !result.duplicate) {
+          routeCoachSegment(result.session, result.segment)
+          queueCoachCue(result.session.space, { reason: 'audio' })
+        }
       } catch (err) {
         sttStats.failed += 1
         sttStats.lastError = String(err.message || err).slice(0, 60)
@@ -548,6 +778,37 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true })
     }
     return json(res, 200, { text: probeText })
+  }
+
+  /**
+   * Mirror of whatever is on the glasses.
+   *
+   * The hub cannot know what the display shows — the rendering happens in the
+   * app — so the app posts each frame here and this hands it back. One string,
+   * no second renderer to drift out of sync with the first.
+   */
+  if (url.pathname === '/screen') {
+    if (req.method === 'POST') {
+      const raw = await readBody(req)
+      try {
+        screenFrame = { text: String(JSON.parse(raw).text ?? ''), at: Date.now() }
+      } catch {
+        screenFrame = { text: raw, at: Date.now() }
+      }
+      return json(res, 200, { ok: true })
+    }
+    return json(res, 200, screenFrame)
+  }
+
+  if (req.method === 'GET' && url.pathname === '/mirror') {
+    try {
+      const html = readFileSync(join(WEB_DIR, 'mirror.html'))
+      cors(res)
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
+      return res.end(html)
+    } catch {
+      return json(res, 404, { error: 'not found' })
+    }
   }
 
   if (req.method === 'GET' && url.pathname === '/notes') {
@@ -663,10 +924,19 @@ const server = http.createServer(async (req, res) => {
       space: cueSpace(body.space),
       modeId: body.modeId,
       title: body.title,
+      context: body.context,
       clientId: body.clientId,
       at: body.at,
     })
     return json(res, result.ok ? 200 : 400, result)
+  }
+
+  const coachSummaryMatch = url.pathname.match(/^\/coach\/session\/([^/]+)\/summary$/)
+  if (req.method === 'GET' && coachSummaryMatch) {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    const session = coach.session(decodeURIComponent(coachSummaryMatch[1]))
+    if (!session) return json(res, 404, { error: 'unknown session' })
+    return json(res, 200, sessionSummary(session))
   }
 
   const coachSessionMatch = url.pathname.match(/^\/coach\/session\/([^/]+)\/(segment|audio|end)$/)
@@ -717,7 +987,10 @@ const server = http.createServer(async (req, res) => {
       clientId: body.clientId,
       at: body.at,
     })
-    if (result.ok && !result.duplicate) queueCoachCue(result.session.space, { reason: 'segment' })
+    if (result.ok && !result.duplicate) {
+      routeCoachSegment(result.session, result.segment)
+      queueCoachCue(result.session.space, { reason: 'segment' })
+    }
     return json(res, result.ok ? 200 : 400, result)
   }
 

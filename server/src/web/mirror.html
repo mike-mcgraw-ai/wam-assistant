@@ -1,0 +1,66 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<title>WAM</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden}
+  body{display:flex;align-items:center;justify-content:center}
+  /* 576x288 is the panel. The mirror keeps that ratio and scales to fit, so
+     what you see on the iPad breaks lines exactly where the glasses do. */
+  #panel{
+    width:min(100vw, calc(100vh * 2));
+    height:min(100vh, calc(100vw / 2));
+    position:relative;
+  }
+  pre{
+    position:absolute; inset:0; margin:0;
+    display:flex; flex-direction:column; justify-content:flex-start;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    font-size:calc(100cqw / 46);
+    line-height:1.34;
+    color:#2bff6a; text-shadow:0 0 6px rgba(43,255,106,.35);
+    padding:2.2% 2.6%; white-space:pre; letter-spacing:.02em;
+  }
+  #panel{container-type:inline-size}
+  #stale{
+    position:absolute; right:2%; top:2%; width:10px; height:10px;
+    border-radius:50%; background:#2bff6a; opacity:.9;
+  }
+  #stale.off{background:#444}
+</style>
+
+<div id="panel"><pre id="screen">connecting…</pre><div id="stale"></div></div>
+
+<script>
+/*
+ * Mirror of the glasses display.
+ *
+ * Shows the last frame the app pushed. It only updates while the glasses app
+ * is open — nothing else renders those screens — so the dot goes dark when the
+ * frame stops being fresh rather than leaving a stale page looking live.
+ */
+const screen = document.getElementById('screen')
+const dot = document.getElementById('stale')
+let lastAt = 0
+
+async function tick() {
+  try {
+    const res = await fetch('/screen', { cache: 'no-store' })
+    const frame = await res.json()
+    if (frame.at && frame.at !== lastAt) {
+      lastAt = frame.at
+      screen.textContent = frame.text || ''
+    }
+    const fresh = frame.at && Date.now() - frame.at < 20000
+    dot.className = fresh ? '' : 'off'
+    if (!frame.at) screen.textContent = 'No frame yet.\n\nOpen WAM on the glasses.'
+  } catch {
+    dot.className = 'off'
+  }
+}
+
+tick()
+setInterval(tick, 1000)
+</script>

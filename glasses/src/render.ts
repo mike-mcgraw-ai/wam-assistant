@@ -10,6 +10,7 @@ import type {
   BlockPlan,
   Board,
   ChecklistRun,
+  CoachSegment,
   CoachCue,
   CoachSessionSummary,
   InboxGroup,
@@ -18,6 +19,7 @@ import type {
   Space,
   StartableChecklist,
   TaskRow,
+  TaskNote,
   DoneRow,
 } from './types'
 import {
@@ -51,8 +53,18 @@ export type View =
   | { kind: 'picker'; cursor: number }
   | { kind: 'plan'; cursor: number }
   | { kind: 'chores'; cursor: number }
+  | { kind: 'notes'; cursor: number }
   | { kind: 'task'; taskId: string; cursor: number }
-  | { kind: 'cue' }
+  /**
+   * The Listen screen.
+   *
+   * `scroll` is how far back through the transcript you have wound, in lines,
+   * 0 meaning pinned to the newest. It has to live on the view rather than in
+   * the module because the screen repaints every two seconds while recording —
+   * anything not in the view would be reset by the next frame, which is what
+   * "I scrolled up and it snapped back" looks like.
+   */
+  | { kind: 'cue'; scroll?: number }
   | { kind: 'pong' }
   | { kind: 'fonttest'; page: number }
   | { kind: 'inbox'; group: string; cursor: number }
@@ -172,6 +184,7 @@ export type IndexRow =
  * and nothing tells your eye where the big stuff stops and the list begins.
  */
 export type PlanRow =
+  | { kind: 'listen' }
   | { kind: 'task'; task: TaskRow }
   | { kind: 'chores' }
   | { kind: 'agenda'; row: AgendaRow | DoneRow }
@@ -194,7 +207,11 @@ export function planRows(state: UiState): PlanRow[] {
   // that only created space was the cheapest thing on the page to improve.
   const gap: PlanRow[] = agenda.length ? [{ kind: 'chores' }] : []
 
-  return [...tasks, ...gap, ...agenda]
+  // The LIFE line, made selectable. Scrolling up off the first task lands on
+  // it, and a click starts talking — general capture, no subject, which is the
+  // "just let me say a thing" case that otherwise needed the long-press menu.
+  // It costs no row: the header line was already on screen doing nothing.
+  return [{ kind: 'listen' }, ...tasks, ...gap, ...agenda]
 }
 
 /** Rows the cursor is allowed to stop on. */
@@ -267,6 +284,56 @@ function renderChores(state: UiState, cursor: number): string {
     }
   }
   lines.push('', 'click to open')
+  return assemble(lines, config.maxChars, config.maxLines)
+}
+
+/**
+ * Every note you have taken, newest first, one line each.
+ *
+ * Notes live on their tasks, which is right when you are working one and
+ * useless when you are trying to remember what you told yourself yesterday —
+ * that meant opening tasks one at a time to find out. This is the other view
+ * of the same data: all of it, smallest space it fits in, with the task it
+ * belongs to named so a line is never orphaned from its subject.
+ */
+export type NoteRow = { note: TaskNote; task: TaskRow }
+
+export function noteRows(state: UiState): NoteRow[] {
+  const rows: NoteRow[] = []
+  for (const task of state.plan?.tasks ?? []) {
+    for (const note of task.notes ?? []) rows.push({ note, task })
+  }
+  // Newest first: the thing you said most recently is the thing you are most
+  // likely to be looking for.
+  return rows.sort((a, b) => (b.note.at ?? 0) - (a.note.at ?? 0))
+}
+
+function renderNotes(state: UiState, cursor: number): string {
+  const rows = noteRows(state)
+  if (rows.length === 0) {
+    return assemble(
+      [clockLine(state), ruleCentred('Notes', false), '', 'Nothing written down yet.', '', 'Listen, then talk.'],
+      config.maxChars,
+      config.maxLines,
+    )
+  }
+
+  const win = windowFollow(cursor, rows.length, config.rowsPerPage - 2, state.scrollTop)
+  const lines: string[] = [clockLine(state), ruleCentred(`Notes ${rows.length}`, false)]
+  for (let i = win.start; i < win.end; i += 1) {
+    const { note, task } = rows[i]
+    const selected = i === cursor
+    if (selected) {
+      // The selected note gets the room to be read. One row is enough to find
+      // a note and never enough to use it.
+      const wrapped = wrap(note.text, LINE_CHARS - 2)
+      lines.push(clipToWidth(`>${clip(task.label, 20)}  ${ago(note.at)} ago`))
+      for (const line of wrapped.slice(0, 3)) lines.push(clipToWidth(` ${line}`))
+    } else {
+      lines.push(clipToWidth(` ${clip(note.text, 30)}  ${clip(task.label, 12)}`))
+    }
+  }
+  lines.push('', 'click to open the task')
   return assemble(lines, config.maxChars, config.maxLines)
 }
 
@@ -409,11 +476,14 @@ export function clockLine(_state: UiState, now = new Date()): string {
  * stale or cached data, that belongs with the label saying what you are
  * looking at.
  */
-export function spaceLine(state: UiState): string {
+export function spaceLine(state: UiState, selected = false): string {
   const label = state.space === 'ops' ? 'OPS' : 'LIFE'
+  // Selected, the line stops being a header and starts being a button, so it
+  // has to say what the click does rather than only what space you are in.
+  const point = selected ? '>  ' : '   '
 
   if (state.diagnostics) {
-    return clipToWidth(`   ${label}  v${APP_VERSION} ${state.events}:${state.lastEvent}`)
+    return clipToWidth(`${point}${label}  v${APP_VERSION} ${state.events}:${state.lastEvent}`)
   }
 
   const connection = state.fromCache
@@ -440,7 +510,10 @@ export function spaceLine(state: UiState): string {
     : ''
 
   const ai = aiWidgetText(state)
-  return clipToWidth(`   ${label}${connection}${mic}${ai ? `   AI: ${ai}` : ''}`)
+  // When the line is the cursor it earns the right-hand slot, so the one thing
+  // you can do from here is spelled out instead of guessed at.
+  const action = selected ? (state.coachSession?.active ? '   click to stop' : '   click to talk') : ''
+  return clipToWidth(`${point}${label}${connection}${mic}${action}${ai && !selected ? `   AI: ${ai}` : ''}`)
 }
 
 export function dateLabel(now = new Date()): string {
@@ -595,7 +668,11 @@ function renderChecklist(state: UiState, runId: string, cursor: number): string 
   const run = findRun(state, runId)
   if (!run) return 'WAM\n\nList closed.\n\ndbl-tap to go back'
 
-  const win = windowFollow(cursor, run.items.length, config.rowsPerPage, state.scrollTop)
+  // One row past the last step: talk about this chore. Same idea as the task
+  // screen — capture started from inside a list already knows what it is about,
+  // so nothing downstream has to guess which chore the note belongs to.
+  const total = run.items.length + 1
+  const win = windowFollow(cursor, total, config.rowsPerPage, state.scrollTop)
   const { start, end } = win
   const more = win.more ? `${win.atTop ? '' : '^'}${win.atEnd ? '' : 'v'}` : ''
 
@@ -605,13 +682,22 @@ function renderChecklist(state: UiState, runId: string, cursor: number): string 
       `${clip(run.name, 11)} ${bar(run.done, run.total, 6)} ${run.done}/${run.total}${more ? ` ${more}` : ''}`,
     ),
   ]
-  for (let i = start; i < end; i += 1) lines.push(checklistItemRow(run.items[i], i === cursor))
+  for (let i = start; i < end; i += 1) {
+    if (i === run.items.length) {
+      const live = state.coachSession?.active
+      lines.push(clip(`${i === cursor ? '>' : ' '}${live ? '[*] Stop listening' : '[~] Note on this list'}`, LINE_CHARS))
+    } else lines.push(checklistItemRow(run.items[i], i === cursor))
+  }
 
   // The only footer left in the app: a flagged row resets instead of ticking,
   // which is the one place the click does something you would not expect.
   // What a click does, spelled out while this is still new. Deliberately not
   // the double-tap: going back is the one gesture that is already obvious.
   const item = run.items[cursor]
+  if (cursor === run.items.length) {
+    lines.push(state.coachSession?.active ? 'recording - click to stop' : `click to talk about ${clip(run.name, 14)}`)
+    return assemble(lines, config.maxChars, config.maxLines)
+  }
   const tip = item?.suspect
     ? 'running too long - click to reset'
     : item?.done
@@ -688,6 +774,10 @@ function planTip(state: UiState, rows: PlanRow[], cursor: number): string {
       : '! Task - click to open'
   }
 
+  if (row.kind === 'listen') {
+    return state.coachSession?.active ? 'Recording - click to stop' : 'Talk - click to start a note'
+  }
+
   const r = row.row
   if (r.kind === 'gap') return '~ Waiting - nothing to start'
   if (r.kind === 'done') return `[x] Done ${ago(r.at)} ago - click to undo`
@@ -720,10 +810,13 @@ function renderPlan(state: UiState, cursor: number): string {
   // A blank under the clock as well. The header used to butt straight into the
   // first task and the whole screen read as one wall of characters; the list
   // is allowed to run onto a second page, so the line is affordable.
-  const lines: string[] = [clockLine(state), spaceLine(state)]
+  const lines: string[] = [clockLine(state), spaceLine(state, cursor === 0)]
   for (let i = win.start; i < win.end; i += 1) {
     const row = rows[i]
     const point = i === cursor ? '>' : ' '
+    // Already drawn, as the header. Skipping it here is what lets a selectable
+    // row cost nothing: the line was on screen either way.
+    if (row.kind === 'listen') continue
     if (row.kind === 'chores') {
       lines.push(ruleCentred(planTip(state, rows, cursor), i === cursor))
     } else if (row.kind === 'task') {
@@ -749,6 +842,7 @@ function renderPlan(state: UiState, cursor: number): string {
 export type TaskDetailRow =
   | { kind: 'noteline'; text: string; first: boolean }
   | { kind: 'space' }
+  | { kind: 'listen' }
   | { kind: 'done' }
 
 export function taskDetailRows(state: UiState, taskId: string): TaskDetailRow[] {
@@ -764,6 +858,9 @@ export function taskDetailRows(state: UiState, taskId: string): TaskDetailRow[] 
     })
   }
   if (rows.length > 0) rows.push({ kind: 'space' })
+  // Talk about this task, from this task. Starting capture anywhere else means
+  // the hub has to guess the subject; started from here it is not a guess.
+  rows.push({ kind: 'listen' })
   rows.push({ kind: 'done' })
   return rows
 }
@@ -792,7 +889,10 @@ function renderTaskDetail(state: UiState, taskId: string, cursor: number): strin
     const row = rows[i]
     const point = i === cursor ? '>' : ' '
     if (row.kind === 'space') lines.push('')
-    else if (row.kind === 'done') {
+    else if (row.kind === 'listen') {
+      const live = state.coachSession?.active
+      lines.push(clip(`${point}${live ? '[*] Stop listening' : '[~] Add a note by voice'}`, LINE_CHARS))
+    } else if (row.kind === 'done') {
       const armed = state.armedTaskId === taskId
       lines.push(clip(`${point}${armed ? '[?] Really done?' : '[ ] Mark done'}`, LINE_CHARS))
     } else {
@@ -803,35 +903,137 @@ function renderTaskDetail(state: UiState, taskId: string, cursor: number): strin
   return assemble(lines, config.maxChars, config.maxLines)
 }
 
-function renderCue(state: UiState): string {
+type TranscriptBlock = {
+  speaker: string
+  text: string
+}
+
+function endsLikeSentence(text: string): boolean {
+  return /[.!?][)"'\]]?$/.test(text.trim())
+}
+
+/**
+ * STT arrives as short segments, but the glasses should read like speech.
+ * Merge adjacent chunks from the same speaker into compact paragraph blocks
+ * before wrapping, so "I need to do..." does not become a screenful of crumbs.
+ */
+function transcriptBlocks(segments: CoachSegment[]): TranscriptBlock[] {
+  const blocks: TranscriptBlock[] = []
+
+  for (const segment of segments) {
+    const speaker = segment.speaker === 'me' ? 'me' : 'other'
+    const text = segment.text.replace(/\s+/g, ' ').trim()
+    if (!text) continue
+
+    const previous = blocks[blocks.length - 1]
+    const startsNewBlock =
+      !previous ||
+      previous.speaker !== speaker ||
+      previous.text.length > 260 ||
+      (previous.text.length > 140 && endsLikeSentence(previous.text))
+
+    if (startsNewBlock) blocks.push({ speaker, text })
+    else previous.text = `${previous.text} ${text}`
+  }
+
+  return blocks
+}
+
+function transcriptLines(segments: CoachSegment[]): string[] {
+  const lines: string[] = []
+
+  for (const block of transcriptBlocks(segments)) {
+    const prefix = block.speaker === 'me' ? '> ' : '- '
+    const wrapped = wrap(block.text, LINE_CHARS - prefix.length)
+    for (let i = 0; i < wrapped.length; i += 1) {
+      lines.push(`${i === 0 ? prefix : '  '}${wrapped[i]}`)
+    }
+  }
+
+  return lines
+}
+
+function transcriptWindow(lines: string[], room: number, scrollBack: number): string[] {
+  const maxScroll = Math.max(0, lines.length - room)
+  const scroll = Math.min(Math.max(0, scrollBack), maxScroll)
+  const end = lines.length - scroll
+  let start = Math.max(0, end - room)
+
+  // If the available window starts midway through a wrapped paragraph, step
+  // back to its prefixed first line. Showing only "  after this." is worse
+  // than showing fewer exact words with context.
+  while (start > 0 && lines[start]?.startsWith('  ')) start -= 1
+
+  const window = lines.slice(start, end)
+  return window.length > room ? window.slice(0, room) : window
+}
+
+function pushRunningNote(lines: string[], session: CoachSessionSummary, maxRows = 3): void {
+  const note = session.runningNote
+  if (!note?.lines?.length || maxRows <= 0) return
+
+  let used = 0
+  for (const raw of note.lines.slice(0, 3)) {
+    const wrapped = wrap(`* ${raw}`, LINE_CHARS)
+    for (const line of wrapped) {
+      if (used >= maxRows) return
+      lines.push(line)
+      used += 1
+    }
+  }
+}
+
+function renderCue(state: UiState, scrollBack = 0): string {
   const session = state.coachSession
   const cue = state.cue
   const lines: string[] = []
+  const listenDebug = config.listenDebug || state.diagnostics
 
-  // The status goes first and unconditionally while a session is live. It used
-  // to sit in the no-cue branch, and starting Listen always sets a cue — so the
-  // one screen meant to show whether the microphone is working never showed it.
   if (session?.active) {
-    const a = state.audio
+    const a = state.audio ?? { open: false, frames: 0, chunks: 0, sent: 0, rejected: 0, lastRms: 0, kind: '-', raw: 0, error: null }
     const mic = !a.open ? 'CLOSED' : a.sent > 0 ? 'MIC*' : a.frames > 0 ? 'MIC.' : 'MIC?'
-    lines.push(
-      clipToWidth(`${mic}  ${clip(session.modeName, 14)}  ${session.segmentCount} lines`),
-      clipToWidth(`raw ${a.raw}  frames ${a.frames}  chunks ${a.chunks}  sent ${a.sent}`),
-      clipToWidth(`quiet ${a.rejected}  rms ${a.lastRms}/${config.audioMinRms}  pcm ${a.kind}`),
-    )
-    if (a.error) lines.push(clipToWidth(`err ${a.error}`))
-
-    // The other half of the path. The glasses can prove audio left; this says
-    // what the hub did with it.
-    const stt = state.snapshot?.stt
-    if (stt) {
+    if (listenDebug) {
       lines.push(
-        clipToWidth(`stt ${stt.provider}${stt.configured ? '' : ' UNSET'}  ok ${stt.ok}  empty ${stt.empty}  fail ${stt.failed}  ${stt.lastMs}ms`),
+        clipToWidth(`${mic}  ${clip(session.modeName, 14)}  ${session.segmentCount} lines`),
+        clipToWidth(`raw ${a.raw}  frames ${a.frames}  chunks ${a.chunks}  sent ${a.sent}`),
+        clipToWidth(`quiet ${a.rejected}  rms ${a.lastRms}/${config.audioMinRms}  pcm ${a.kind}`),
       )
-      if (stt.lastError) lines.push(clipToWidth(`stt err ${stt.lastError}`))
+      if (a.error) lines.push(clipToWidth(`err ${a.error}`))
+
+      // The other half of the path. The glasses can prove audio left; this says
+      // what the hub did with it.
+      const stt = state.snapshot?.stt
+      if (stt) {
+        lines.push(
+          clipToWidth(`stt ${stt.provider}${stt.configured ? '' : ' UNSET'}  ok ${stt.ok}  empty ${stt.empty}  fail ${stt.failed}  ${stt.lastMs}ms`),
+        )
+        if (stt.lastError) lines.push(clipToWidth(`stt err ${stt.lastError}`))
+      }
+    } else {
+      // One status line, not a debug panel. The transcript is the point of this
+      // screen now that the audio path is proven.
+      lines.push(
+        clipToWidth(`LISTEN  ${clip(session.modeName, 12)}  ${session.segmentCount} lines  ${mic}`),
+      )
     }
-  } else if (!cue) {
-    return assemble([header(state, 'Coach'), '', 'Not listening.'], config.maxChars, config.maxLines)
+  } else {
+    // Stopped is a screen you can act on, not a dead end. Listen from the menu
+    // brings you here without recording, so this line has to say how to start.
+    const stt = state.snapshot?.stt
+    const lines0 = [
+      clockLine(state),
+      ruleCentred('Listen', false),
+      '',
+      'Not listening - click to start',
+    ]
+    if (listenDebug && stt) lines0.push('', clipToWidth(`stt ${stt.provider}${stt.configured ? '' : ' UNSET'}  ok ${stt.ok}  empty ${stt.empty}  fail ${stt.failed}`))
+    if (!cue && !session?.recentSegments?.length) return assemble(lines0, config.maxChars, config.maxLines)
+    lines.push(...lines0)
+  }
+
+  if (!listenDebug && session?.runningNote?.lines?.length) {
+    lines.push('')
+    pushRunningNote(lines, session, cue ? 2 : 3)
   }
 
   if (cue) {
@@ -844,14 +1046,33 @@ function renderCue(state: UiState): string {
   const segments = session?.recentSegments ?? []
   if (segments.length > 0) {
     lines.push('')
-    const room = Math.max(2, config.maxLines - lines.length)
-    for (const seg of segments.slice(-room)) {
-      for (const line of wrap(`${seg.speaker === 'me' ? '>' : '-'} ${seg.text}`, LINE_CHARS)) {
-        lines.push(line)
-      }
-    }
+    const room = Math.max(0, config.maxLines - lines.length)
+    if (room <= 0) return assemble(lines, config.maxChars, config.maxLines)
+
+    // Wrap everything first, then window over the wrapped lines. Windowing
+    // over segments and wrapping after means one long sentence silently eats
+    // the whole screen and the scroll position stops meaning anything.
+    const all = transcriptLines(segments)
+
+    const maxScroll = Math.max(0, all.length - room)
+    const scroll = Math.min(Math.max(0, scrollBack), maxScroll)
+    for (const line of transcriptWindow(all, room, scrollBack)) lines.push(line)
+    // Say so when you are not at the live end, or a paused view of an old line
+    // reads as a transcript that has stopped moving.
+    if (scroll > 0) lines.push(clipToWidth(`  ^ ${scroll} more below - scroll down for live`))
   } else if (session?.active) {
-    lines.push('', 'Nothing heard yet.')
+    // Name which half is quiet. "Nothing heard yet" is true whether the mic is
+    // dead, the chunks never left, or the hub transcribed them to nothing —
+    // three different problems that need three different fixes.
+    const a = state.audio
+    const stt = state.snapshot?.stt
+    const why =
+      !a.open ? 'mic closed'
+        : a.sent === 0 ? 'nothing sent to hub'
+        : stt && stt.failed > 0 ? 'hub stt failing'
+        : stt && stt.empty > 0 ? 'hub stt heard nothing'
+        : 'waiting on hub'
+    lines.push('', `No lines yet - ${why}`)
   }
 
   return assemble(lines, config.maxChars, config.maxLines)
@@ -868,6 +1089,8 @@ export function render(state: UiState): string {
       return renderTaskDetail(state, state.view.taskId, state.view.cursor)
     case 'chores':
       return renderChores(state, state.view.cursor)
+    case 'notes':
+      return renderNotes(state, state.view.cursor)
     case 'checklist':
       return renderChecklist(state, state.view.runId, state.view.cursor)
     case 'picker':
@@ -875,7 +1098,7 @@ export function render(state: UiState): string {
     case 'plan':
       return renderPlan(state, state.view.cursor)
     case 'cue':
-      return renderCue(state)
+      return renderCue(state, state.view.scroll ?? 0)
     case 'pong':
       return state.pong ? renderPong(state.pong) : 'PONG\n\nloading...'
     case 'fonttest':

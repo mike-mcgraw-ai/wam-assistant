@@ -89,6 +89,95 @@ function str(value, max = 500) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max)
 }
 
+function normalizeNoteText(value) {
+  return str(value, 500)
+    .replace(/^(?:um+|uh+|like|okay|ok|so|yeah|well)[, ]+/i, '')
+    .replace(/\b(?:um+|uh+)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function noteKey(text) {
+  return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+}
+
+function clipNote(text, max = 82) {
+  const clean = normalizeNoteText(text)
+  if (clean.length <= max) return clean
+  return `${clean.slice(0, Math.max(0, max - 3)).trim()}...`
+}
+
+function splitThoughts(text) {
+  const clean = normalizeNoteText(text)
+  if (!clean) return []
+  const parts = clean.match(/[^.!?]+[.!?]?/g) || [clean]
+  return parts.map(part => normalizeNoteText(part)).filter(part => part.length >= 8)
+}
+
+function looksOpen(text) {
+  return (
+    text.includes('?') ||
+    /^(?:who|what|when|where|why|how|can|could|would|should|is|are|did|do|does)\b/i.test(text)
+  )
+}
+
+function noteKind(text) {
+  if (looksOpen(text)) return 'Open'
+  if (/\b(?:decided|decision|agreed|settled|plan is|we will|we're going to|i will|i'll)\b/i.test(text)) return 'Decided'
+  if (/\b(?:remind me to|remember to|need to|have to|should|follow up|call|text|email|send|book|schedule|pay|check|buy|file|finish|ask|tell)\b/i.test(text)) return 'Next'
+  if (/\b(?:connect|connected|dots?|because|so that|which means|means that|ties? to|related|thread|pattern|point is|trying to say|lost|tangent|back to|where we were)\b/i.test(text)) return 'Dot'
+  return 'Now'
+}
+
+function runningNoteLine(kind, text) {
+  return `${kind}: ${clipNote(text)}`
+}
+
+function runningConversationNote(session) {
+  const pieces = []
+  for (const segment of session?.segments ?? []) {
+    if (segment?.final === false) continue
+    for (const text of splitThoughts(segment.text)) {
+      pieces.push({ text, kind: noteKind(text), at: segment.at })
+    }
+  }
+  if (pieces.length === 0) return null
+
+  const latest = pieces.at(-1)
+  const chosen = []
+  const seen = new Set()
+  const add = piece => {
+    if (!piece?.text || chosen.length >= 3) return
+    const key = noteKey(piece.text)
+    if (!key || seen.has(key)) return
+    seen.add(key)
+    chosen.push(runningNoteLine(piece.kind, piece.text))
+  }
+
+  const recent = pieces.slice(-24)
+  add([...recent].reverse().find(piece => piece.kind === 'Dot'))
+  add([...recent].reverse().find(piece => piece.kind === 'Open'))
+  add([...recent].reverse().find(piece => piece.kind === 'Next' || piece.kind === 'Decided'))
+  add(latest)
+
+  for (const piece of [...recent].reverse()) add(piece)
+
+  return {
+    title: 'Running note',
+    lines: chosen,
+    updatedAt: latest.at,
+    segmentCount: session.segments.length,
+  }
+}
+
+function contextDefaults(context) {
+  if (!context || typeof context !== 'object') return null
+  const taskId = str(context.taskId, 80)
+  const label = str(context.label, 120)
+  if (!taskId || !label) return null
+  return { taskId, label }
+}
+
 function bool(value, fallback = false) {
   return value === undefined ? fallback : value === true
 }
@@ -128,8 +217,10 @@ function publicSession(session, mode = null) {
     updatedAt: session.updatedAt,
     endedAt: session.endedAt,
     active: !session.endedAt,
+    context: session.context ?? null,
     segmentCount: session.segments.length,
     recentSegments: session.segments.slice(-12),
+    runningNote: runningConversationNote(session),
     lastCueAt: session.lastCueAt ?? null,
     lastRecapAt: session.lastRecapAt ?? null,
   }
@@ -169,6 +260,7 @@ export class Coach {
         session.startedAt = nowMs(session.startedAt)
         session.updatedAt = nowMs(session.updatedAt || session.startedAt)
         session.endedAt = session.endedAt ? nowMs(session.endedAt) : null
+        session.context = contextDefaults(session.context)
         session.segments = Array.isArray(session.segments)
           ? session.segments.map(segment => this.#cleanSegment(segment)).filter(Boolean).slice(-MAX_SEGMENTS_PER_SESSION)
           : []
@@ -280,7 +372,11 @@ export class Coach {
     return session
   }
 
-  startSession({ space = 'ops', modeId = null, title = null, clientId = null, at = Date.now() } = {}) {
+  session(id) {
+    return this.sessions.get(id) ?? null
+  }
+
+  startSession({ space = 'ops', modeId = null, title = null, clientId = null, context = null, at = Date.now() } = {}) {
     const safeSpace = spaceId(space)
     const current = this.currentSession(safeSpace)
     if (current) {
@@ -296,6 +392,7 @@ export class Coach {
       space: safeSpace,
       modeId: mode.id,
       title: str(title || mode.name || 'Listening', 80),
+      context: contextDefaults(context),
       startedAt,
       updatedAt: startedAt,
       endedAt: null,
