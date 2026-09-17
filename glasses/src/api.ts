@@ -3,6 +3,7 @@ import type {
   BlockPlan,
   ChecklistsState,
   CoachCueResponse,
+  CoachMode,
   CoachSessionResponse,
   CoachSessionWriteResponse,
   NoteTranscript,
@@ -277,6 +278,37 @@ export async function fetchCoachSession(space: string): Promise<CoachSessionResp
   }
 }
 
+export async function activateCoachMode(
+  space: string,
+  modeId: string,
+): Promise<{ ok: true; mode: CoachMode } | { ok: false; error: string }> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), config.timeoutMs)
+
+  try {
+    const res = await fetch(`${config.serverUrl}/coach/modes/${encodeURIComponent(modeId)}/activate`, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ space }),
+      signal: controller.signal,
+    })
+    const payload = await res.json().catch(() => null)
+    if (!res.ok) return { ok: false, error: payload?.error ?? `server ${res.status}` }
+    if (!payload?.mode) return { ok: false, error: 'bad payload' }
+    return { ok: true, mode: payload.mode as CoachMode }
+  } catch (err: unknown) {
+    const message =
+      err instanceof DOMException && err.name === 'AbortError'
+        ? 'timeout'
+        : err instanceof Error
+          ? err.message
+          : 'network error'
+    return { ok: false, error: message.slice(0, 40) }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 async function postCoach(
   path: string,
   body: unknown,
@@ -321,10 +353,12 @@ async function postCoach(
 export const startCoachSession = (
   space: string,
   context: { taskId?: string; choreId?: string; label: string } | null = null,
+  modeId: string | null = null,
 ) =>
   postCoach('/coach/session/start', {
     space,
     clientId: `glasses-${Date.now().toString(36)}`,
+    ...(modeId ? { modeId } : {}),
     ...(context ? { context } : {}),
   })
 

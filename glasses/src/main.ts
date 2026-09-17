@@ -17,6 +17,7 @@ import {
 
 import { config } from './config'
 import {
+  activateCoachMode,
   beginStep,
   resetStep,
   checkItem,
@@ -42,6 +43,7 @@ import {
   indexRows,
   noteDetailActions,
   noteRows,
+  captureRows,
   noteTranscriptScrollMax,
   transcriptScrollMax,
   planRows,
@@ -135,6 +137,8 @@ const state: UiState = {
   planLoading: false,
   cue: null,
   coachSession: null,
+  coachModes: [],
+  coachModeId: null,
   noteTranscript: null,
   cueReturn: null,
   pong: null,
@@ -146,6 +150,7 @@ const state: UiState = {
   space: lastSpace(),
   scrollTop: 0,
   armedTaskId: null,
+  stickyDone: new Set<string>(),
   armedNoteId: null,
   foreground: true,
   lastAudioAt: null,
@@ -338,6 +343,8 @@ async function refreshCoachSession(): Promise<void> {
   const result = await fetchCoachSession(state.space)
   if (result.ok) {
     state.coachSession = result.session
+    state.coachModes = result.modes ?? state.coachModes
+    state.coachModeId = result.mode.id
     state.error = null
   } else {
     state.error = result.error
@@ -587,16 +594,21 @@ async function syncAudioToCoachSession(): Promise<void> {
  * pick Listen a second time to cancel. Menu opens; the click on this screen
  * starts and stops. One gesture, one meaning.
  */
-async function openListening(): Promise<void> {
+async function openListening(context: ListenContext | undefined = undefined): Promise<void> {
   const current = await fetchCoachSession(state.space)
-  if (current.ok) state.coachSession = current.session
+  if (current.ok) {
+    state.coachSession = current.session
+    state.coachModes = current.modes ?? state.coachModes
+    state.coachModeId = current.mode.id
+  }
   else state.error = current.error
 
   if (state.view.kind !== 'cue') {
     state.cueReturn = copyView(state.view)
-    listenContext = currentTaskContext()
+    listenContext = context === undefined ? currentTaskContext() : context
   }
-  state.view = { kind: 'cue' }
+  const activeIndex = state.coachModes.findIndex(mode => mode.id === state.coachModeId)
+  state.view = { kind: 'cue', modeCursor: Math.max(0, activeIndex) }
   state.scrollTop = 0
   await paint()
 }
@@ -646,15 +658,15 @@ function currentTaskContext(): ListenContext {
 }
 
 /**
- * Start talking about something, from wherever you are.
+ * Open Listen for something, from wherever you are.
  *
  * The subject travels with the session rather than being worked out later from
  * what you said: standing inside Laundry and saying "the dryer takes longer
  * than we thought" is about laundry, and nothing in the sentence says so.
  *
- * Clicking it again stops. Both land on the Listen screen, because the screen
- * that shows whether the microphone is actually working is the one you want in
- * front of you the moment you start or stop.
+ * Opening never starts the microphone. It lands on the mode picker with this
+ * subject retained; only the explicit Start listening row begins recording.
+ * Clicking an active contextual Listen still stops the existing session.
  */
 async function talkAbout(context: ListenContext): Promise<void> {
   if (state.coachSession?.active) {
@@ -662,22 +674,19 @@ async function talkAbout(context: ListenContext): Promise<void> {
     await activate()
     return
   }
-  listenContext = context
-  state.cueReturn = state.view.kind === 'cue' ? state.cueReturn : copyView(state.view)
-  state.view = { kind: 'cue' }
-  state.scrollTop = 0
-  await beginListening()
+  await openListening(context)
 }
 
 /** Start recording. Only ever from a click on the Listen screen. */
 async function beginListening(): Promise<void> {
-  const started = await startCoachSession(state.space, listenContext)
+  const started = await startCoachSession(state.space, listenContext, state.coachModeId)
   if (!started.ok) {
     state.error = started.error
     await paint()
     return
   }
   state.coachSession = started.session
+  state.coachModeId = started.session.modeId
   await startAudioCapture(started.session.id)
   if (!audioOpen) localCoachCue('Mic did not open', ['Glasses audioControl returned false.'])
   state.error = null
@@ -745,6 +754,8 @@ function rowCount(): number {
       return inboxItems(state, state.view.group).length
     case 'notes':
       return noteRows(state).length
+    case 'capture':
+      return captureRows().length
     case 'note':
       return noteDetailActions(
         state,
@@ -795,6 +806,13 @@ function move(delta: number): void {
   }
 
   if (view.kind === 'cue') {
+    if (!state.coachSession && state.coachModes.length > 0) {
+      view.modeCursor = Math.max(
+        0,
+        Math.min(state.coachModes.length - 1, (view.modeCursor ?? 0) + delta),
+      )
+      return
+    }
     // Scroll winds back through the transcript. It used to dismiss the screen,
     // which made reading back through what was said impossible: the gesture
     // for "let me see more" was the gesture for "close this".
@@ -991,6 +1009,9 @@ async function stepFromPlan(choreId: string, stepId: string): Promise<void> {
 }
 
 async function openPlan(): Promise<void> {
+  // Arriving at the page is what "leave it and come back" means. Ticked daily
+  // steps stay put while you are here and are gone the next time you look.
+  state.stickyDone.clear()
   state.view = { kind: 'plan', cursor: 0 }
   state.scrollTop = 0
   state.planLoading = true
@@ -1115,10 +1136,39 @@ async function activate(): Promise<void> {
       }
       return
     }
+    if (!state.coachSession && state.coachModes.length > 0) {
+      const cursor = view.modeCursor ?? 0
+      const mode = state.coachModes[cursor]
+      if (mode) {
+        const activated = await activateCoachMode(state.space, mode.id)
+        if (activated.ok) {
+          state.coachModeId = activated.mode.id
+          state.error = null
+          await beginListening()
+        } else {
+          state.error = activated.error
+          await paint()
+        }
+        return
+      }
+    }
     // Stopped: this click starts it. Leaving is the double-tap, same as every
     // other screen. Click used to dismiss, which left no way to start from
     // here at all and pushed starting back into the menu.
     await beginListening()
+    return
+  }
+
+  if (view.kind === 'capture') {
+    const row = captureRows()[view.cursor]
+    if (row?.kind === 'listen') {
+      await talkAbout(null)
+      return
+    }
+    state.view = { kind: 'notes', cursor: 0 }
+    state.scrollTop = 0
+    clampCursor()
+    await paint()
     return
   }
 
@@ -1320,17 +1370,37 @@ async function activate(): Promise<void> {
   if (view.kind === 'plan') {
     const row = planRows(state)[view.cursor]
 
-    // The LIFE line. No subject — this is the "I just thought of something"
-    // capture, the one that used to need the long-press menu.
+    // The LIFE line. Two things live behind it — talk, or read back what you
+    // already said — so it opens the pair rather than picking one for you.
     if (row?.kind === 'listen') {
-      await talkAbout(null)
+      state.view = { kind: 'capture', cursor: 0 }
+      state.scrollTop = 0
+      clampCursor()
+      await paint()
       return
     }
 
-    // A required-today step, ticked from the page you were already on. These
-    // are `check` steps, so one click finishes them and records when — no
-    // trip into the list, no clock to start.
+    // A required-today step, ticked from the page you were already on.
+    //
+    // Arm, then confirm. One click used to finish it, and the row vanished
+    // under your finger the same instant — no confirmation, no evidence, and
+    // no way back from a misclick. Ticking something off is cheap to ask twice
+    // for and expensive to get wrong.
     if (row?.kind === 'daily') {
+      const key = `${row.runId}:${row.item.id}`
+      if (row.item.done) {
+        state.stickyDone.delete(key)
+        await toggle(row.runId, row.item.id)
+        return
+      }
+      if (state.armedTaskId !== key) {
+        state.armedTaskId = key
+        await paint()
+        return
+      }
+      state.armedTaskId = null
+      // Held on screen, ticked, until you leave the page.
+      state.stickyDone.add(key)
       await toggle(row.runId, row.item.id)
       return
     }
@@ -1493,7 +1563,12 @@ async function back(): Promise<void> {
 
   // In Life the running order is home: it is what the screen is for, and there
   // is no index behind it any more. Going "back" from it means leaving.
-  if (state.view.kind === 'task' || state.view.kind === 'chores' || state.view.kind === 'notes') {
+  if (
+    state.view.kind === 'task' ||
+    state.view.kind === 'chores' ||
+    state.view.kind === 'notes' ||
+    state.view.kind === 'capture'
+  ) {
     await openPlan()
     return
   }

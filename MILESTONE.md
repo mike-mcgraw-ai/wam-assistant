@@ -1,8 +1,8 @@
-# One durable notes system
+# A conversation compass
 
-Public version: `v0.7.0`  
-Face build: `0.78.0`  
+Public version: `v0.8.0`  
+Face build: `0.83.0`  
 Originally completed: `2026-09-17`  
 Sanitized and published: `2026-09-29`
 
-Daily routines, note drill-down, source transcripts, and deletion share one navigation model.
+Selectable modes preserve the main thread, current topic, and parked tangent.

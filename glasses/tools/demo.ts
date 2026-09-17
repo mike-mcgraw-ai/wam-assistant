@@ -7,6 +7,7 @@ import { Checklists } from '../../server/src/checklists.js'
 // @ts-ignore
 import { agenda, planBlock, reach } from '../../server/src/plan.js'
 import { render, type UiState } from '../src/render'
+import type { CoachMode } from '../src/types'
 import { LINE_CHARS } from '../src/format'
 
 const boardsCfg = JSON.parse(readFileSync(join(process.cwd(), '..', 'server', 'src', 'boards.config.json'), 'utf8'))
@@ -109,7 +110,7 @@ const base: UiState = {
   snapshot, error: null, loading: false,
   lastOkAt: now, fromCache: false, alertsOnly: false,
   plan: null, planLoading: false,
-  cue: null, coachSession: null, cueReturn: null,
+  cue: null, coachSession: null, coachModes: [], coachModeId: null, cueReturn: null,
   pong: null,
   events: 0, lastEvent: '-', diagnostics: false, space: 'ops',
   scrollTop: 0, armedTaskId: null, armedNoteId: null, noteTranscript: null,
@@ -205,9 +206,39 @@ const questionCue = {
   nextAfterMs: 120_000,
 }
 
+const coachModes: CoachMode[] = ['Conversation', 'Listening', 'Meeting'].map(name => ({
+  id: name.toLowerCase(),
+  name,
+  category: '',
+  keepPrivate: false,
+  behavior: '',
+  cueTypes: {
+    answers: true,
+    followups: true,
+    explanations: true,
+    factChecks: true,
+    advice: true,
+    thoughts: true,
+  },
+  speakUp: 'medium',
+  promptLulls: true,
+  periodicRecap: true,
+  recapMinutes: 3,
+  lullSeconds: 20,
+  files: [],
+}))
+
 frame('Ops index', render(withPlan))
 frame('Ops index — AI widget', render({ ...withPlan, cue: demoCue }))
 frame('Coach — manual', render({ ...withPlan, cue: demoCue, view: { kind: 'cue' } }))
+frame('Listen — three choices', render({
+  ...withPlan,
+  space: 'life',
+  cue: null,
+  coachModes,
+  coachModeId: 'conversation',
+  view: { kind: 'cue', modeCursor: 1 },
+}))
 frame('Coach — conversation compass', render({ ...withPlan, cue: null, coachSession: listenSession, view: { kind: 'cue' } }))
 frame('Coach — listening question', render({ ...withPlan, cue: questionCue, coachSession: listenSession, view: { kind: 'cue' } }))
 frame('Life index', render({ ...withPlan, space: 'life', view: { kind: 'index', cursor: 0 } }))

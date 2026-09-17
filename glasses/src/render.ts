@@ -13,6 +13,7 @@ import type {
   ChecklistRun,
   CoachSegment,
   CoachCue,
+  CoachMode,
   CoachSessionSummary,
   InboxGroup,
   InboxItem,
@@ -56,6 +57,7 @@ export type View =
   | { kind: 'plan'; cursor: number }
   | { kind: 'chores'; cursor: number }
   | { kind: 'notes'; cursor: number }
+  | { kind: 'capture'; cursor: number }
   | { kind: 'note'; subjectKind: 'task' | 'chore'; subjectId: string; noteId: string; cursor: number }
   | { kind: 'transcript'; subjectKind: 'task' | 'chore'; subjectId: string; noteId: string; scroll?: number }
   | { kind: 'task'; taskId: string; cursor: number }
@@ -68,7 +70,7 @@ export type View =
    * anything not in the view would be reset by the next frame, which is what
    * "I scrolled up and it snapped back" looks like.
    */
-  | { kind: 'cue'; scroll?: number }
+  | { kind: 'cue'; scroll?: number; modeCursor?: number }
   | { kind: 'pong' }
   | { kind: 'fonttest'; page: number }
   | { kind: 'inbox'; group: string; cursor: number }
@@ -91,6 +93,10 @@ export interface UiState {
   cue: CoachCue | null
   /** active listening session for the current space, if one exists */
   coachSession: CoachSessionSummary | null
+  /** Coach modes loaded with the current session snapshot. */
+  coachModes: CoachMode[]
+  /** mode selected for the next listening session */
+  coachModeId: string | null
   /** Loaded only while a note detail/transcript needs the original session. */
   noteTranscript: NoteTranscript | null
   /** screen to return to after a manual Coach cue is dismissed */
@@ -122,6 +128,16 @@ export interface UiState {
    * Any cursor movement disarms.
    */
   armedTaskId: string | null
+  /**
+   * Daily steps ticked during this visit to the running order, as
+   * `runId:itemId`.
+   *
+   * Done steps leave the list, which is right — the page is what is left to
+   * do. But leaving the instant you tick one means the row you just acted on
+   * disappears under your finger, taking the only evidence you did anything
+   * and the only way to undo it. These stay until you leave the page.
+   */
+  stickyDone: Set<string>
   /** A second click deletes this selected user-created note; movement disarms. */
   armedNoteId: string | null
   /**
@@ -191,6 +207,12 @@ export type IndexRow =
  * to spend one on, but without it the screen is a solid block of characters
  * and nothing tells your eye where the big stuff stops and the list begins.
  */
+/**
+ * The hub's catch-all for captures it could not route. Mirrors
+ * `CAPTURE_TASK_ID` in `server/src/index.js`.
+ */
+const CAPTURE_TASK_ID = 'captured-notes'
+
 export type PlanRow =
   | { kind: 'listen' }
   | { kind: 'daily'; runId: string; listName: string; item: ChecklistItem }
@@ -210,7 +232,14 @@ export function planRows(state: UiState): PlanRow[] {
   const plan = state.plan
   if (!plan) return []
 
-  const tasks: PlanRow[] = (plan.tasks ?? []).map(task => ({ kind: 'task', task }))
+  // The hub files a Listen capture with no obvious home onto a task called
+  // "Captured notes", which is a sensible place to keep them and a useless row
+  // to carry on the running order: it is not a thing to do, it never
+  // completes, and its whole contents are one click away behind the LIFE line
+  // now. It stays in `plan.tasks` so the Notes screen can still read it.
+  const tasks: PlanRow[] = (plan.tasks ?? [])
+    .filter(task => task.taskId !== CAPTURE_TASK_ID)
+    .map(task => ({ kind: 'task', task }))
   const agenda: PlanRow[] = plan.agenda.map(row => ({ kind: 'agenda', row }))
   // The old blank separator, now carrying a name and a destination. A row
   // that only created space was the cheapest thing on the page to improve.
@@ -230,10 +259,16 @@ export function planRows(state: UiState): PlanRow[] {
   // one is ticked. Tomorrow's run brings it back on its own.
   const required: PlanRow[] = []
   for (const run of state.snapshot?.checklists?.active ?? []) {
-    if (run.kind !== 'daily' || run.complete) continue
+    if (run.kind !== 'daily') continue
     if (!inSpace(run.space, state.space)) continue
     for (const item of run.items) {
-      if (!item.done) required.push({ kind: 'daily', runId: run.runId, listName: run.name, item })
+      // A ticked step stays put for the rest of this visit. Vanishing the
+      // instant it is ticked takes its own evidence with it — you are left
+      // looking at a shorter list with no sign you did anything, and no way
+      // back if the click was wrong. Leaving the page clears the set, so it
+      // is gone the next time you come to it.
+      if (item.done && !state.stickyDone.has(`${run.runId}:${item.id}`)) continue
+      required.push({ kind: 'daily', runId: run.runId, listName: run.name, item })
     }
   }
 
@@ -279,6 +314,43 @@ export function choreRows(state: UiState): ChoreRow[] {
     if (!running.has(list.id)) rows.push({ kind: 'start', list })
   }
   return rows
+}
+
+/**
+ * The two things the LIFE line leads to.
+ *
+ * Clicking it used to start recording outright, which made the one row at the
+ * top of the running order mean exactly one thing and left the notes you had
+ * already captured reachable only through the long-press menu. A two-item
+ * stop makes both permanent: talk, or read back what you said. It costs one
+ * extra click on capture, which is the right trade for never losing the way
+ * back to your own notes.
+ */
+export type CaptureRow = { kind: 'listen' } | { kind: 'notes' }
+
+export function captureRows(): CaptureRow[] {
+  return [{ kind: 'listen' }, { kind: 'notes' }]
+}
+
+function renderCapture(state: UiState, cursor: number): string {
+  const rows = captureRows()
+  const live = state.coachSession?.active
+  const notes = noteRows(state).length
+
+  const lines: string[] = [clockLine(state), ruleCentred('Capture', false), '']
+  rows.forEach((row, i) => {
+    const point = i === cursor ? '>' : ' '
+    if (row.kind === 'listen') {
+      lines.push(clipToWidth(`${point}Listen        ${live ? 'recording now' : 'start talking'}`))
+    } else {
+      lines.push(clipToWidth(`${point}Notes         ${notes === 0 ? 'nothing saved' : `${notes} saved`}`))
+    }
+  })
+
+  lines.push('', rows[cursor]?.kind === 'listen'
+    ? live ? 'click to stop recording' : 'click and start talking'
+    : 'click to read them back')
+  return assemble(lines, config.maxChars, config.maxLines)
 }
 
 function renderChores(state: UiState, cursor: number): string {
@@ -580,7 +652,7 @@ export function spaceLine(state: UiState, selected = false): string {
   const ai = aiWidgetText(state)
   // When the line is the cursor it earns the right-hand slot, so the one thing
   // you can do from here is spelled out instead of guessed at.
-  const action = selected ? (state.coachSession?.active ? '   click to stop' : '   click to talk') : ''
+  const action = selected ? (state.coachSession?.active ? '   RECORDING' : '   click: talk / notes') : ''
   return clipToWidth(`${point}${label}${connection}${mic}${action}${ai && !selected ? `   AI: ${ai}` : ''}`)
 }
 
@@ -845,10 +917,14 @@ function planTip(state: UiState, rows: PlanRow[], cursor: number): string {
   }
 
   if (row.kind === 'listen') {
-    return state.coachSession?.active ? 'Recording - click to stop' : 'Talk - click to start a note'
+    return state.coachSession?.active ? 'Recording - click to open Listen' : 'Capture - talk, or read your notes'
   }
 
-  if (row.kind === 'daily') return `${row.listName} - click to tick it off`
+  if (row.kind === 'daily') {
+    if (row.item.done) return `${row.listName} - done ${clockShort(row.item.at)} - click to undo`
+    if (state.armedTaskId === `${row.runId}:${row.item.id}`) return 'Click again to mark it done'
+    return `${row.listName} - required today`
+  }
 
   const r = row.row
   if (r.kind === 'gap') return '~ Waiting - nothing to start'
@@ -908,9 +984,14 @@ function renderPlan(state: UiState, cursor: number): string {
     if (row.kind === 'chores') {
       lines.push(ruleCentred(planTip(state, rows, cursor), i === bodyCursor && cursor > 0))
     } else if (row.kind === 'daily') {
-      // The same row the list itself draws, so a step looks the same wherever
-      // you meet it — no duration column, because there is no duration.
-      lines.push(checklistItemRow(row.item, i === bodyCursor && cursor > 0))
+      const selected = i === bodyCursor && cursor > 0
+      if (selected && state.armedTaskId === `${row.runId}:${row.item.id}`) {
+        lines.push(clip('>[?] Mark done?', LINE_CHARS))
+      } else {
+        // The same row the list itself draws, so a step looks the same wherever
+        // you meet it — no duration column, because there is no duration.
+        lines.push(checklistItemRow(row.item, selected))
+      }
     } else if (row.kind === 'task') {
       const armed = state.armedTaskId === row.task.taskId
       lines.push(clip(`${point}${taskRow(row.task, armed)}`, LINE_CHARS))
@@ -1125,6 +1206,13 @@ function listenSummary(session: CoachSessionSummary | null, cue: CoachCue | null
   return summary ? clipToWidth(`= ${summary}`) : null
 }
 
+function listenModeLabel(mode: CoachMode): string {
+  if (mode.id === 'conversation') return 'Conversate'
+  if (mode.id === 'listening') return 'Listen'
+  if (mode.id === 'meeting') return 'Meeting'
+  return mode.name
+}
+
 function renderCue(state: UiState, scrollBack = 0): string {
   const session = state.coachSession
   const cue = state.cue
@@ -1134,6 +1222,17 @@ function renderCue(state: UiState, scrollBack = 0): string {
   // lines", and stapling the audio counters to it buried the transcript —
   // which is the entire point of this screen — under a stats panel.
   const listenDebug = config.listenDebug
+
+  if (!session && state.coachModes.length > 0) {
+    const cursor = state.view.kind === 'cue' ? state.view.modeCursor ?? 0 : 0
+    lines.push(clockLine(state), ruleCentred('Listen mode', false), '')
+    state.coachModes.forEach((mode, index) => {
+      const point = cursor === index ? '>' : ' '
+      const active = mode.id === state.coachModeId ? '[*]' : '[ ]'
+      lines.push(clipToWidth(`${point}${active} ${listenModeLabel(mode)}`))
+    })
+    return assemble(lines, config.maxChars, config.maxLines)
+  }
 
   if (session?.active) {
     const a = state.audio ?? { open: false, frames: 0, chunks: 0, sent: 0, rejected: 0, lastRms: 0, kind: '-', raw: 0, error: null }
@@ -1245,6 +1344,8 @@ function renderView(state: UiState): string {
       return renderChores(state, state.view.cursor)
     case 'notes':
       return renderNotes(state, state.view.cursor)
+    case 'capture':
+      return renderCapture(state, state.view.cursor)
     case 'note':
       return renderNoteDetail(
         state,

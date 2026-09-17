@@ -11,3 +11,4 @@ These are the real completion dates of private device builds. The sanitized port
 | v0.5.0 | 2026-09-14 | 0.68.0 | **Chunks become thoughts:** Phone mirroring, paragraph coalescing, and durable running notes. |
 | v0.6.0 | 2026-09-17 | 0.74.0 | **Transcript-first capture:** Live speech receives the face area, with Ring-scrolling and durable deletion. |
 | v0.7.0 | 2026-09-17 | 0.78.0 | **One durable notes system:** Daily routines, note drill-down, source transcripts, and deletion share one navigation model. |
+| v0.8.0 | 2026-09-17 | 0.83.0 | **A conversation compass:** Selectable modes preserve the main thread, current topic, and parked tangent. |
