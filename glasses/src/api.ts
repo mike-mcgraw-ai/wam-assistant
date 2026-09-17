@@ -5,6 +5,7 @@ import type {
   CoachCueResponse,
   CoachSessionResponse,
   CoachSessionWriteResponse,
+  NoteTranscript,
   Snapshot,
 } from './types'
 
@@ -167,6 +168,32 @@ export async function deleteNote(
     return res.ok ? { ok: true } : { ok: false, error: payload?.error ?? `server ${res.status}` }
   } catch (err: unknown) {
     return { ok: false, error: err instanceof Error ? err.message.slice(0, 40) : 'network error' }
+  }
+}
+
+/** Load the original speaker-formatted session behind a Listen-created note. */
+export async function fetchNoteTranscript(noteId: string): Promise<NoteTranscript | null> {
+  if (!noteId.endsWith(':note')) return null
+  const sessionId = noteId.slice(0, -':note'.length)
+  if (!sessionId) return null
+  try {
+    const res = await fetch(
+      `${config.serverUrl}/coach/session/${encodeURIComponent(sessionId)}/transcript`,
+      { headers: authHeaders(), signal: AbortSignal.timeout(config.timeoutMs), cache: 'no-store' },
+    )
+    if (!res.ok) return null
+    const payload = await res.json().catch(() => null)
+    if (!payload?.ok || !Array.isArray(payload.segments)) return null
+    return {
+      noteId,
+      sessionId,
+      title: String(payload.title || 'Transcript'),
+      startedAt: Number(payload.startedAt) || 0,
+      endedAt: payload.endedAt ? Number(payload.endedAt) : null,
+      segments: payload.segments,
+    }
+  } catch {
+    return null
   }
 }
 

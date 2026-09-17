@@ -23,6 +23,7 @@ import {
   completeInboxItem,
   completeTask,
   deleteNote,
+  fetchNoteTranscript,
   endCoachSession,
   fetchSessionSummary,
   fetchCoachCue,
@@ -37,8 +38,11 @@ import {
 import { loadSnapshot, saveSnapshot } from './storage'
 import {
   findRun,
+  findNoteRow,
   indexRows,
+  noteDetailActions,
   noteRows,
+  noteTranscriptScrollMax,
   transcriptScrollMax,
   planRows,
   choreRows,
@@ -74,6 +78,7 @@ import { newGame, nudge, serve, tick as pongTick } from './pong'
 
 const CONTAINER_ID = 1
 const CONTAINER_NAME = 'board'
+const CAPTURE_TASK_ID = 'captured-notes'
 
 const MENU = {
   SWITCH: 1,
@@ -130,6 +135,7 @@ const state: UiState = {
   planLoading: false,
   cue: null,
   coachSession: null,
+  noteTranscript: null,
   cueReturn: null,
   pong: null,
   events: 0,
@@ -678,6 +684,39 @@ async function beginListening(): Promise<void> {
   await paint()
 }
 
+async function openNote(row: ReturnType<typeof noteRows>[number]): Promise<void> {
+  state.armedNoteId = null
+  state.noteTranscript = null
+  state.view = {
+    kind: 'note',
+    subjectKind: row.subject.kind,
+    subjectId: row.subject.id,
+    noteId: row.note.id,
+    cursor: 0,
+  }
+  state.scrollTop = 0
+  await paint()
+
+  const transcript = await fetchNoteTranscript(row.note.id)
+  if (state.view.kind === 'note' && state.view.noteId === row.note.id) {
+    state.noteTranscript = transcript
+    clampCursor()
+    await paint()
+  }
+}
+
+function removeLocalNote(row: ReturnType<typeof noteRows>[number]): void {
+  if (row.subject.kind === 'task') {
+    const task = state.plan?.tasks.find(item => item.taskId === row.subject.id)
+    if (task) task.notes = task.notes.filter(note => note.id !== row.note.id)
+    return
+  }
+  const notes = state.snapshot?.checklists?.notes
+  if (notes && state.snapshot?.checklists) {
+    state.snapshot.checklists.notes = notes.filter(note => note.id !== row.note.id)
+  }
+}
+
 // ---- navigation ------------------------------------------------------------
 
 function rowCount(): number {
@@ -706,7 +745,13 @@ function rowCount(): number {
       return inboxItems(state, state.view.group).length
     case 'notes':
       return noteRows(state).length
+    case 'note':
+      return noteDetailActions(
+        state,
+        findNoteRow(state, state.view.subjectKind, state.view.subjectId, state.view.noteId),
+      ).length
     case 'cue':
+    case 'transcript':
     case 'pong':
     case 'fonttest':
       return 0
@@ -715,7 +760,7 @@ function rowCount(): number {
 
 function clampCursor(): void {
   const view = state.view
-  if (view.kind === 'pong' || view.kind === 'fonttest' || view.kind === 'cue') return
+  if (view.kind === 'pong' || view.kind === 'fonttest' || view.kind === 'cue' || view.kind === 'transcript') return
   const count = rowCount()
   view.cursor = count === 0 ? 0 : Math.min(view.cursor, count - 1)
   followCursor()
@@ -767,6 +812,12 @@ function move(delta: number): void {
     // wasted going the other way.
     const max = transcriptScrollMax(state)
     view.scroll = Math.max(0, Math.min(max, (view.scroll ?? 0) - delta))
+    return
+  }
+
+  if (view.kind === 'transcript') {
+    const max = noteTranscriptScrollMax(state)
+    view.scroll = Math.max(0, Math.min(max, (view.scroll ?? 0) + delta))
     return
   }
 
@@ -1077,12 +1128,45 @@ async function activate(): Promise<void> {
     return
   }
 
+  if (view.kind === 'transcript') {
+    // Ring scroll reads; double-tap returns to the note.
+    await paint()
+    return
+  }
+
   if (view.kind === 'notes') {
     const row = noteRows(state)[view.cursor]
     if (!row) return
-    // Config-seeded notes are part of the task definition rather than user
-    // data. They cannot be removed from the Ring.
-    if (row.note.at === 0) return
+    await openNote(row)
+    return
+  }
+
+  if (view.kind === 'note') {
+    const row = findNoteRow(state, view.subjectKind, view.subjectId, view.noteId)
+    const action = noteDetailActions(state, row)[view.cursor]
+    if (!row || !action) return
+
+    if (action === 'transcript') {
+      if (state.noteTranscript?.noteId !== row.note.id) {
+        state.noteTranscript = await fetchNoteTranscript(row.note.id)
+      }
+      if (!state.noteTranscript) {
+        state.error = 'transcript unavailable'
+        await paint()
+        return
+      }
+      state.error = null
+      state.view = {
+        kind: 'transcript',
+        subjectKind: row.subject.kind,
+        subjectId: row.subject.id,
+        noteId: row.note.id,
+        scroll: 0,
+      }
+      await paint()
+      return
+    }
+
     const key = `${row.subject.kind}:${row.subject.id}:${row.note.id}`
     if (state.armedNoteId !== key) {
       state.armedNoteId = key
@@ -1097,15 +1181,10 @@ async function activate(): Promise<void> {
       return
     }
     state.error = null
-    if (row.subject.kind === 'task') {
-      const task = state.plan?.tasks.find(item => item.taskId === row.subject.id)
-      if (task) task.notes = task.notes.filter(note => note.id !== row.note.id)
-    } else {
-      const notes = state.snapshot?.checklists?.notes
-      if (notes && state.snapshot?.checklists) {
-        state.snapshot.checklists.notes = notes.filter(note => note.id !== row.note.id)
-      }
-    }
+    removeLocalNote(row)
+    state.noteTranscript = null
+    state.view = { kind: 'notes', cursor: 0 }
+    state.scrollTop = 0
     clampCursor()
     await paint()
     return
@@ -1248,6 +1327,14 @@ async function activate(): Promise<void> {
       return
     }
 
+    // A required-today step, ticked from the page you were already on. These
+    // are `check` steps, so one click finishes them and records when — no
+    // trip into the list, no clock to start.
+    if (row?.kind === 'daily') {
+      await toggle(row.runId, row.item.id)
+      return
+    }
+
     // Start it from here. Going into the chore to click the same step you were
     // already looking at was navigation for its own sake — on the running
     // order you can see the step, so clicking it should be what starts it.
@@ -1279,6 +1366,16 @@ async function activate(): Promise<void> {
     }
 
     if (row?.kind === 'task') {
+      // Captured notes is the same collection exposed by the Notes menu, not
+      // an ordinary task with a competing detail screen.
+      if (row.task.taskId === CAPTURE_TASK_ID) {
+        state.noteTranscript = null
+        state.view = { kind: 'notes', cursor: 0 }
+        state.scrollTop = 0
+        clampCursor()
+        await paint()
+        return
+      }
       // Open it rather than tick it. A one-off usually has something you need
       // to know before you can start — which dentist, how far the drive is —
       // and completing straight from the list gave that nowhere to live.
@@ -1358,6 +1455,27 @@ async function activate(): Promise<void> {
 
 async function back(): Promise<void> {
   state.armedNoteId = null
+  if (state.view.kind === 'transcript') {
+    const { subjectKind, subjectId, noteId } = state.view
+    state.view = { kind: 'note', subjectKind, subjectId, noteId, cursor: 0 }
+    state.scrollTop = 0
+    clampCursor()
+    await paint()
+    return
+  }
+
+  if (state.view.kind === 'note') {
+    const { subjectKind, subjectId, noteId } = state.view
+    const cursor = noteRows(state).findIndex(row =>
+      row.subject.kind === subjectKind && row.subject.id === subjectId && row.note.id === noteId,
+    )
+    state.view = { kind: 'notes', cursor: Math.max(0, cursor) }
+    state.scrollTop = Math.max(0, cursor)
+    clampCursor()
+    await paint()
+    return
+  }
+
   if (state.view.kind === 'cue') {
     dismissCue()
     await paint()
@@ -1366,8 +1484,8 @@ async function back(): Promise<void> {
 
   if (state.view.kind === 'pong') {
     stopPong()
-    state.view = { kind: 'index', cursor: 0 }
-  state.scrollTop = 0
+    state.view = homeView()
+    state.scrollTop = 0
     clampCursor()
     await refresh()
     return
@@ -1387,16 +1505,7 @@ async function back(): Promise<void> {
   //
   // Note for a future store submission: QA expects shutDownPageContainer(1)
   // from the root page. This deliberately does not.
-  if (state.view.kind === 'plan' && state.space === 'life') {
-    // Sleep, the way the stock dashboard does it: double-tap your way back to
-    // the top, double-tap once more and the display goes dark. The next input
-    // wakes it. This is the only thing the root double-tap does — the space
-    // switch it used to do has nowhere to go with Ops off, and exiting is not
-    // on the table when getting back in means the phone.
-    if (!config.ops) {
-      await sleepDisplay()
-      return
-    }
+  if (state.view.kind === 'plan' && state.space === 'life' && config.ops) {
     await switchSpace()
     return
   }
@@ -1409,7 +1518,7 @@ async function back(): Promise<void> {
     return
   }
 
-  if (state.view.kind !== 'index') {
+  if (state.view.kind !== 'index' && !atHome()) {
     if (state.space === 'life') {
       await openPlan()
       return
@@ -1420,8 +1529,35 @@ async function back(): Promise<void> {
     await paint()
     return
   }
-  // Ops root: switch rather than exit, same reasoning as the Life root above.
-  await switchSpace()
+
+  if (config.ops && state.view.kind === 'index') {
+    // Ops root: switch rather than exit.
+    await switchSpace()
+    return
+  }
+
+  // Home, with nothing behind it. Sleep, the way the stock dashboard does:
+  // double-tap your way to the top, double-tap once more and the display goes
+  // dark; the next input wakes it.
+  //
+  // This is the LAST line of back() on purpose. Every screen that adds itself
+  // later falls through to here whether or not anyone remembers to wire it up,
+  // so the gesture means the same thing everywhere — which is the only way a
+  // gesture you make without looking is safe to make. Screens used to dead-end
+  // instead: pong and the index both went somewhere whose own back was a
+  // no-op with Ops off, so double-tap did nothing at all and the display
+  // could not be put out from there.
+  //
+  // Exiting is not on the table: getting back into a private build means the
+  // phone's menu. Note for a future store submission: QA expects
+  // shutDownPageContainer(1) from the root page. This deliberately does not.
+  await sleepDisplay()
+}
+
+/** Is this the screen the app opens on — the one with nothing behind it? */
+function atHome(): boolean {
+  const home = homeView()
+  return state.view.kind === home.kind
 }
 
 async function onMenu(itemID: number): Promise<void> {
@@ -1447,7 +1583,8 @@ async function onMenu(itemID: number): Promise<void> {
         state.view.kind !== 'plan' &&
         state.view.kind !== 'pong' &&
         state.view.kind !== 'fonttest' &&
-        state.view.kind !== 'cue'
+        state.view.kind !== 'cue' &&
+        state.view.kind !== 'transcript'
       ) {
         state.view.cursor = 0
       }
@@ -1537,11 +1674,13 @@ const page = new CreateStartUpPageContainer({
       ...(config.ops
         ? [new MenuItemProperty({ itemName: 'Ops / Life', itemID: MENU.SWITCH })]
         : []),
+      // Four. Everything cut had a shorter way to reach it: Running order is
+      // where double-tap lands from anywhere, Refresh is what the fifteen
+      // second poll already does, Coach and the rest were build-time scaffolding.
+      // The handlers all survive, so putting one back is one line.
       new MenuItemProperty({ itemName: 'Listen', itemID: MENU.LISTEN }),
       new MenuItemProperty({ itemName: 'Notes', itemID: MENU.NOTES }),
       new MenuItemProperty({ itemName: 'Lists', itemID: MENU.LISTS }),
-      new MenuItemProperty({ itemName: 'Running order', itemID: MENU.FITS }),
-      new MenuItemProperty({ itemName: 'Refresh', itemID: MENU.REFRESH }),
       new MenuItemProperty({ itemName: 'Diagnostics', itemID: MENU.DIAG }),
     ],
   }),

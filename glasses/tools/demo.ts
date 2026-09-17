@@ -69,7 +69,7 @@ checklists.addNote(
   'vacuum',
   'The start timers were wrong, but the projected end times stayed correct.',
   'listen',
-  'demo-vacuum-note',
+  's-demo-vacuum:note',
   now - 4 * M,
 )
 
@@ -112,7 +112,7 @@ const base: UiState = {
   cue: null, coachSession: null, cueReturn: null,
   pong: null,
   events: 0, lastEvent: '-', diagnostics: false, space: 'ops',
-  scrollTop: 0, armedTaskId: null, armedNoteId: null,
+  scrollTop: 0, armedTaskId: null, armedNoteId: null, noteTranscript: null,
 }
 
 // Build a 60-minute plan the way the server would.
@@ -214,11 +214,35 @@ frame('Life index', render({ ...withPlan, space: 'life', view: { kind: 'index', 
 frame('Life index — no auto AI widget', render({ ...withPlan, space: 'life', cue: demoCue, view: { kind: 'index', cursor: 0 } }))
 frame('Shared list — Groceries', render({ ...withPlan, space: 'life', view: { kind: 'inbox', group: 'Groceries', cursor: 0 } }))
 frame('Notes — chore note', render({ ...withPlan, space: 'life', view: { kind: 'notes', cursor: 0 } }))
-frame('Notes — delete armed', render({
+const vacuumTranscript = {
+  noteId: 's-demo-vacuum:note',
+  sessionId: 's-demo-vacuum',
+  title: 'Listening',
+  startedAt: now - 5 * M,
+  endedAt: now - 4 * M,
+  segments: [
+    { id: 'seg-1', clientId: null, speaker: 'me', text: 'The vacuum start timers were wrong because I missed clicking start.', final: true, at: now - 5 * M },
+    { id: 'seg-2', clientId: null, speaker: 'me', text: 'The projected end times were still correct, so I moved to the next task.', final: true, at: now - 4 * M },
+  ],
+}
+frame('Note — summary and actions', render({
   ...withPlan,
   space: 'life',
-  view: { kind: 'notes', cursor: 0 },
-  armedNoteId: 'chore:vacuum:demo-vacuum-note',
+  view: { kind: 'note', subjectKind: 'chore', subjectId: 'vacuum', noteId: 's-demo-vacuum:note', cursor: 0 },
+  noteTranscript: vacuumTranscript,
+}))
+frame('Note — delete armed', render({
+  ...withPlan,
+  space: 'life',
+  view: { kind: 'note', subjectKind: 'chore', subjectId: 'vacuum', noteId: 's-demo-vacuum:note', cursor: 1 },
+  armedNoteId: 'chore:vacuum:s-demo-vacuum:note',
+  noteTranscript: vacuumTranscript,
+}))
+frame('Note — full transcript', render({
+  ...withPlan,
+  space: 'life',
+  view: { kind: 'transcript', subjectKind: 'chore', subjectId: 'vacuum', noteId: 's-demo-vacuum:note', scroll: 0 },
+  noteTranscript: vacuumTranscript,
 }))
 
 frame('Index — "Flagged only" on', render({ ...base, alertsOnly: true }))

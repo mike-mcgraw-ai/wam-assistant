@@ -208,7 +208,9 @@ export class Checklists {
     for (const [checklistId, notes] of this.notes_) {
       const template = this.templates.get(checklistId)
       if (!template) continue
-      for (const note of notes) rows.push({ ...note, checklistId, label: template.name })
+      for (const note of notes) {
+        rows.push({ ...note, checklistId, label: template.name, space: template.space ?? 'ops' })
+      }
     }
     return rows
   }

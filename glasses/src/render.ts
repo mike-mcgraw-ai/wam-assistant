@@ -9,6 +9,7 @@ import type {
   AgendaRow,
   BlockPlan,
   Board,
+  ChecklistItem,
   ChecklistRun,
   CoachSegment,
   CoachCue,
@@ -20,6 +21,7 @@ import type {
   StartableChecklist,
   TaskRow,
   TaskNote,
+  NoteTranscript,
   DoneRow,
 } from './types'
 import {
@@ -54,6 +56,8 @@ export type View =
   | { kind: 'plan'; cursor: number }
   | { kind: 'chores'; cursor: number }
   | { kind: 'notes'; cursor: number }
+  | { kind: 'note'; subjectKind: 'task' | 'chore'; subjectId: string; noteId: string; cursor: number }
+  | { kind: 'transcript'; subjectKind: 'task' | 'chore'; subjectId: string; noteId: string; scroll?: number }
   | { kind: 'task'; taskId: string; cursor: number }
   /**
    * The Listen screen.
@@ -87,6 +91,8 @@ export interface UiState {
   cue: CoachCue | null
   /** active listening session for the current space, if one exists */
   coachSession: CoachSessionSummary | null
+  /** Loaded only while a note detail/transcript needs the original session. */
+  noteTranscript: NoteTranscript | null
   /** screen to return to after a manual Coach cue is dismissed */
   cueReturn: View | null
   /** non-null only while the game is on screen */
@@ -187,6 +193,7 @@ export type IndexRow =
  */
 export type PlanRow =
   | { kind: 'listen' }
+  | { kind: 'daily'; runId: string; listName: string; item: ChecklistItem }
   | { kind: 'task'; task: TaskRow }
   | { kind: 'chores' }
   | { kind: 'agenda'; row: AgendaRow | DoneRow }
@@ -213,7 +220,24 @@ export function planRows(state: UiState): PlanRow[] {
   // it, and a click starts talking — general capture, no subject, which is the
   // "just let me say a thing" case that otherwise needed the long-press menu.
   // It costs no row: the header line was already on screen doing nothing.
-  return [{ kind: 'listen' }, ...tasks, ...gap, ...agenda]
+  // Anything required today, above everything else, until it is done.
+  //
+  // A daily list has no durations and cannot be scheduled into the running
+  // order the way a chore is — but "required daily" is exactly the thing that
+  // must not live one screen away behind Lists, because the whole failure mode
+  // is forgetting it exists. So its unfinished steps sit at the top of the
+  // page you already look at, and the section disappears the moment the last
+  // one is ticked. Tomorrow's run brings it back on its own.
+  const required: PlanRow[] = []
+  for (const run of state.snapshot?.checklists?.active ?? []) {
+    if (run.kind !== 'daily' || run.complete) continue
+    if (!inSpace(run.space, state.space)) continue
+    for (const item of run.items) {
+      if (!item.done) required.push({ kind: 'daily', runId: run.runId, listName: run.name, item })
+    }
+  }
+
+  return [{ kind: 'listen' }, ...required, ...tasks, ...gap, ...agenda]
 }
 
 /** Rows the cursor is allowed to stop on. */
@@ -313,11 +337,30 @@ export function noteRows(state: UiState): NoteRow[] {
     }
   }
   for (const note of state.snapshot?.checklists?.notes ?? []) {
+    if (note.space && note.space !== state.space) continue
     rows.push({ note, subject: { kind: 'chore', id: note.checklistId, label: note.label } })
   }
   // Newest first: the thing you said most recently is the thing you are most
   // likely to be looking for.
   return rows.sort((a, b) => (b.note.at ?? 0) - (a.note.at ?? 0))
+}
+
+export function findNoteRow(
+  state: UiState,
+  subjectKind: 'task' | 'chore',
+  subjectId: string,
+  noteId: string,
+): NoteRow | undefined {
+  return noteRows(state).find(row =>
+    row.subject.kind === subjectKind && row.subject.id === subjectId && row.note.id === noteId,
+  )
+}
+
+function shortNoteSummary(text: string): string {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim()
+  if (!clean) return 'Untitled note'
+  const sentence = clean.match(/^.{12,}?[.!?](?:\s|$)/)?.[0]?.trim() ?? clean
+  return sentence
 }
 
 function renderNotes(state: UiState, cursor: number): string {
@@ -330,27 +373,48 @@ function renderNotes(state: UiState, cursor: number): string {
     )
   }
 
-  const win = windowFollow(cursor, rows.length, config.rowsPerPage - 2, state.scrollTop)
+  const win = windowFollow(cursor, rows.length, config.maxLines - 2, state.scrollTop)
   const lines: string[] = [clockLine(state), ruleCentred(`Notes ${rows.length}`, false)]
   for (let i = win.start; i < win.end; i += 1) {
     const { note, subject } = rows[i]
-    const selected = i === cursor
-    if (selected) {
-      // The selected note gets the room to be read. One row is enough to find
-      // a note and never enough to use it.
-      const wrapped = wrap(note.text, LINE_CHARS - 2)
-      lines.push(clipToWidth(`>${clip(subject.label, 20)}  ${ago(note.at)} ago`))
-      for (const line of wrapped.slice(0, 3)) lines.push(clipToWidth(` ${line}`))
-      const key = `${subject.kind}:${subject.id}:${note.id}`
-      lines.push(note.at === 0
-        ? ' built-in note'
-        : state.armedNoteId === key
-          ? ' [!] click again to delete'
-          : ' [x] click to delete')
-    } else {
-      lines.push(clipToWidth(` ${clip(note.text, 30)}  ${clip(subject.label, 12)}`))
-    }
+    const point = i === cursor ? '>' : ' '
+    lines.push(clipToWidth(`${point}${clip(shortNoteSummary(note.text), 28)} · ${subject.label}`))
   }
+  return assemble(lines, config.maxChars, config.maxLines)
+}
+
+export type NoteDetailAction = 'transcript' | 'delete'
+
+export function noteDetailActions(_state: UiState, row: NoteRow | undefined): NoteDetailAction[] {
+  if (!row) return []
+  const actions: NoteDetailAction[] = []
+  if (row.note.id.endsWith(':note')) actions.push('transcript')
+  if (row.note.at !== 0) actions.push('delete')
+  return actions
+}
+
+function renderNoteDetail(
+  state: UiState,
+  subjectKind: 'task' | 'chore',
+  subjectId: string,
+  noteId: string,
+  cursor: number,
+): string {
+  const row = findNoteRow(state, subjectKind, subjectId, noteId)
+  if (!row) return assemble(['Note', '', 'That note is gone.'], config.maxChars, config.maxLines)
+
+  const actions = noteDetailActions(state, row)
+  const lines = [clipToWidth(`Note · ${row.subject.label} · ${ago(row.note.at)} ago`), 'Summary']
+  const summaryRoom = Math.max(1, config.maxLines - lines.length - actions.length)
+  const summary = wrap(row.note.text, LINE_CHARS)
+  for (const line of summary.slice(0, summaryRoom)) lines.push(clipToWidth(line))
+
+  const key = `${row.subject.kind}:${row.subject.id}:${row.note.id}`
+  actions.forEach((action, index) => {
+    const point = index === cursor ? '>' : ' '
+    if (action === 'transcript') lines.push(`${point}[=] Full transcript`)
+    else lines.push(state.armedNoteId === key ? `${point}[!] Click again: delete` : `${point}[x] Delete note`)
+  })
   return assemble(lines, config.maxChars, config.maxLines)
 }
 
@@ -784,6 +848,8 @@ function planTip(state: UiState, rows: PlanRow[], cursor: number): string {
     return state.coachSession?.active ? 'Recording - click to stop' : 'Talk - click to start a note'
   }
 
+  if (row.kind === 'daily') return `${row.listName} - click to tick it off`
+
   const r = row.row
   if (r.kind === 'gap') return '~ Waiting - nothing to start'
   if (r.kind === 'done') return `[x] Done ${ago(r.at)} ago - click to undo`
@@ -841,6 +907,10 @@ function renderPlan(state: UiState, cursor: number): string {
     const point = i === bodyCursor && cursor > 0 ? '>' : ' '
     if (row.kind === 'chores') {
       lines.push(ruleCentred(planTip(state, rows, cursor), i === bodyCursor && cursor > 0))
+    } else if (row.kind === 'daily') {
+      // The same row the list itself draws, so a step looks the same wherever
+      // you meet it — no duration column, because there is no duration.
+      lines.push(checklistItemRow(row.item, i === bodyCursor && cursor > 0))
     } else if (row.kind === 'task') {
       const armed = state.armedTaskId === row.task.taskId
       lines.push(clip(`${point}${taskRow(row.task, armed)}`, LINE_CHARS))
@@ -973,6 +1043,36 @@ function transcriptLines(segments: CoachSegment[]): string[] {
   }
 
   return lines
+}
+
+export function noteTranscriptScrollMax(state: UiState): number {
+  const rows = transcriptLines(state.noteTranscript?.segments ?? [])
+  return Math.max(0, rows.length - (config.maxLines - 1))
+}
+
+function renderNoteTranscript(
+  state: UiState,
+  subjectKind: 'task' | 'chore',
+  subjectId: string,
+  noteId: string,
+  scroll = 0,
+): string {
+  const row = findNoteRow(state, subjectKind, subjectId, noteId)
+  const transcript = state.noteTranscript?.noteId === noteId ? state.noteTranscript : null
+  if (!row || !transcript) {
+    return assemble(['Transcript', '', 'Original transcript unavailable.'], config.maxChars, config.maxLines)
+  }
+
+  const all = transcriptLines(transcript.segments)
+  const room = config.maxLines - 1
+  const max = Math.max(0, all.length - room)
+  const start = Math.min(Math.max(0, scroll), max)
+  const end = Math.min(all.length, start + room)
+  const position = all.length > room ? ` ${start + 1}-${end}/${all.length}` : ''
+  const lines = [clipToWidth(`Transcript · ${row.subject.label}${position}`)]
+  for (const line of all.slice(start, end)) lines.push(clipToWidth(line))
+  if (all.length === 0) lines.push('', 'No transcript lines were saved.')
+  return assemble(lines, config.maxChars, config.maxLines)
 }
 
 /**
@@ -1145,6 +1245,22 @@ function renderView(state: UiState): string {
       return renderChores(state, state.view.cursor)
     case 'notes':
       return renderNotes(state, state.view.cursor)
+    case 'note':
+      return renderNoteDetail(
+        state,
+        state.view.subjectKind,
+        state.view.subjectId,
+        state.view.noteId,
+        state.view.cursor,
+      )
+    case 'transcript':
+      return renderNoteTranscript(
+        state,
+        state.view.subjectKind,
+        state.view.subjectId,
+        state.view.noteId,
+        state.view.scroll ?? 0,
+      )
     case 'checklist':
       return renderChecklist(state, state.view.runId, state.view.cursor)
     case 'picker':

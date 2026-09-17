@@ -31,7 +31,9 @@ const CHECKLISTS_PATH = process.env.CHECKLISTS_PATH || join(HERE, 'checklists.co
 const DATA_DIR = process.env.DATA_DIR || join(HERE, '..', 'data')
 const AI_CUE_INTERVAL_MS = Math.max(30_000, Number(process.env.AI_CUE_INTERVAL_MS || 2 * 60_000))
 const AI_CUE_NOTIFY = process.env.AI_CUE_NOTIFY === '1'
-const AI_CUE_SPACES = (process.env.AI_CUE_SPACES || 'ops')
+// Life is the active product scope. Ops remains fully implemented and can be
+// re-enabled explicitly with AI_CUE_SPACES=ops (or ops,life).
+const AI_CUE_SPACES = (process.env.AI_CUE_SPACES || 'life')
   .split(',')
   .map(s => s.trim())
   .filter(s => s === 'ops' || s === 'life')
@@ -1036,6 +1038,22 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, sessionSummary(session))
   }
 
+  const coachTranscriptMatch = url.pathname.match(/^\/coach\/session\/([^/]+)\/transcript$/)
+  if (req.method === 'GET' && coachTranscriptMatch) {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    const session = coach.session(decodeURIComponent(coachTranscriptMatch[1]))
+    if (!session) return json(res, 404, { error: 'unknown session' })
+    return json(res, 200, {
+      ok: true,
+      id: session.id,
+      title: session.title,
+      startedAt: session.startedAt,
+      endedAt: session.endedAt,
+      context: session.context ?? null,
+      segments: (session.segments ?? []).filter(segment => segment.final !== false),
+    })
+  }
+
   const coachSessionMatch = url.pathname.match(/^\/coach\/session\/([^/]+)\/(segment|audio|end)$/)
   if (req.method === 'POST' && coachSessionMatch) {
     if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
@@ -1170,6 +1188,11 @@ const server = http.createServer(async (req, res) => {
       : body.kind === 'task'
         ? tasks.removeNote(subjectId, noteId)
         : { ok: false, error: 'kind must be task or chore' }
+    if (result.ok && noteId.endsWith(':note')) {
+      const sessionId = noteId.slice(0, -':note'.length)
+      coach.removeSession(sessionId)
+      jobs.removeForCoachSession(sessionId)
+    }
     return json(res, result.ok ? 200 : 404, result)
   }
 
@@ -1441,7 +1464,7 @@ setInterval(() => {
 if (AI_CUE_NOTIFY) {
   const notified = new Map()
   setInterval(() => {
-    for (const space of AI_CUE_SPACES.length ? AI_CUE_SPACES : ['ops']) {
+    for (const space of AI_CUE_SPACES.length ? AI_CUE_SPACES : ['life']) {
       const cue = buildCurrentCue(space)
       if (cue.quiet || notified.get(space) === cue.id) continue
       notified.set(space, cue.id)

@@ -398,6 +398,18 @@ export class Coach {
     return this.sessions.get(id) ?? null
   }
 
+  removeSession(id) {
+    const session = this.sessions.get(id)
+    if (!session) return { ok: false, error: 'unknown session' }
+    if (this.activeSessionBySpace[session.space] === id) {
+      this.activeSessionBySpace[session.space] = null
+    }
+    this.sessions.delete(id)
+    this.#log({ type: 'session_deleted', id, space: session.space, at: Date.now() })
+    this.#persist()
+    return { ok: true }
+  }
+
   startSession({ space = 'ops', modeId = null, title = null, clientId = null, context = null, at = Date.now() } = {}) {
     const safeSpace = spaceId(space)
     const current = this.currentSession(safeSpace)

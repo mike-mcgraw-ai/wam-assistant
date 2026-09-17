@@ -227,6 +227,19 @@ export class Jobs {
     return this.jobs.get(id) ?? null
   }
 
+  /** Remove model work that contains a deleted Coach session's transcript. */
+  removeForCoachSession(sessionId) {
+    let removed = 0
+    for (const [id, job] of this.jobs) {
+      if (job.capability !== 'coach.cue' || job.input?.sessionId !== sessionId) continue
+      this.jobs.delete(id)
+      removed += 1
+      this.#log({ type: 'delete', id, capability: job.capability, reason: 'session_deleted', at: Date.now() })
+    }
+    if (removed) this.#persist()
+    return removed
+  }
+
   /** Counts for the glasses header: how much is waiting on the Mac. */
   summary(now = Date.now()) {
     this.reap(now)

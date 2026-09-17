@@ -5,6 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#101214">
 <title>Coach</title>
+<script>
+  // This file is sometimes opened directly from Finder. A file:// page cannot
+  // reach relative API routes, so every saved mode looks blank even though the
+  // hub still has it. Send that accidental open to the live local page.
+  if (location.protocol === 'file:') location.replace('http://localhost:8787/coach')
+</script>
 <style>
   :root{
     --bg:#101214; --panel:#1a1d20; --field:#25282c; --line:#343941;
@@ -12,6 +18,7 @@
     color-scheme:dark;
   }
   *{box-sizing:border-box}
+  [hidden]{display:none!important}
   body{
     margin:0; background:var(--bg); color:var(--ink);
     font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
@@ -78,7 +85,7 @@
 </header>
 
 <main>
-  <section>
+  <section id="spacePicker">
     <h2>Space</h2>
     <div class="tabs">
       <button class="tab" data-space="ops" type="button">Ops</button>
@@ -159,6 +166,9 @@
 const $ = id => document.getElementById(id)
 const esc = value => String(value ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))
 const uid = () => crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()
+// Ops is dormant, not deleted. Flip this one flag when it returns to scope;
+// the tab, per-space modes, sessions, and server routes remain intact below.
+const OPS_IN_SCOPE = false
 const cueLabels = {
   answers: 'Answers',
   followups: 'Follow-ups',
@@ -169,7 +179,7 @@ const cueLabels = {
 }
 
 const state = {
-  space: localStorage.getItem('opsboard.space') === 'life' ? 'life' : 'ops',
+  space: OPS_IN_SCOPE && localStorage.getItem('opsboard.space') === 'ops' ? 'ops' : 'life',
   modes: [],
   activeModeBySpace: {},
   mode: null,
@@ -222,6 +232,7 @@ function say(id, msg) {
 
 function renderModes() {
   const mode = selectedMode()
+  $('spacePicker').hidden = !OPS_IN_SCOPE
   document.querySelectorAll('[data-space]').forEach(button => button.classList.toggle('on', button.dataset.space === state.space))
   $('modes').innerHTML = state.modes.map(row =>
     `<button class="chip ${row.id === mode?.id ? 'on' : ''}" data-mode="${esc(row.id)}" type="button">${esc(row.name)}</button>`
@@ -388,6 +399,7 @@ document.addEventListener('click', event => {
   const target = event.target.closest('button')
   if (!target) return
   if (target.dataset.space) {
+    if (!OPS_IN_SCOPE && target.dataset.space === 'ops') return
     state.space = target.dataset.space
     localStorage.setItem('opsboard.space', state.space)
     state.mode = state.modes.find(mode => mode.id === activeModeId()) || state.modes[0] || null

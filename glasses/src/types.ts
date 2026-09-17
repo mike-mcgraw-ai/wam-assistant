@@ -235,6 +235,7 @@ export interface TaskNote {
 export interface ChecklistNote extends TaskNote {
   checklistId: string
   label: string
+  space?: Space
 }
 
 export interface DoneRow {
@@ -332,6 +333,15 @@ export interface CoachSessionSummary {
   runningNote: CoachRunningNote | null
   lastCueAt: number | null
   lastRecapAt: number | null
+}
+
+export interface NoteTranscript {
+  noteId: string
+  sessionId: string
+  title: string
+  startedAt: number
+  endedAt: number | null
+  segments: CoachSegment[]
 }
 
 export type CoachSessionResponse =
