@@ -294,6 +294,7 @@ export class Tasks {
     const kept = existing.filter(n => n.id !== noteId)
     if (kept.length === existing.length) return { ok: false, error: 'unknown note' }
     this.notes_.set(id, kept)
+    this.#log({ type: 'task_note_deleted', id, noteId, at: Date.now() })
     this.#persist()
     return { ok: true }
   }

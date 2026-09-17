@@ -88,7 +88,7 @@ export class Jobs {
    * from item + capability when not supplied, which is the sane default: the
    * same work on the same item is the same job.
    */
-  create({ itemId = null, capability, input = {}, idempotencyKey = null, priority = 'normal' }) {
+  create({ itemId = null, capability, input = {}, idempotencyKey = null, priority = 'normal', replaceQueued = false }) {
     if (!capability) return { ok: false, error: 'capability required' }
 
     const key =
@@ -96,7 +96,18 @@ export class Jobs {
       createHash('sha256').update(`${itemId}:${capability}:${JSON.stringify(input)}`).digest('hex').slice(0, 32)
 
     const existing = [...this.jobs.values()].find(j => j.idempotencyKey === key)
-    if (existing) return { ok: true, job: existing, existing: true }
+    if (existing) {
+      // Live summaries use one idempotency key per recap window. Until an agent
+      // claims that work, let newer transcript replace the earlier snapshot so
+      // one model call sees the whole window instead of only its first phrase.
+      if (replaceQueued && existing.status === JOB.QUEUED) {
+        existing.input = input
+        existing.updatedAt = Date.now()
+        this.#log({ type: 'refresh', id: existing.id, capability, at: existing.updatedAt })
+        this.#persist()
+      }
+      return { ok: true, job: existing, existing: true }
+    }
 
     const now = Date.now()
     const job = {

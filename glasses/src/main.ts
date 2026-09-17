@@ -22,6 +22,7 @@ import {
   checkItem,
   completeInboxItem,
   completeTask,
+  deleteNote,
   endCoachSession,
   fetchSessionSummary,
   fetchCoachCue,
@@ -38,6 +39,7 @@ import {
   findRun,
   indexRows,
   noteRows,
+  transcriptScrollMax,
   planRows,
   choreRows,
   taskDetailRows,
@@ -132,12 +134,13 @@ const state: UiState = {
   pong: null,
   events: 0,
   lastEvent: '-',
-  // Off. It did its job finding the sysEvent bug; leaving it on replaces the
-  // clock with debug output on every screen.
-  diagnostics: false,
+  // On. It no longer replaces anything — it numbers the lines, which is how a
+  // screen gets described from a walk without a screenshot.
+  diagnostics: config.diagnostics,
   space: lastSpace(),
   scrollTop: 0,
   armedTaskId: null,
+  armedNoteId: null,
   foreground: true,
   lastAudioAt: null,
   audio: { open: false, frames: 0, chunks: 0, sent: 0, rejected: 0, lastRms: 0, kind: '-', raw: 0, error: null },
@@ -225,6 +228,7 @@ async function sleepDisplay(): Promise<void> {
   // An armed confirm must not survive the nap. Waking and tapping once should
   // never complete something you armed before you put them down.
   state.armedTaskId = null
+  state.armedNoteId = null
   await paint()
 }
 
@@ -619,6 +623,18 @@ function currentTaskContext(): ListenContext {
   if (view.kind === 'plan') {
     const row = planRows(state)[view.cursor]
     if (row?.kind === 'task') return { taskId: row.task.taskId, label: row.task.label }
+    if (row?.kind === 'agenda' && row.row.kind !== 'gap') {
+      return { choreId: row.row.choreId, label: row.row.chore }
+    }
+  }
+  if (view.kind === 'checklist') {
+    const run = findRun(state, view.runId)
+    if (run) return { choreId: run.checklistId, label: run.name }
+  }
+  if (view.kind === 'chores') {
+    const row = choreRows(state)[view.cursor]
+    if (row?.kind === 'run') return { choreId: row.run.checklistId, label: row.run.name }
+    if (row?.kind === 'start') return { choreId: row.list.id, label: row.list.name }
   }
   return null
 }
@@ -745,9 +761,12 @@ function move(delta: number): void {
       dismissCue()
       return
     }
-    // Up (negative) goes back in time. Clamped in the renderer, which is the
-    // only place that knows how many wrapped lines there actually are.
-    view.scroll = Math.max(0, (view.scroll ?? 0) - delta)
+    // Up (negative) goes back in time, clamped to the end of the transcript.
+    // Letting it run past meant the number kept climbing on a screen that had
+    // stopped moving, and getting back to live took as many flicks as you had
+    // wasted going the other way.
+    const max = transcriptScrollMax(state)
+    view.scroll = Math.max(0, Math.min(max, (view.scroll ?? 0) - delta))
     return
   }
 
@@ -779,6 +798,7 @@ function move(delta: number): void {
   // Moving off a row cancels its pending confirm. An armed task that stayed
   // armed while you scrolled away would fire on the next tap somewhere else.
   state.armedTaskId = null
+  state.armedNoteId = null
   followCursor()
 }
 
@@ -1057,6 +1077,40 @@ async function activate(): Promise<void> {
     return
   }
 
+  if (view.kind === 'notes') {
+    const row = noteRows(state)[view.cursor]
+    if (!row) return
+    // Config-seeded notes are part of the task definition rather than user
+    // data. They cannot be removed from the Ring.
+    if (row.note.at === 0) return
+    const key = `${row.subject.kind}:${row.subject.id}:${row.note.id}`
+    if (state.armedNoteId !== key) {
+      state.armedNoteId = key
+      await paint()
+      return
+    }
+    state.armedNoteId = null
+    const deleted = await deleteNote(row.subject.kind, row.subject.id, row.note.id)
+    if (!deleted.ok) {
+      state.error = deleted.error
+      await paint()
+      return
+    }
+    state.error = null
+    if (row.subject.kind === 'task') {
+      const task = state.plan?.tasks.find(item => item.taskId === row.subject.id)
+      if (task) task.notes = task.notes.filter(note => note.id !== row.note.id)
+    } else {
+      const notes = state.snapshot?.checklists?.notes
+      if (notes && state.snapshot?.checklists) {
+        state.snapshot.checklists.notes = notes.filter(note => note.id !== row.note.id)
+      }
+    }
+    clampCursor()
+    await paint()
+    return
+  }
+
   if (view.kind === 'checklist') {
     const run = findRun(state, view.runId)
     if (run && view.cursor === run.items.length) {
@@ -1082,7 +1136,14 @@ async function activate(): Promise<void> {
     // Waits used to skip this and go straight to done on the first click, so
     // clicking "Wash cycle" ticked it off instead of starting the countdown —
     // no timer, no reminder, and no record of how long it actually took.
-    const armed = item.running || (item.stepKind === 'wait' && item.endsAt !== null)
+    // A `check` step ticks on the first click and records when. There is no
+    // clock to start, because there is no clock you would come back and stop —
+    // nobody reopens the list wet to end the shower, and a step left running
+    // all day is worse than one that was never timed.
+    const armed =
+      item.stepKind === 'check' ||
+      item.running ||
+      (item.stepKind === 'wait' && item.endsAt !== null)
     if (!item.done && !armed) {
       const began = await beginStep(run.runId, item.id)
       if (began.ok && state.snapshot) state.snapshot.checklists = began.checklists
@@ -1296,6 +1357,7 @@ async function activate(): Promise<void> {
 }
 
 async function back(): Promise<void> {
+  state.armedNoteId = null
   if (state.view.kind === 'cue') {
     dismissCue()
     await paint()
@@ -1614,6 +1676,7 @@ bridge.onEvenHubEvent((event: EvenHubEvent) => {
     // asking "done?" is one tap from ticking off something you never did.
     state.foreground = false
     state.armedTaskId = null
+    state.armedNoteId = null
     state.lastEvent = `sys${sysType}`
     void stopAudioCapture()
     return

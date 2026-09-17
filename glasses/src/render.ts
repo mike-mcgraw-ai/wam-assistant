@@ -116,6 +116,8 @@ export interface UiState {
    * Any cursor movement disarms.
    */
   armedTaskId: string | null
+  /** A second click deletes this selected user-created note; movement disarms. */
+  armedNoteId: string | null
   /**
    * Whether the glasses are currently showing us.
    *
@@ -261,7 +263,9 @@ function renderChores(state: UiState, cursor: number): string {
     return assemble([clockLine(state), spaceLine(state), '', 'No chores.'], config.maxChars, config.maxLines)
   }
 
-  const win = windowFollow(cursor, rows.length, config.rowsPerPage - 3, state.scrollTop)
+  // Five rows, not four: header, rule, five chores, blank, hint is nine lines
+  // exactly. The old budget left the bottom of the screen empty.
+  const win = windowFollow(cursor, rows.length, config.maxLines - 4, state.scrollTop)
   const lines: string[] = [clockLine(state), ruleRight('Chores', false)]
   for (let i = win.start; i < win.end; i += 1) {
     const row = rows[i]
@@ -296,12 +300,20 @@ function renderChores(state: UiState, cursor: number): string {
  * of the same data: all of it, smallest space it fits in, with the task it
  * belongs to named so a line is never orphaned from its subject.
  */
-export type NoteRow = { note: TaskNote; task: TaskRow }
+export type NoteRow = {
+  note: TaskNote
+  subject: { kind: 'task' | 'chore'; id: string; label: string }
+}
 
 export function noteRows(state: UiState): NoteRow[] {
   const rows: NoteRow[] = []
   for (const task of state.plan?.tasks ?? []) {
-    for (const note of task.notes ?? []) rows.push({ note, task })
+    for (const note of task.notes ?? []) {
+      rows.push({ note, subject: { kind: 'task', id: task.taskId, label: task.label } })
+    }
+  }
+  for (const note of state.snapshot?.checklists?.notes ?? []) {
+    rows.push({ note, subject: { kind: 'chore', id: note.checklistId, label: note.label } })
   }
   // Newest first: the thing you said most recently is the thing you are most
   // likely to be looking for.
@@ -321,19 +333,24 @@ function renderNotes(state: UiState, cursor: number): string {
   const win = windowFollow(cursor, rows.length, config.rowsPerPage - 2, state.scrollTop)
   const lines: string[] = [clockLine(state), ruleCentred(`Notes ${rows.length}`, false)]
   for (let i = win.start; i < win.end; i += 1) {
-    const { note, task } = rows[i]
+    const { note, subject } = rows[i]
     const selected = i === cursor
     if (selected) {
       // The selected note gets the room to be read. One row is enough to find
       // a note and never enough to use it.
       const wrapped = wrap(note.text, LINE_CHARS - 2)
-      lines.push(clipToWidth(`>${clip(task.label, 20)}  ${ago(note.at)} ago`))
+      lines.push(clipToWidth(`>${clip(subject.label, 20)}  ${ago(note.at)} ago`))
       for (const line of wrapped.slice(0, 3)) lines.push(clipToWidth(` ${line}`))
+      const key = `${subject.kind}:${subject.id}:${note.id}`
+      lines.push(note.at === 0
+        ? ' built-in note'
+        : state.armedNoteId === key
+          ? ' [!] click again to delete'
+          : ' [x] click to delete')
     } else {
-      lines.push(clipToWidth(` ${clip(note.text, 30)}  ${clip(task.label, 12)}`))
+      lines.push(clipToWidth(` ${clip(note.text, 30)}  ${clip(subject.label, 12)}`))
     }
   }
-  lines.push('', 'click to open the task')
   return assemble(lines, config.maxChars, config.maxLines)
 }
 
@@ -433,18 +450,7 @@ export function aiWidgetText(state: UiState): string | null {
 }
 
 function header(state: UiState, right: string): string {
-  if (state.diagnostics) return diagHeader(state, right)
   return plainHeader(state, right)
-}
-
-/**
- * Header for first-run debugging: build version, event count, last event.
- *
- * The version is the important half — it is the only way to be certain the
- * build on your face is the one you just packed.
- */
-function diagHeader(state: UiState, _right: string): string {
-  return clip(`v${APP_VERSION} ${state.events}:${state.lastEvent}`, LINE_CHARS)
 }
 
 /**
@@ -482,9 +488,7 @@ export function spaceLine(state: UiState, selected = false): string {
   // has to say what the click does rather than only what space you are in.
   const point = selected ? '>  ' : '   '
 
-  if (state.diagnostics) {
-    return clipToWidth(`${point}${label}  v${APP_VERSION} ${state.events}:${state.lastEvent}`)
-  }
+
 
   const connection = state.fromCache
     ? '  ~CACHE'
@@ -702,6 +706,8 @@ function renderChecklist(state: UiState, runId: string, cursor: number): string 
     ? 'running too long - click to reset'
     : item?.done
       ? `done ${clockShort(item.at)} - click to undo`
+      : item?.stepKind === 'check'
+        ? 'click to tick it off'
       : item?.running
         ? `running ${mins(item.elapsedMs)} - click to finish`
         : item?.stepKind === 'wait' && item.endsAt !== null
@@ -800,25 +806,41 @@ function renderPlan(state: UiState, cursor: number): string {
   // The rule carries the tip, but it scrolls off once you page past it. On
   // those pages the tip moves to the bottom row instead, so what a click does
   // is never more than a glance away — and no page pays for it twice.
-  const ruleAt = rows.findIndex(r => r.kind === 'chores')
-  const full = windowFollow(cursor, rows.length, config.rowsPerPage, state.scrollTop)
-  const ruleShown = ruleAt >= full.start && ruleAt < full.end
-  const win = ruleShown
-    ? full
-    : windowFollow(cursor, rows.length, config.rowsPerPage - 1, state.scrollTop)
+  // The listen row is drawn as the header line, so it is not part of the body
+  // and must not be windowed with it. It used to sit in the window and be
+  // skipped, which cost the first page a row it never got back — eight lines
+  // where nine fit — and pushed the page boundaries out of step, so the second
+  // page opened by repeating the last row of the first.
+  const body = rows.slice(1)
+  const bodyCursor = Math.max(0, cursor - 1)
 
-  // A blank under the clock as well. The header used to butt straight into the
-  // first task and the whole screen read as one wall of characters; the list
-  // is allowed to run onto a second page, so the line is affordable.
+  // Pages are walked, not divided.
+  //
+  // A page fits six rows plus a tip line, except a page carrying the Chores
+  // rule, which fits seven because the rule carries the tip itself. Dividing
+  // by a size cannot express that: the first attempt paged at one size and
+  // drew at another, which repeated a row, and the second drew one row past
+  // the page it belonged to — visible here, only selectable on the next page.
+  // Walking the boundaries makes the rule hold everywhere: what you can see,
+  // you can select.
+  const ruleAtBody = body.findIndex(r => r.kind === 'chores')
+  const FULL = config.maxLines - 2
+  let start = 0
+  let size = FULL
+  for (;;) {
+    size = ruleAtBody >= start && ruleAtBody < start + FULL ? FULL : FULL - 1
+    if (bodyCursor < start + size || start + size >= body.length) break
+    start += size
+  }
+  const ruleShown = ruleAtBody >= start && ruleAtBody < start + size
+  const win = { start, end: Math.min(body.length, start + size) }
+
   const lines: string[] = [clockLine(state), spaceLine(state, cursor === 0)]
   for (let i = win.start; i < win.end; i += 1) {
-    const row = rows[i]
-    const point = i === cursor ? '>' : ' '
-    // Already drawn, as the header. Skipping it here is what lets a selectable
-    // row cost nothing: the line was on screen either way.
-    if (row.kind === 'listen') continue
+    const row = body[i]
+    const point = i === bodyCursor && cursor > 0 ? '>' : ' '
     if (row.kind === 'chores') {
-      lines.push(ruleCentred(planTip(state, rows, cursor), i === cursor))
+      lines.push(ruleCentred(planTip(state, rows, cursor), i === bodyCursor && cursor > 0))
     } else if (row.kind === 'task') {
       const armed = state.armedTaskId === row.task.taskId
       lines.push(clip(`${point}${taskRow(row.task, armed)}`, LINE_CHARS))
@@ -953,6 +975,23 @@ function transcriptLines(segments: CoachSegment[]): string[] {
   return lines
 }
 
+/**
+ * How far back the transcript can be wound, in wrapped lines.
+ *
+ * The renderer clamps what it draws, but the cursor lives in the view — so
+ * without this the scroll value keeps climbing past the end of the transcript
+ * and you flick twenty times to get back to live from a screen that stopped
+ * moving ten flicks ago.
+ */
+export function transcriptScrollMax(state: UiState): number {
+  const segments = state.coachSession?.recentSegments ?? []
+  if (segments.length === 0) return 0
+  // Two lines of chrome above the transcript at the very least; being a little
+  // generous here only ever means one extra flick, never a wall.
+  const room = Math.max(1, config.maxLines - 2)
+  return Math.max(0, transcriptLines(segments).length - room)
+}
+
 function transcriptWindow(lines: string[], room: number, scrollBack: number): string[] {
   const maxScroll = Math.max(0, lines.length - room)
   const scroll = Math.min(Math.max(0, scrollBack), maxScroll)
@@ -968,26 +1007,33 @@ function transcriptWindow(lines: string[], room: number, scrollBack: number): st
   return window.length > room ? window.slice(0, room) : window
 }
 
-function pushRunningNote(lines: string[], session: CoachSessionSummary, maxRows = 3): void {
-  const note = session.runningNote
-  if (!note?.lines?.length || maxRows <= 0) return
+function listenSummary(session: CoachSessionSummary | null, cue: CoachCue | null): string | null {
+  // A timely interjection outranks the background summary while it is visible.
+  // It still gets exactly one row: Listen is primarily a transcript reader.
+  const cueText = cue && (!session || cue.createdAt >= session.startedAt)
+    ? cue.lines?.join(' ').replace(/\s+/g, ' ').trim()
+    : ''
+  if (cueText) return clipToWidth(`! ${cueText}`)
 
-  let used = 0
-  for (const raw of note.lines.slice(0, 3)) {
-    const wrapped = wrap(`* ${raw}`, LINE_CHARS)
-    for (const line of wrapped) {
-      if (used >= maxRows) return
-      lines.push(line)
-      used += 1
-    }
+  const notes = session?.runningNote?.lines ?? []
+  const raw = notes.find(line => /^Now\s*:/i.test(line)) ?? notes[0]
+  if (!raw) {
+    const latest = session?.recentSegments?.at(-1)?.text.replace(/\s+/g, ' ').trim()
+    return latest ? clipToWidth(`= ${latest}`) : null
   }
+  const summary = raw.replace(/^(?:Thread|Now|Hold)\s*:\s*/i, '').trim()
+  return summary ? clipToWidth(`= ${summary}`) : null
 }
 
 function renderCue(state: UiState, scrollBack = 0): string {
   const session = state.coachSession
   const cue = state.cue
   const lines: string[] = []
-  const listenDebug = config.listenDebug || state.diagnostics
+  // Only the explicit flag. Diagnostics used to turn this on too, back when
+  // diagnostics meant "show me the internals"; it now means "number the
+  // lines", and stapling the audio counters to it buried the transcript —
+  // which is the entire point of this screen — under a stats panel.
+  const listenDebug = config.listenDebug
 
   if (session?.active) {
     const a = state.audio ?? { open: false, frames: 0, chunks: 0, sent: 0, rejected: 0, lastRms: 0, kind: '-', raw: 0, error: null }
@@ -1009,34 +1055,21 @@ function renderCue(state: UiState, scrollBack = 0): string {
         )
         if (stt.lastError) lines.push(clipToWidth(`stt err ${stt.lastError}`))
       }
-    } else {
-      // One status line, not a debug panel. The transcript is the point of this
-      // screen now that the audio path is proven.
-      lines.push(
-        clipToWidth(`LISTEN  ${clip(session.modeName, 12)}  ${session.segmentCount} lines  ${mic}`),
-      )
-    }
+    } else lines.push(clipToWidth(`LISTEN  ${clip(session.modeName, 12)}  ${session.segmentCount} lines  ${mic}`))
   } else {
     // Stopped is a screen you can act on, not a dead end. Listen from the menu
     // brings you here without recording, so this line has to say how to start.
     const stt = state.snapshot?.stt
-    const lines0 = [
-      clockLine(state),
-      ruleCentred('Listen', false),
-      '',
-      'Not listening - click to start',
-    ]
+    const lines0 = ['STOPPED Listen - click to start']
     if (listenDebug && stt) lines0.push('', clipToWidth(`stt ${stt.provider}${stt.configured ? '' : ' UNSET'}  ok ${stt.ok}  empty ${stt.empty}  fail ${stt.failed}`))
     if (!cue && !session?.recentSegments?.length) return assemble(lines0, config.maxChars, config.maxLines)
     lines.push(...lines0)
   }
 
-  if (!listenDebug && session?.runningNote?.lines?.length) {
-    lines.push('')
-    pushRunningNote(lines, session, cue ? 2 : 3)
-  }
-
-  if (cue) {
+  if (!listenDebug) {
+    const summary = listenSummary(session ?? null, cue ?? null)
+    if (summary) lines.push(summary)
+  } else if (cue) {
     lines.push('')
     for (const line of cue.lines) {
       for (const wrapped of wrap(line, LINE_CHARS)) lines.push(wrapped)
@@ -1045,7 +1078,6 @@ function renderCue(state: UiState, scrollBack = 0): string {
 
   const segments = session?.recentSegments ?? []
   if (segments.length > 0) {
-    lines.push('')
     const room = Math.max(0, config.maxLines - lines.length)
     if (room <= 0) return assemble(lines, config.maxChars, config.maxLines)
 
@@ -1078,8 +1110,30 @@ function renderCue(state: UiState, scrollBack = 0): string {
   return assemble(lines, config.maxChars, config.maxLines)
 }
 
+/**
+ * Number every line when diagnostics is on.
+ *
+ * This is here so a screen can be described out loud. "Line 6 is cut off",
+ * "line 4 will not select" — that is a bug report I can act on, where "the
+ * vacuum one" takes three messages to pin down. It replaced the version and
+ * event counters that used to sit on the LIFE line: those answered a question
+ * we have already answered, and they cost the one line that appears on every
+ * single screen.
+ */
+function numbered(content: string): string {
+  return content
+    .split('\n')
+    .map((line, i) => `${i + 1} ${line}`)
+    .join('\n')
+}
+
 /** Single entry point: UI state in, one string for the text container out. */
 export function render(state: UiState): string {
+  const out = renderView(state)
+  return state.diagnostics ? numbered(out) : out
+}
+
+function renderView(state: UiState): string {
   switch (state.view.kind) {
     case 'index':
       return renderIndex(state, state.view.cursor)

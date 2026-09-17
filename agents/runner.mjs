@@ -121,7 +121,12 @@ Return ONLY a JSON object, no prose:
   "lines": ["up to 3 lines, 44 characters max each"],
   "kind": "answer" | "followup" | "factcheck" | "advice" | "thought" | "recap",
   "priority": 0 | 1 | 2 | 3 | 4,
-  "quiet": false
+  "quiet": false,
+  "runningNote": {
+    "thread": "the main thread worth returning to",
+    "now": "what the conversation is on right now",
+    "hold": "a parked tangent, connection, open question, or next action"
+  }
 }
 
 Use the mode instructions and the recent transcript. Help only when a cue would
@@ -130,10 +135,34 @@ follow-up, concrete supportive advice, a thought worth holding, or a recap.
 Do not invent facts, names, times, durations, or estimates. Do not tell the user
 to do anything irreversible without explicit confirmation. If there is no useful
 cue, return {"quiet":true,"title":"Listening","lines":[],"kind":"thought","priority":0}.
+
+Always update runningNote, even when the cue is quiet. It is a conversation
+compass, not a second transcript:
+- thread preserves the main idea the user is building, especially across a tangent
+- now names the immediate topic in plain language
+- hold keeps the single most useful connection, parked tangent, unresolved
+  question, promise, or next action
+Keep each value concrete and short. Preserve the previous thread until the
+transcript clearly resolves or replaces it. Never invent a connection.
 `
 
 function trimText(value, max) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max)
+}
+
+function normalizeRunningNote(raw, constraints = {}) {
+  if (!raw || typeof raw !== 'object') return null
+  const max = Number(constraints.noteLineChars) || 42
+  const line = (label, value) => {
+    const prefix = `${label}: `
+    const body = trimText(value, Math.max(1, max - prefix.length))
+    return body ? `${prefix}${body}` : ''
+  }
+  const lines = Array.isArray(raw.lines)
+    ? raw.lines.map(value => trimText(value, max)).filter(Boolean).slice(0, 3)
+    : [line('Thread', raw.thread), line('Now', raw.now), line('Hold', raw.hold)].filter(Boolean)
+
+  return lines.length > 0 ? { title: 'Conversation compass', lines } : null
 }
 
 function normalizeCoachCue(parsed, constraints = {}) {
@@ -141,9 +170,10 @@ function normalizeCoachCue(parsed, constraints = {}) {
   const allowed = new Set(Array.isArray(constraints.allowedKinds) ? constraints.allowedKinds : [])
   const fallbackKind = allowed.has('thought') ? 'thought' : [...allowed][0] || 'thought'
   const kind = allowed.has(parsed.kind) ? parsed.kind : fallbackKind
+  const runningNote = normalizeRunningNote(parsed.runningNote, constraints)
 
   if (parsed.quiet === true) {
-    return { title: 'Listening', lines: [], kind, priority: 0, quiet: true }
+    return { title: 'Listening', lines: [], kind, priority: 0, quiet: true, runningNote }
   }
 
   const title = trimText(parsed.title || 'Coach', Number(constraints.titleChars) || 30)
@@ -154,7 +184,7 @@ function normalizeCoachCue(parsed, constraints = {}) {
     .slice(0, Number(constraints.maxLines) || 3)
 
   if (lines.length === 0) {
-    return { title: 'Listening', lines: [], kind, priority: 0, quiet: true }
+    return { title: 'Listening', lines: [], kind, priority: 0, quiet: true, runningNote }
   }
 
   return {
@@ -163,6 +193,7 @@ function normalizeCoachCue(parsed, constraints = {}) {
     kind,
     priority: Math.max(0, Math.min(4, Number(parsed.priority) || 2)),
     quiet: false,
+    runningNote,
   }
 }
 
@@ -207,6 +238,9 @@ ${JSON.stringify({
 
 Session:
 ${JSON.stringify(input.session ?? {}, null, 2)}
+
+Previous running note:
+${JSON.stringify(input.previousRunningNote ?? null, null, 2)}
 
 Recent transcript:
 ${transcript}

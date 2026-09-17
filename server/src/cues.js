@@ -142,9 +142,10 @@ function coachSessionCue(coach, now) {
     now - (session.lastRecapAt || session.startedAt) >= mode.recapMinutes * 60_000
 
   if (recapDue) {
+    const compass = session.runningNote?.lines?.slice(0, 3) ?? []
     return lineSet(
       `${mode.name} recap`,
-      recent.slice(-3).map(segment => segmentSnippet(segment)),
+      compass.length > 0 ? compass : recent.slice(-3).map(segment => segmentSnippet(segment)),
       { kind: 'recap', priority: 2 },
     )
   }

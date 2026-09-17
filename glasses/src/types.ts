@@ -48,7 +48,16 @@ export interface Snapshot {
   stt?: SttStats
 }
 
-export type StepKind = 'do' | 'wait'
+/**
+ * - `do`    something you do, timed: click starts, click again finishes
+ * - `wait`  a machine running: click starts the countdown, click again ends it
+ * - `check` a single click, done, and the time it happened is the record
+ *
+ * `check` exists because not everything worth ticking is worth timing. You are
+ * not going to reopen the list wet to stop the clock on the shower, and a step
+ * left running all morning is worse data than no duration at all.
+ */
+export type StepKind = 'do' | 'wait' | 'check'
 
 export interface ChecklistItem {
   id: string
@@ -223,6 +232,11 @@ export interface TaskNote {
   at: number
 }
 
+export interface ChecklistNote extends TaskNote {
+  checklistId: string
+  label: string
+}
+
 export interface DoneRow {
   kind: 'done'
   chore: string
@@ -349,4 +363,6 @@ export interface StartableChecklist {
 export interface ChecklistsState {
   active: ChecklistRun[]
   startable: StartableChecklist[]
+  /** Durable notes attached to a chore rather than one particular run. */
+  notes?: ChecklistNote[]
 }

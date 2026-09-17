@@ -129,8 +129,12 @@ function noteKind(text) {
   return 'Now'
 }
 
-function runningNoteLine(kind, text) {
-  return `${kind}: ${clipNote(text)}`
+function runningNoteLine(label, text) {
+  const prefix = `${label}: `
+  // The glasses add "* " before this. Keep each compass item to one physical
+  // row so all three ideas remain visible instead of one long item wrapping
+  // over the rest of the note.
+  return `${prefix}${clipNote(text, 42 - prefix.length)}`
 }
 
 function runningConversationNote(session) {
@@ -146,24 +150,41 @@ function runningConversationNote(session) {
   const latest = pieces.at(-1)
   const chosen = []
   const seen = new Set()
-  const add = piece => {
+  const add = (label, piece) => {
     if (!piece?.text || chosen.length >= 3) return
     const key = noteKey(piece.text)
     if (!key || seen.has(key)) return
     seen.add(key)
-    chosen.push(runningNoteLine(piece.kind, piece.text))
+    chosen.push(runningNoteLine(label, piece.text))
   }
 
-  const recent = pieces.slice(-24)
-  add([...recent].reverse().find(piece => piece.kind === 'Dot'))
-  add([...recent].reverse().find(piece => piece.kind === 'Open'))
-  add([...recent].reverse().find(piece => piece.kind === 'Next' || piece.kind === 'Decided'))
-  add(latest)
+  const recent = pieces.slice(-36)
+  const returnsToThread = piece =>
+    /\b(?:back to|where we were|main point|what i was saying|thread was|before (?:that|the) tangent)\b/i.test(piece.text)
+  const tangentAt = recent.findLastIndex(piece =>
+    !returnsToThread(piece) && /\b(?:tangent|aside|before i forget|by the way|separate thought|park that)\b/i.test(piece.text),
+  )
+  const parkedThread = tangentAt > 0 ? recent[tangentAt - 1] : null
+  const connectedThread = [...recent].reverse().find(piece => piece.kind === 'Dot' || piece.kind === 'Decided')
+  const thread = parkedThread || connectedThread || recent[0] || latest
+  const visibleKeys = new Set([noteKey(thread?.text), noteKey(latest?.text)])
+  const actionableHold = [...recent]
+    .reverse()
+    .find(piece =>
+      !visibleKeys.has(noteKey(piece.text)) &&
+      (piece.kind === 'Open' || piece.kind === 'Next' || piece.kind === 'Decided'),
+    )
+  const tangentHold = tangentAt >= 0 ? recent[tangentAt] : null
+  const hold = actionableHold || tangentHold
 
-  for (const piece of [...recent].reverse()) add(piece)
+  add('Thread', thread)
+  add('Now', latest)
+  add('Hold', hold)
+
+  for (const piece of [...recent].reverse()) add('Hold', piece)
 
   return {
-    title: 'Running note',
+    title: 'Conversation compass',
     lines: chosen,
     updatedAt: latest.at,
     segmentCount: session.segments.length,
@@ -173,9 +194,10 @@ function runningConversationNote(session) {
 function contextDefaults(context) {
   if (!context || typeof context !== 'object') return null
   const taskId = str(context.taskId, 80)
+  const choreId = str(context.choreId, 80)
   const label = str(context.label, 120)
-  if (!taskId || !label) return null
-  return { taskId, label }
+  if ((!taskId && !choreId) || !label) return null
+  return { ...(taskId ? { taskId } : {}), ...(choreId ? { choreId } : {}), label }
 }
 
 function bool(value, fallback = false) {

@@ -103,6 +103,22 @@ const DEFAULTS = {
    */
   ops: false,
 
+  /**
+   * Line numbers on every rendered line.
+   *
+   * On by default. The screen is nine lines and the only way to describe one
+   * from a walk is to point at a row; "line 4 will not select" is a bug report,
+   * "the vacuum one" is three messages of guessing. It costs two characters of
+   * width, which is cheaper than the round trip.
+   *
+   * Off by default: two characters of width on every line, on every screen,
+   * is a real cost to pay all day for something only needed while describing a
+   * bug. Turn it on for that, turn it off after.
+   *
+   * On with: localStorage.setItem('opsboard.diagnostics', 'on')
+   */
+  diagnostics: false,
+
   rowsPerPage: 7,
   /**
    * Hard ceilings per rendered page.
@@ -150,6 +166,8 @@ export const config = {
   hints: stored('opsboard.hints') !== 'off',
   // On with: localStorage.setItem('opsboard.ops', 'on')
   ops: stored('opsboard.ops') === 'on' || DEFAULTS.ops,
+  // On with: localStorage.setItem('opsboard.diagnostics', 'on')
+  diagnostics: stored('opsboard.diagnostics') === 'on' || DEFAULTS.diagnostics,
   maxLines: DEFAULTS.maxLines,
   maxChars: DEFAULTS.maxChars,
 }

@@ -65,6 +65,13 @@ checklists.beginStep(liveRun.runId, 'wash', now - 2 * M)
 // a step started by accident five hours ago
 const stray = checklists.start('dishes').run
 checklists.beginStep(stray.runId, 'load', now - 5 * 3600 * 1000)
+checklists.addNote(
+  'vacuum',
+  'The start timers were wrong, but the projected end times stayed correct.',
+  'listen',
+  'demo-vacuum-note',
+  now - 4 * M,
+)
 
 const inboxGroups = [
   { name: 'Groceries', items: [
@@ -105,7 +112,7 @@ const base: UiState = {
   cue: null, coachSession: null, cueReturn: null,
   pong: null,
   events: 0, lastEvent: '-', diagnostics: false, space: 'ops',
-  scrollTop: 0, armedTaskId: null,
+  scrollTop: 0, armedTaskId: null, armedNoteId: null,
 }
 
 // Build a 60-minute plan the way the server would.
@@ -173,11 +180,11 @@ const listenSession = {
     },
   ],
   runningNote: {
-    title: 'Running note',
+    title: 'Conversation compass',
     lines: [
-      'Dot: Q3 budget ties back to vendor growth.',
-      'Open: What did the Q3 budget close at?',
-      'Next: Send Dana the 2024 taxes note.',
+      'Thread: Q3 budget and vendor growth',
+      'Now: Dana asked for the close number',
+      'Hold: Send Dana the 2024 taxes note',
     ],
     updatedAt: now - 4_000,
     segmentCount: 3,
@@ -201,10 +208,18 @@ const questionCue = {
 frame('Ops index', render(withPlan))
 frame('Ops index — AI widget', render({ ...withPlan, cue: demoCue }))
 frame('Coach — manual', render({ ...withPlan, cue: demoCue, view: { kind: 'cue' } }))
+frame('Coach — conversation compass', render({ ...withPlan, cue: null, coachSession: listenSession, view: { kind: 'cue' } }))
 frame('Coach — listening question', render({ ...withPlan, cue: questionCue, coachSession: listenSession, view: { kind: 'cue' } }))
 frame('Life index', render({ ...withPlan, space: 'life', view: { kind: 'index', cursor: 0 } }))
 frame('Life index — no auto AI widget', render({ ...withPlan, space: 'life', cue: demoCue, view: { kind: 'index', cursor: 0 } }))
 frame('Shared list — Groceries', render({ ...withPlan, space: 'life', view: { kind: 'inbox', group: 'Groceries', cursor: 0 } }))
+frame('Notes — chore note', render({ ...withPlan, space: 'life', view: { kind: 'notes', cursor: 0 } }))
+frame('Notes — delete armed', render({
+  ...withPlan,
+  space: 'life',
+  view: { kind: 'notes', cursor: 0 },
+  armedNoteId: 'chore:vacuum:demo-vacuum-note',
+}))
 
 frame('Index — "Flagged only" on', render({ ...base, alertsOnly: true }))
 frame('Checklist — AM Rounds', render({ ...base, view: { kind: 'checklist', runId: amRun.runId, cursor: 3 } }))

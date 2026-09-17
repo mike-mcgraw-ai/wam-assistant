@@ -150,6 +150,26 @@ export async function completeTask(id: string): Promise<boolean> {
   }
 }
 
+/** Permanently remove one user-created task or chore note. */
+export async function deleteNote(
+  kind: 'task' | 'chore',
+  subjectId: string,
+  noteId: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const res = await fetch(`${config.serverUrl}/note/delete`, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ kind, subjectId, noteId }),
+      signal: AbortSignal.timeout(config.timeoutMs),
+    })
+    const payload = await res.json().catch(() => null)
+    return res.ok ? { ok: true } : { ok: false, error: payload?.error ?? `server ${res.status}` }
+  } catch (err: unknown) {
+    return { ok: false, error: err instanceof Error ? err.message.slice(0, 40) : 'network error' }
+  }
+}
+
 /** Ask the server to schedule a block. The maths lives there, not here. */
 export async function fetchPlan(space: string): Promise<
   { ok: true; plan: BlockPlan } | { ok: false; error: string }

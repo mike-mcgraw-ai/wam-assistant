@@ -36,6 +36,8 @@ export class Checklists {
 
     /** @type {Map<string, any>} runId -> run */
     this.runs = new Map()
+    /** @type {Map<string, any[]>} checklistId -> durable notes */
+    this.notes_ = new Map()
     this.lastRolledDay = null
     this.#load()
   }
@@ -71,6 +73,9 @@ export class Checklists {
     try {
       const raw = JSON.parse(readFileSync(this.runsPath, 'utf8'))
       for (const run of raw.runs || []) this.runs.set(run.runId, run)
+      for (const [id, notes] of Object.entries(raw.notes || {})) {
+        if (this.templates.has(id) && Array.isArray(notes)) this.notes_.set(id, notes)
+      }
       this.lastRolledDay = raw.lastRolledDay ?? null
       console.log(`[checklists] restored ${this.runs.size} runs`)
     } catch (err) {
@@ -87,7 +92,7 @@ export class Checklists {
       const runs = [...this.runs.values()].filter(r => !r.finishedAt || r.finishedAt > cutoff)
       writeFileSync(
         this.runsPath,
-        JSON.stringify({ runs, lastRolledDay: this.lastRolledDay }, null, 2),
+        JSON.stringify({ runs, notes: Object.fromEntries(this.notes_), lastRolledDay: this.lastRolledDay }, null, 2),
       )
     } catch (err) {
       console.warn(`[checklists] could not write runs: ${err.message}`)
@@ -161,6 +166,51 @@ export class Checklists {
   /** The template step definition for an item, or undefined. */
   step(checklistId, itemId) {
     return this.templates.get(checklistId)?.items.find(i => i.id === itemId)
+  }
+
+  notes(checklistId) {
+    return this.notes_.get(checklistId) ?? []
+  }
+
+  addNote(checklistId, text, by = 'me', clientId = null, now = Date.now()) {
+    const template = this.templates.get(checklistId)
+    if (!template) return { ok: false, error: `unknown checklist "${checklistId}"` }
+    const body = String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, 400)
+    if (!body) return { ok: false, error: 'empty note' }
+
+    const notes = this.notes_.get(checklistId) ?? []
+    const noteId = clientId || `n${now.toString(36)}${Math.random().toString(36).slice(2, 6)}`
+    if (notes.some(note => note.id === noteId)) return { ok: true, duplicate: true }
+
+    notes.push({ id: noteId, text: body, by: String(by || 'me').slice(0, 16), at: now })
+    this.notes_.set(checklistId, notes)
+    this.#log({ type: 'checklist_note', checklistId, noteId, text: body, by, at: now })
+    this.#persist()
+    return { ok: true }
+  }
+
+  removeNote(checklistId, noteId) {
+    if (!this.templates.has(checklistId)) {
+      return { ok: false, error: `unknown checklist "${checklistId}"` }
+    }
+    const existing = this.notes_.get(checklistId)
+    if (!existing) return { ok: false, error: 'no notes' }
+    const kept = existing.filter(note => note.id !== noteId)
+    if (kept.length === existing.length) return { ok: false, error: 'unknown note' }
+    this.notes_.set(checklistId, kept)
+    this.#log({ type: 'checklist_note_deleted', checklistId, noteId, at: Date.now() })
+    this.#persist()
+    return { ok: true }
+  }
+
+  allNotes() {
+    const rows = []
+    for (const [checklistId, notes] of this.notes_) {
+      const template = this.templates.get(checklistId)
+      if (!template) continue
+      for (const note of notes) rows.push({ ...note, checklistId, label: template.name })
+    }
+    return rows
   }
 
   /**
@@ -287,7 +337,12 @@ export class Checklists {
 
     const items = template.items.map(item => {
       const timing = run.timing[item.id]
-      const stepKind = item.kind ?? 'do'
+      // `check` is a step that is only ever ticked: one click, done, and the
+      // time it happened is the whole record. A list marked `timed: false`
+      // makes every step one, which is what a morning routine is — you are not
+      // going to come back and stop the clock on the shower, and a step left
+      // running forever is worse than a step that was never timed.
+      const stepKind = item.kind ?? (template.timed === false ? 'check' : 'do')
       const endsAt = timing?.endsAt ?? null
 
       return {
@@ -427,7 +482,7 @@ export class Checklists {
        * the planner schedules against, so it must never contain a null.
        */
       plan: template.items.map(item => {
-        const stepKind = item.kind ?? 'do'
+        const stepKind = item.kind ?? (template.timed === false ? 'check' : 'do')
         const durations = finished
           .map(r => r.items.find(i => i.id === item.id)?.durationMs)
           .filter(d => typeof d === 'number' && d > 0)
@@ -454,7 +509,7 @@ export class Checklists {
           .filter(d => typeof d === 'number' && d > 0)
         const lags = shaped.map(i => i?.lagMs).filter(l => typeof l === 'number')
 
-        const stepKind = item.kind ?? 'do'
+        const stepKind = item.kind ?? (template.timed === false ? 'check' : 'do')
         const medianLagMs = Checklists.median(lags)
 
         // If you always start this step the moment the previous one ends, the
@@ -543,7 +598,7 @@ export class Checklists {
       .filter(t => !active.some(r => r.checklistId === t.id))
       .map(t => ({ id: t.id, name: t.name, total: t.items.length, space: t.space ?? 'ops' }))
 
-    return { active, startable }
+    return { active, startable, notes: this.allNotes() }
   }
 
   // ---- daily rollup ------------------------------------------------------
