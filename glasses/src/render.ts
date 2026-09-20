@@ -7,6 +7,8 @@ import { renderFontTest } from './fonttest'
 const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : 'dev'
 import type {
   AgendaRow,
+  AssistantChat,
+  AssistantProvider,
   BlockPlan,
   Board,
   ChecklistItem,
@@ -71,6 +73,8 @@ export type View =
    * "I scrolled up and it snapped back" looks like.
    */
   | { kind: 'cue'; scroll?: number; modeCursor?: number }
+  | { kind: 'assistant'; phase: 'providers'; cursor: number }
+  | { kind: 'assistant'; phase: 'chat'; provider: AssistantProvider; scroll?: number }
   | { kind: 'pong' }
   | { kind: 'fonttest'; page: number }
   | { kind: 'inbox'; group: string; cursor: number }
@@ -97,6 +101,12 @@ export interface UiState {
   coachModes: CoachMode[]
   /** mode selected for the next listening session */
   coachModeId: string | null
+  /** persistent selected-provider conversation from the hub */
+  assistantChat: AssistantChat | null
+  /** true while the glasses microphone is capturing a chat turn */
+  assistantRecording: boolean
+  /** true after capture while STT is draining and the turn is queued */
+  assistantSending: boolean
   /** Loaded only while a note detail/transcript needs the original session. */
   noteTranscript: NoteTranscript | null
   /** screen to return to after a manual Coach cue is dismissed */
@@ -1179,13 +1189,12 @@ function transcriptWindow(lines: string[], room: number, scrollBack: number): st
   const end = lines.length - scroll
   let start = Math.max(0, end - room)
 
-  // If the available window starts midway through a wrapped paragraph, step
-  // back to its prefixed first line. Showing only "  after this." is worse
-  // than showing fewer exact words with context.
-  while (start > 0 && lines[start]?.startsWith('  ')) start -= 1
-
   const window = lines.slice(start, end)
-  return window.length > room ? window.slice(0, room) : window
+  // A long paragraph may be dozens of wrapped rows. Rewinding to its first
+  // row on every scroll made the paragraph literally unscrollable. Mark a
+  // mid-paragraph window as continuation instead of changing its position.
+  if (start > 0 && window[0]?.startsWith('  ')) window[0] = `~ ${window[0].trimStart()}`
+  return window
 }
 
 function listenSummary(session: CoachSessionSummary | null, cue: CoachCue | null): string | null {
@@ -1197,7 +1206,7 @@ function listenSummary(session: CoachSessionSummary | null, cue: CoachCue | null
   if (cueText) return clipToWidth(`! ${cueText}`)
 
   const notes = session?.runningNote?.lines ?? []
-  const raw = notes.find(line => /^Now\s*:/i.test(line)) ?? notes[0]
+  const raw = notes.find(line => /^Thread\s*:/i.test(line)) ?? notes[0]
   if (!raw) {
     const latest = session?.recentSegments?.at(-1)?.text.replace(/\s+/g, ' ').trim()
     return latest ? clipToWidth(`= ${latest}`) : null
@@ -1309,6 +1318,78 @@ function renderCue(state: UiState, scrollBack = 0): string {
   return assemble(lines, config.maxChars, config.maxLines)
 }
 
+const ASSISTANT_PROVIDERS: Array<{ id: AssistantProvider; label: string }> = [
+  { id: 'chatgpt', label: 'ChatGPT' },
+  { id: 'claude', label: 'Claude' },
+]
+
+function assistantMessageLines(chat: AssistantChat | null): string[] {
+  const lines: string[] = []
+  for (const message of chat?.messages ?? []) {
+    const prefix = message.role === 'user' ? '> ' : message.role === 'system' ? '! ' : '- '
+    const clean = message.text.replace(/\s+/g, ' ').trim()
+    const wrapped = wrap(clean, Math.max(8, LINE_CHARS - prefix.length))
+    wrapped.forEach((line, index) => lines.push(`${index === 0 ? prefix : '  '}${line}`))
+  }
+  return lines
+}
+
+export function assistantScrollMax(state: UiState): number {
+  if (state.view.kind !== 'assistant' || state.view.phase !== 'chat' || state.assistantRecording) return 0
+  const room = Math.max(1, config.maxLines - 2)
+  return Math.max(0, assistantMessageLines(state.assistantChat).length - room)
+}
+
+function renderAssistant(state: UiState): string {
+  const view = state.view
+  if (view.kind !== 'assistant') return ''
+  if (view.phase === 'providers') {
+    const lines = [clockLine(state), ruleCentred('Chat', false), '']
+    ASSISTANT_PROVIDERS.forEach((provider, index) => {
+      const point = view.cursor === index ? '>' : ' '
+      const ready = state.snapshot?.assistant?.[provider.id] === true
+      lines.push(clipToWidth(`${point}${provider.label}  ${ready ? 'ready' : 'setup needed'}`))
+    })
+    lines.push('', 'click to choose')
+    return assemble(lines, config.maxChars, config.maxLines)
+  }
+
+  const label = view.provider === 'claude' ? 'Claude' : 'ChatGPT'
+  const status = state.assistantRecording
+    ? 'REC'
+    : state.assistantSending
+      ? 'sending'
+      : state.assistantChat?.busy
+        ? 'thinking'
+        : 'ready'
+  const footer = state.assistantRecording
+    ? '[mic] click to send'
+    : state.assistantSending
+      ? 'Transcribing and sending...'
+      : state.assistantChat?.busy
+        ? `${label} is thinking...`
+        : '[mic] click to speak'
+  const room = Math.max(1, config.maxLines - 2)
+  let content: string[]
+
+  if (state.assistantRecording) {
+    const segments = state.coachSession?.recentSegments ?? []
+    content = segments.length > 0 ? transcriptLines(segments) : ['Recording...', 'Speak, then click to send.']
+  } else {
+    content = assistantMessageLines(state.assistantChat)
+    if (content.length === 0) content = ['No messages yet.']
+  }
+
+  const scroll = Math.max(0, Math.min(assistantScrollMax(state), view.scroll ?? 0))
+  const end = content.length - scroll
+  const window = content.slice(Math.max(0, end - room), end)
+  return assemble(
+    [clipToWidth(`${label}  ${status}`), ...window, clipToWidth(footer)],
+    config.maxChars,
+    config.maxLines,
+  )
+}
+
 /**
  * Number every line when diagnostics is on.
  *
@@ -1370,6 +1451,8 @@ function renderView(state: UiState): string {
       return renderPlan(state, state.view.cursor)
     case 'cue':
       return renderCue(state, state.view.scroll ?? 0)
+    case 'assistant':
+      return renderAssistant(state)
     case 'pong':
       return state.pong ? renderPong(state.pong) : 'PONG\n\nloading...'
     case 'fonttest':

@@ -28,15 +28,24 @@
 
 import { spawn } from 'node:child_process'
 import { hostname } from 'node:os'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 const HUB = (process.env.HUB_URL || 'http://localhost:8787').replace(/\/+$/, '')
 const TOKEN = process.env.AGENT_TOKEN || ''
 const NAME = process.env.AGENT_NAME || hostname()
 const CMD = process.env.AGENT_CMD || 'claude -p'
+const CHATGPT_CMD = process.env.CHATGPT_CMD || `codex exec --ephemeral --sandbox workspace-write -C ${ROOT} -`
+const CLAUDE_CMD = process.env.CLAUDE_CMD || 'claude -p'
 const POLL_SECONDS = Number(process.env.POLL_SECONDS) || 900
 
 const ONCE = process.argv.includes('--once')
 const DRY = process.argv.includes('--dry')
+const ONLY_CAPABILITY = process.argv
+  .find(arg => arg.startsWith('--capability='))
+  ?.slice('--capability='.length)
 
 const headers = { 'Content-Type': 'application/json' }
 if (TOKEN) headers.Authorization = `Bearer ${TOKEN}`
@@ -52,10 +61,10 @@ const api = async (path, options = {}) => {
  * Deliberately not an API client: whatever you can run on this machine and
  * already pay for is a valid brain.
  */
-function think(prompt, timeoutMs = 180_000) {
+function think(prompt, timeoutMs = 180_000, command = CMD) {
   return new Promise((resolve, reject) => {
-    const [bin, ...args] = CMD.split(/\s+/)
-    const child = spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'] })
+    const [bin, ...args] = command.split(/\s+/)
+    const child = spawn(bin, args, { cwd: ROOT, stdio: ['pipe', 'pipe', 'pipe'] })
 
     let out = ''
     let err = ''
@@ -144,6 +153,18 @@ compass, not a second transcript:
   question, promise, or next action
 Keep each value concrete and short. Preserve the previous thread until the
 transcript clearly resolves or replaces it. Never invent a connection.
+`
+
+const ASSISTANT_CHAT_PROMPT = `You are the user's working assistant, reached by
+voice from smart glasses. Continue the conversation below and answer the latest
+user turn. You are running inside the WAM repository and may inspect or edit it
+when the latest turn explicitly asks you to do work. Follow AGENTS.md and the
+repository's version-claim rules before editing. Do not ship, install, restart,
+delete, purchase, send, or perform another external action unless the user
+explicitly asks. Keep the response direct and readable on a tiny display:
+plain text, short paragraphs, no tables, and normally under 1,200 characters.
+
+Conversation:
 `
 
 function trimText(value, max) {
@@ -250,12 +271,29 @@ ${transcript}
     const parsed = extractJson(reply)
     return normalizeCoachCue(parsed, input.constraints)
   },
+
+  async 'assistant.chat'(job) {
+    const input = job.input ?? {}
+    const messages = Array.isArray(input.messages) ? input.messages : []
+    if (messages.length === 0) throw new Error('assistant chat has no messages')
+    const provider = input.provider === 'claude' ? 'claude' : 'chatgpt'
+    const command = provider === 'claude' ? CLAUDE_CMD : CHATGPT_CMD
+    const conversation = messages
+      .slice(-18)
+      .map(message => `${message.role === 'assistant' ? 'Assistant' : 'User'}: ${trimText(message.text, 4000)}`)
+      .join('\n\n')
+    const reply = trimText(await think(ASSISTANT_CHAT_PROMPT + conversation, 300_000, command), 6000)
+    if (!reply) throw new Error(`${provider} returned an empty reply`)
+    return { provider, text: reply }
+  },
 }
 
 // ---- the loop -------------------------------------------------------------
 
 async function runOnce() {
-  const capabilities = Object.keys(handlers)
+  const capabilities = Object.keys(handlers).filter(
+    capability => !ONLY_CAPABILITY || capability === ONLY_CAPABILITY,
+  )
   let did = 0
 
   for (const capability of capabilities) {

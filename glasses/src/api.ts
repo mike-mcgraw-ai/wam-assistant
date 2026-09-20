@@ -1,5 +1,7 @@
 import { config } from './config'
 import type {
+  AssistantChatResponse,
+  AssistantProvider,
   BlockPlan,
   ChecklistsState,
   CoachCueResponse,
@@ -272,6 +274,64 @@ export async function fetchCoachSession(space: string): Promise<CoachSessionResp
         : err instanceof Error
           ? err.message
           : 'network error'
+    return { ok: false, error: message.slice(0, 40) }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+export async function fetchAssistantChat(
+  space: string,
+  provider: AssistantProvider,
+): Promise<AssistantChatResponse> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), config.timeoutMs)
+  try {
+    const params = new URLSearchParams({ space, provider })
+    const res = await fetch(`${config.serverUrl}/assistant/chat?${params}`, {
+      headers: authHeaders(),
+      signal: controller.signal,
+      cache: 'no-store',
+    })
+    const payload = await res.json().catch(() => null)
+    if (!res.ok) return { ok: false, error: payload?.error ?? `server ${res.status}` }
+    if (!payload?.chat) return { ok: false, error: 'bad payload' }
+    return payload as AssistantChatResponse
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'network error'
+    return { ok: false, error: message.slice(0, 40) }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+export async function sendAssistantSession(
+  space: string,
+  provider: AssistantProvider,
+  sessionId: string,
+): Promise<AssistantChatResponse> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), Math.max(config.timeoutMs, 20_000))
+  try {
+    const res = await fetch(`${config.serverUrl}/assistant/chat/from-session`, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({
+        space,
+        provider,
+        sessionId,
+        clientId: `glasses-chat:${sessionId}`,
+      }),
+      signal: controller.signal,
+    })
+    const payload = await res.json().catch(() => null)
+    if (!res.ok) {
+      return { ok: false, pending: payload?.pending === true, error: payload?.error ?? `server ${res.status}` }
+    }
+    if (!payload?.chat) return { ok: false, error: 'bad payload' }
+    return payload as AssistantChatResponse
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'network error'
     return { ok: false, error: message.slice(0, 40) }
   } finally {
     clearTimeout(timer)

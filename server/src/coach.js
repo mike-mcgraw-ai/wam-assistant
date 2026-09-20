@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { coalesceTranscriptSegments } from './transcript.js'
 
 const SPACES = new Set(['ops', 'life'])
 const SPEAK_UP = new Set(['low', 'medium', 'high'])
@@ -139,8 +140,7 @@ function runningNoteLine(label, text) {
 
 function runningConversationNote(session) {
   const pieces = []
-  for (const segment of session?.segments ?? []) {
-    if (segment?.final === false) continue
+  for (const segment of coalesceTranscriptSegments(session?.segments)) {
     for (const text of splitThoughts(segment.text)) {
       pieces.push({ text, kind: noteKind(text), at: segment.at })
     }
@@ -241,7 +241,10 @@ function publicSession(session, mode = null) {
     active: !session.endedAt,
     context: session.context ?? null,
     segmentCount: session.segments.length,
-    recentSegments: session.segments.slice(-12),
+    // Raw two-second chunks are an implementation detail. The live display
+    // gets speech-sized blocks; the transcript endpoint includes raw chunks
+    // separately for recovery and inspection.
+    recentSegments: coalesceTranscriptSegments(session.segments).slice(-24),
     runningNote: runningConversationNote(session),
     lastCueAt: session.lastCueAt ?? null,
     lastRecapAt: session.lastRecapAt ?? null,

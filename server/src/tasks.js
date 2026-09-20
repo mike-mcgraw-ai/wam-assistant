@@ -288,6 +288,19 @@ export class Tasks {
     return { ok: true }
   }
 
+  updateNote(id, noteId, text, by = 'listen-ai', now = Date.now()) {
+    const existing = this.notes_.get(id)
+    const note = existing?.find(row => row.id === noteId)
+    if (!note) return { ok: false, error: 'unknown note' }
+    const body = String(text ?? '').trim().slice(0, 400)
+    if (!body) return { ok: false, error: 'empty note' }
+    note.text = body
+    note.by = String(by || note.by || 'me').slice(0, 16)
+    this.#log({ type: 'task_note_update', id, noteId, text: body, by: note.by, at: now })
+    this.#persist()
+    return { ok: true }
+  }
+
   removeNote(id, noteId) {
     const existing = this.notes_.get(id)
     if (!existing) return { ok: false, error: 'no notes' }

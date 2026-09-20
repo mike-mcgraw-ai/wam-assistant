@@ -26,6 +26,7 @@ export interface Board {
 
 export interface SttStats {
   queued: number
+  pending: number
   ok: number
   empty: number
   failed: number
@@ -46,7 +47,29 @@ export interface Snapshot {
   inbox?: InboxGroup[]
   /** what the transcriber has been doing; absent on older server builds */
   stt?: SttStats
+  assistant?: Record<AssistantProvider, boolean>
 }
+
+export type AssistantProvider = 'chatgpt' | 'claude'
+
+export interface AssistantMessage {
+  id: string
+  role: 'user' | 'assistant' | 'system'
+  text: string
+  at: number
+}
+
+export interface AssistantChat {
+  provider: AssistantProvider
+  ready: boolean
+  busy: boolean
+  messages: AssistantMessage[]
+  updatedAt: number
+}
+
+export type AssistantChatResponse =
+  | { ok: true; chat: AssistantChat }
+  | { ok: false; pending?: boolean; error: string }
 
 /**
  * - `do`    something you do, timed: click starts, click again finishes
@@ -345,7 +368,7 @@ export interface NoteTranscript {
 }
 
 export type CoachSessionResponse =
-  | { ok: true; space: Space; mode: CoachMode; modes?: CoachMode[]; session: CoachSessionSummary | null }
+  | { ok: true; space: Space; mode: CoachMode; modes?: CoachMode[]; session: CoachSessionSummary | null; cue?: CoachCue | null }
   | { ok: false; error: string }
 
 export type CoachSessionWriteResponse =

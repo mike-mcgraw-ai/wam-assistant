@@ -1,6 +1,6 @@
 {
   "name": "wam-assistant-server",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
   "type": "module",
   "description": "Aggregates building operations metrics from HTTP, Slack, or anything else and serves one JSON snapshot to the Even G2 plugin.",
@@ -10,6 +10,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
+    "test": "node --test",
     "seed": "node scripts/seed.js"
   },
   "optionalDependencies": {

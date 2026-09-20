@@ -24,6 +24,7 @@ import {
   completeInboxItem,
   completeTask,
   deleteNote,
+  fetchAssistantChat,
   fetchNoteTranscript,
   endCoachSession,
   fetchSessionSummary,
@@ -32,6 +33,7 @@ import {
   fetchPlan,
   fetchSnapshot,
   sendCoachAudio,
+  sendAssistantSession,
   startChecklist,
   finishChecklist,
   startCoachSession,
@@ -44,6 +46,7 @@ import {
   noteDetailActions,
   noteRows,
   captureRows,
+  assistantScrollMax,
   noteTranscriptScrollMax,
   transcriptScrollMax,
   planRows,
@@ -57,6 +60,7 @@ import {
   type View,
 } from './render'
 import { newGame, nudge, serve, tick as pongTick } from './pong'
+import type { AssistantProvider } from './types'
 
 /**
  * Ops Board — a check-on-demand view of building metrics on the Even G2.
@@ -94,6 +98,7 @@ const MENU = {
   COACH: 11,
   LISTEN: 12,
   NOTES: 13,
+  CHAT: 14,
   START: 10,
   EXIT: 9,
 } as const
@@ -139,6 +144,9 @@ const state: UiState = {
   coachSession: null,
   coachModes: [],
   coachModeId: null,
+  assistantChat: null,
+  assistantRecording: false,
+  assistantSending: false,
   noteTranscript: null,
   cueReturn: null,
   pong: null,
@@ -345,6 +353,7 @@ async function refreshCoachSession(): Promise<void> {
     state.coachSession = result.session
     state.coachModes = result.modes ?? state.coachModes
     state.coachModeId = result.mode.id
+    if (result.cue && (!state.cue || result.cue.createdAt >= state.cue.createdAt)) state.cue = result.cue
     state.error = null
   } else {
     state.error = result.error
@@ -415,6 +424,12 @@ async function startAudioCapture(sessionId: string): Promise<void> {
 async function stopAudioCapture(): Promise<void> {
   const sessionId = audioSessionId
   audioSessionId = null
+  // A click can land while the previous chunk is still in flight. Wait for it
+  // before flushing the tail; clearing the buffers immediately used to drop
+  // the final few words of a voice turn at exactly the moment Send was tapped.
+  for (let waited = 0; audioUploading && waited < 5_000; waited += 50) {
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
   if (sessionId && audioFrames.length) await flushAudioChunk(sessionId, true)
   if (audioOpen) await bridge.audioControl(false).catch(() => false)
   audioOpen = false
@@ -693,6 +708,100 @@ async function beginListening(): Promise<void> {
   await paint()
 }
 
+async function refreshAssistant(provider: AssistantProvider): Promise<void> {
+  const result = await fetchAssistantChat(state.space, provider)
+  if (result.ok) {
+    state.assistantChat = result.chat
+    state.error = null
+  } else state.error = result.error
+}
+
+async function openAssistant(): Promise<void> {
+  state.assistantRecording = false
+  state.assistantSending = false
+  state.assistantChat = null
+  state.view = { kind: 'assistant', phase: 'providers', cursor: 0 }
+  await refresh()
+  if (inFlight) await paint()
+}
+
+async function startAssistantCapture(provider: AssistantProvider): Promise<void> {
+  await refreshCoachSession()
+  if (state.coachSession?.active) {
+    state.error = 'Stop Listen before starting Chat'
+    await paint()
+    return
+  }
+  const started = await startCoachSession(
+    state.space,
+    { taskId: '__assistant__', label: provider === 'claude' ? 'Claude chat' : 'ChatGPT chat' },
+    'conversation',
+  )
+  if (!started.ok) {
+    state.error = started.error
+    await paint()
+    return
+  }
+  state.coachSession = started.session
+  state.assistantRecording = true
+  state.assistantSending = false
+  state.error = null
+  await startAudioCapture(started.session.id)
+  await paint()
+}
+
+const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+async function finishAssistantCapture(provider: AssistantProvider): Promise<void> {
+  const sessionId = state.coachSession?.id
+  if (!sessionId) {
+    state.assistantRecording = false
+    state.error = 'No recording to send'
+    await paint()
+    return
+  }
+
+  state.assistantRecording = false
+  state.assistantSending = true
+  await stopAudioCapture()
+  await paint()
+
+  let sent: Awaited<ReturnType<typeof sendAssistantSession>> | null = null
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    const snapshot = await fetchSnapshot()
+    if (snapshot.ok) state.snapshot = snapshot.snapshot
+    if ((state.snapshot?.stt?.pending ?? 0) > 0) {
+      await wait(500)
+      continue
+    }
+    sent = await sendAssistantSession(state.space, provider, sessionId)
+    if (!sent.ok && sent.pending) {
+      await wait(500)
+      continue
+    }
+    break
+  }
+
+  const stopped = await endCoachSession(sessionId)
+  state.coachSession = null
+  state.assistantSending = false
+  if (sent?.ok) {
+    state.assistantChat = sent.chat
+    state.error = null
+  } else state.error = sent?.error ?? 'Transcription timed out'
+  if (!stopped.ok && !state.error) state.error = stopped.error
+  await paint()
+}
+
+async function cancelAssistantCapture(): Promise<void> {
+  const sessionId = state.coachSession?.id
+  await stopAudioCapture()
+  if (sessionId) await endCoachSession(sessionId)
+  state.coachSession = null
+  state.assistantRecording = false
+  state.assistantSending = false
+}
+
 async function openNote(row: ReturnType<typeof noteRows>[number]): Promise<void> {
   state.armedNoteId = null
   state.noteTranscript = null
@@ -761,6 +870,8 @@ function rowCount(): number {
         state,
         findNoteRow(state, state.view.subjectKind, state.view.subjectId, state.view.noteId),
       ).length
+    case 'assistant':
+      return state.view.phase === 'providers' ? 2 : 0
     case 'cue':
     case 'transcript':
     case 'pong':
@@ -771,7 +882,13 @@ function rowCount(): number {
 
 function clampCursor(): void {
   const view = state.view
-  if (view.kind === 'pong' || view.kind === 'fonttest' || view.kind === 'cue' || view.kind === 'transcript') return
+  if (
+    view.kind === 'pong' ||
+    view.kind === 'fonttest' ||
+    view.kind === 'cue' ||
+    view.kind === 'transcript' ||
+    (view.kind === 'assistant' && view.phase === 'chat')
+  ) return
   const count = rowCount()
   view.cursor = count === 0 ? 0 : Math.min(view.cursor, count - 1)
   followCursor()
@@ -830,6 +947,16 @@ function move(delta: number): void {
     // wasted going the other way.
     const max = transcriptScrollMax(state)
     view.scroll = Math.max(0, Math.min(max, (view.scroll ?? 0) - delta))
+    return
+  }
+
+  if (view.kind === 'assistant') {
+    if (view.phase === 'providers') {
+      view.cursor = Math.max(0, Math.min(1, view.cursor + delta))
+    } else if (!state.assistantRecording) {
+      const max = assistantScrollMax(state)
+      view.scroll = Math.max(0, Math.min(max, (view.scroll ?? 0) - delta))
+    }
     return
   }
 
@@ -1115,6 +1242,29 @@ async function activate(): Promise<void> {
   const view = state.view
 
   if (view.kind !== 'index') state.lastEvent = `clk:${view.kind}`
+
+  if (view.kind === 'assistant') {
+    if (view.phase === 'providers') {
+      const provider: AssistantProvider = view.cursor === 1 ? 'claude' : 'chatgpt'
+      if (state.snapshot?.assistant?.[provider] !== true) {
+        state.error = `${provider === 'claude' ? 'Claude' : 'ChatGPT'} setup needed on Mac`
+        await paint()
+        return
+      }
+      state.view = { kind: 'assistant', phase: 'chat', provider, scroll: 0 }
+      await refreshAssistant(provider)
+      await paint()
+      return
+    }
+    if (state.assistantSending || state.assistantChat?.busy) {
+      await refreshAssistant(view.provider)
+      await paint()
+      return
+    }
+    if (state.assistantRecording) await finishAssistantCapture(view.provider)
+    else await startAssistantCapture(view.provider)
+    return
+  }
 
   if (view.kind === 'cue') {
     // Click here ends the session. Deliberate, on the screen showing what it
@@ -1546,6 +1696,21 @@ async function back(): Promise<void> {
     return
   }
 
+  if (state.view.kind === 'assistant') {
+    if (state.assistantRecording || state.assistantSending) await cancelAssistantCapture()
+    if (state.view.phase === 'chat') {
+      state.assistantChat = null
+      state.view = { kind: 'assistant', phase: 'providers', cursor: 0 }
+      await paint()
+      return
+    }
+    state.view = homeView()
+    state.scrollTop = 0
+    clampCursor()
+    await paint()
+    return
+  }
+
   if (state.view.kind === 'cue') {
     dismissCue()
     await paint()
@@ -1659,7 +1824,8 @@ async function onMenu(itemID: number): Promise<void> {
         state.view.kind !== 'pong' &&
         state.view.kind !== 'fonttest' &&
         state.view.kind !== 'cue' &&
-        state.view.kind !== 'transcript'
+        state.view.kind !== 'transcript' &&
+        state.view.kind !== 'assistant'
       ) {
         state.view.cursor = 0
       }
@@ -1696,6 +1862,9 @@ async function onMenu(itemID: number): Promise<void> {
       break
     case MENU.LISTEN:
       await openListening()
+      break
+    case MENU.CHAT:
+      await openAssistant()
       break
     case MENU.DIAG:
       state.diagnostics = !state.diagnostics
@@ -1749,11 +1918,12 @@ const page = new CreateStartUpPageContainer({
       ...(config.ops
         ? [new MenuItemProperty({ itemName: 'Ops / Life', itemID: MENU.SWITCH })]
         : []),
-      // Four. Everything cut had a shorter way to reach it: Running order is
+      // Five. Everything cut had a shorter way to reach it: Running order is
       // where double-tap lands from anywhere, Refresh is what the fifteen
       // second poll already does, Coach and the rest were build-time scaffolding.
       // The handlers all survive, so putting one back is one line.
       new MenuItemProperty({ itemName: 'Listen', itemID: MENU.LISTEN }),
+      new MenuItemProperty({ itemName: 'Chat', itemID: MENU.CHAT }),
       new MenuItemProperty({ itemName: 'Notes', itemID: MENU.NOTES }),
       new MenuItemProperty({ itemName: 'Lists', itemID: MENU.LISTS }),
       new MenuItemProperty({ itemName: 'Diagnostics', itemID: MENU.DIAG }),
@@ -1985,9 +2155,24 @@ setInterval(() => void refreshCoachCue(true), config.cueMs)
  * doing nothing" whether or not it is.
  */
 setInterval(() => {
-  if (state.view.kind !== 'cue' || !state.coachSession?.active || !state.foreground || asleep) return
+  const liveListen = state.view.kind === 'cue'
+  const liveAssistant = state.view.kind === 'assistant' && state.view.phase === 'chat' && state.assistantRecording
+  if ((!liveListen && !liveAssistant) || !state.coachSession?.active || !state.foreground || asleep) return
   // Refetch, not just repaint. The counters are local so they moved, but the
   // transcript lines live on the hub and nothing was asking for them — so the
   // screen said "Nothing heard yet" no matter what the hub had transcribed.
   void refreshCoachSession().then(() => paint())
+}, config.listenPollMs)
+
+setInterval(() => {
+  const view = state.view
+  if (
+    view.kind !== 'assistant' ||
+    view.phase !== 'chat' ||
+    state.assistantRecording ||
+    state.assistantSending ||
+    !state.foreground ||
+    asleep
+  ) return
+  void refreshAssistant(view.provider).then(() => paint())
 }, config.listenPollMs)

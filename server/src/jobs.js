@@ -165,6 +165,51 @@ export class Jobs {
       )
   }
 
+  /**
+   * Coach cues only matter while their conversation is live. Return at most
+   * the newest queued snapshot per active session so a sleeping worker never
+   * replays every two-minute window when it wakes up.
+   */
+  availableCoachCues(activeSessionIds = [], now = Date.now()) {
+    const active = new Set(activeSessionIds.filter(Boolean))
+    const newest = new Map()
+    for (const job of this.available('coach.cue', now)) {
+      const sessionId = job.input?.sessionId
+      if (!active.has(sessionId)) continue
+      const prior = newest.get(sessionId)
+      if (!prior || job.updatedAt > prior.updatedAt) newest.set(sessionId, job)
+    }
+    return [...newest.values()]
+  }
+
+  /** Remove queued model work for conversations that are no longer active. */
+  discardStaleCoachCues(activeSessionIds = []) {
+    const active = new Set(activeSessionIds.filter(Boolean))
+    let removed = 0
+    for (const [id, job] of this.jobs) {
+      if (job.capability !== 'coach.cue' || job.status !== JOB.QUEUED) continue
+      if (active.has(job.input?.sessionId)) continue
+      this.jobs.delete(id)
+      removed += 1
+      this.#log({ type: 'delete', id, capability: job.capability, reason: 'session_inactive', at: Date.now() })
+    }
+    if (removed) this.#persist()
+    return removed
+  }
+
+  discardQueuedCoachCuesForSession(sessionId) {
+    let removed = 0
+    for (const [id, job] of this.jobs) {
+      if (job.capability !== 'coach.cue' || job.status !== JOB.QUEUED) continue
+      if (job.input?.sessionId !== sessionId) continue
+      this.jobs.delete(id)
+      removed += 1
+      this.#log({ type: 'delete', id, capability: job.capability, reason: 'session_ended', at: Date.now() })
+    }
+    if (removed) this.#persist()
+    return removed
+  }
+
   claim(id, agent, leaseSeconds = 300, now = Date.now()) {
     this.reap(now)
     const job = this.jobs.get(id)

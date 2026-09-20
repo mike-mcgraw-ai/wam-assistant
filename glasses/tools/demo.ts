@@ -110,7 +110,8 @@ const base: UiState = {
   snapshot, error: null, loading: false,
   lastOkAt: now, fromCache: false, alertsOnly: false,
   plan: null, planLoading: false,
-  cue: null, coachSession: null, coachModes: [], coachModeId: null, cueReturn: null,
+  cue: null, coachSession: null, coachModes: [], coachModeId: null,
+  assistantChat: null, assistantRecording: false, assistantSending: false, cueReturn: null,
   pong: null,
   events: 0, lastEvent: '-', diagnostics: false, space: 'ops',
   scrollTop: 0, armedTaskId: null, armedNoteId: null, noteTranscript: null,
@@ -238,6 +239,34 @@ frame('Listen — three choices', render({
   coachModes,
   coachModeId: 'conversation',
   view: { kind: 'cue', modeCursor: 1 },
+}))
+frame('Chat — provider picker', render({
+  ...withPlan,
+  snapshot: { ...snapshot, assistant: { chatgpt: true, claude: false } },
+  space: 'life',
+  view: { kind: 'assistant', phase: 'providers', cursor: 0 },
+}))
+frame('ChatGPT — conversation', render({
+  ...withPlan,
+  space: 'life',
+  view: { kind: 'assistant', phase: 'chat', provider: 'chatgpt', scroll: 0 },
+  assistantChat: {
+    provider: 'chatgpt',
+    ready: true,
+    busy: false,
+    updatedAt: now,
+    messages: [
+      { id: 'u1', role: 'user', text: 'Can you keep working on the glasses chat and tell me what changed?', at: now - 20_000 },
+      { id: 'a1', role: 'assistant', text: 'The voice turn now records on the glasses, waits for transcription, and queues a ChatGPT reply without freezing the display. Your conversation stays here and scrolls backward with the Ring.', at: now - 10_000 },
+    ],
+  },
+}))
+frame('ChatGPT — recording', render({
+  ...withPlan,
+  space: 'life',
+  view: { kind: 'assistant', phase: 'chat', provider: 'chatgpt', scroll: 0 },
+  assistantRecording: true,
+  coachSession: listenSession,
 }))
 frame('Coach — conversation compass', render({ ...withPlan, cue: null, coachSession: listenSession, view: { kind: 'cue' } }))
 frame('Coach — listening question', render({ ...withPlan, cue: questionCue, coachSession: listenSession, view: { kind: 'cue' } }))

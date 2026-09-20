@@ -1,6 +1,7 @@
 import http from 'node:http'
 import crypto from 'node:crypto'
 import { readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
@@ -16,6 +17,8 @@ import { applyMessage, verifySignature, startSocketMode } from './slack.js'
 import { buildCue } from './cues.js'
 import { Coach } from './coach.js'
 import { transcribePcm, transcriberInfo } from './stt.js'
+import { AssistantChat } from './assistant.js'
+import { coalesceTranscriptSegments, isNonSpeechText, parseTaskCommand, transcriptText } from './transcript.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -30,6 +33,7 @@ const CONFIG_PATH = process.env.CONFIG_PATH || join(HERE, 'boards.config.json')
 const CHECKLISTS_PATH = process.env.CHECKLISTS_PATH || join(HERE, 'checklists.config.json')
 const DATA_DIR = process.env.DATA_DIR || join(HERE, '..', 'data')
 const AI_CUE_INTERVAL_MS = Math.max(30_000, Number(process.env.AI_CUE_INTERVAL_MS || 2 * 60_000))
+const AI_CUE_LULL_MS = Math.max(3_000, Number(process.env.AI_CUE_LULL_MS || 8_000))
 const AI_CUE_NOTIFY = process.env.AI_CUE_NOTIFY === '1'
 // Life is the active product scope. Ops remains fully implemented and can be
 // re-enabled explicitly with AI_CUE_SPACES=ops (or ops,life).
@@ -69,10 +73,28 @@ const jobs = new Jobs({
   logPath: join(DATA_DIR, 'jobs.jsonl'),
 })
 
+function commandReady(command) {
+  return spawnSync('/bin/sh', ['-lc', `command -v ${command}`], { stdio: 'ignore' }).status === 0
+}
+
+const assistant = new AssistantChat({
+  storePath: join(DATA_DIR, 'assistant.json'),
+  providerReady: {
+    chatgpt: commandReady('codex'),
+    claude: commandReady('claude'),
+  },
+})
+
 const coach = new Coach({
   storePath: join(DATA_DIR, 'coach.json'),
   logPath: join(DATA_DIR, 'coach.jsonl'),
 })
+
+const restoredCoachSessions = ['ops', 'life']
+  .map(space => coach.currentSession(space)?.id)
+  .filter(Boolean)
+const staleCoachJobs = jobs.discardStaleCoachCues(restoredCoachSessions)
+if (staleCoachJobs) console.log(`[jobs] discarded ${staleCoachJobs} stale Coach cue(s)`)
 
 const AGENT_TOKEN = process.env.AGENT_TOKEN || ''
 if (!AGENT_TOKEN) {
@@ -330,15 +352,14 @@ function cueSpace(value) {
   return value === 'life' ? 'life' : 'ops'
 }
 
-function latestCoachModelCue(space, coachSnapshot, now = Date.now()) {
-  const sessionId = coachSnapshot.session?.id
+function latestCoachModelCueForSession(space, sessionId, now = Date.now(), freshOnly = true) {
   if (!sessionId) return null
 
   const freshMs = Math.max(AI_CUE_INTERVAL_MS * 4, 2 * 60_000)
   return [...jobs.jobs.values()]
     .filter(job => job.capability === 'coach.cue' && job.status === JOB.DONE)
     .filter(job => job.input?.space === space && job.input?.sessionId === sessionId)
-    .filter(job => job.updatedAt >= now - freshMs)
+    .filter(job => !freshOnly || job.updatedAt >= now - freshMs)
     .sort((a, b) => b.updatedAt - a.updatedAt)
     .map(job => ({
       ...job.result,
@@ -347,6 +368,10 @@ function latestCoachModelCue(space, coachSnapshot, now = Date.now()) {
       sourceSegmentCount: job.input?.session?.segmentCount ?? null,
     }))
     .find(result => result && typeof result === 'object') ?? null
+}
+
+function latestCoachModelCue(space, coachSnapshot, now = Date.now()) {
+  return latestCoachModelCueForSession(space, coachSnapshot.session?.id, now)
 }
 
 function modelRunningNote(modelResult, fallback = null) {
@@ -391,6 +416,71 @@ function coachSnapshotWithModel(space, now = Date.now()) {
   return { snapshot, modelCue }
 }
 
+function publicCoachModelCue(modelCue) {
+  const lines = Array.isArray(modelCue?.lines)
+    ? modelCue.lines.map(line => String(line || '').trim()).filter(Boolean).slice(0, 3)
+    : []
+  if (!modelCue || modelCue.quiet === true || lines.length === 0) return null
+  return {
+    id: `model-${modelCue.sourceJobId}`,
+    title: String(modelCue.title || 'Coach').slice(0, 30),
+    lines,
+    kind: modelCue.kind || 'thought',
+    priority: Number(modelCue.priority) || 0,
+    quiet: false,
+    createdAt: modelCue.jobUpdatedAt,
+    expiresAt: modelCue.jobUpdatedAt + Math.max(AI_CUE_INTERVAL_MS * 4, 2 * 60_000),
+    nextAfterMs: AI_CUE_INTERVAL_MS,
+  }
+}
+
+function modelNoteSummary(modelResult) {
+  const recapLines = modelResult?.kind === 'recap' && Array.isArray(modelResult.lines)
+    ? modelResult.lines.map(line => String(line || '').trim()).filter(Boolean).slice(0, 3)
+    : []
+  if (recapLines.length) return recapLines.join('\n').slice(0, 400)
+  const note = modelRunningNote(modelResult)
+  if (!note?.lines?.length) return null
+  return note.lines.slice(0, 3).join('\n').slice(0, 400)
+}
+
+function upgradeListenNoteSummaries() {
+  let upgraded = 0
+  for (const task of tasks.taskDefs()) {
+    for (const note of tasks.notes(task.id)) {
+      if (!['listen', 'listen-ai'].includes(note.by) || !note.id?.endsWith(':note')) continue
+      const sessionId = note.id.slice(0, -':note'.length)
+      const session = coach.session(sessionId)
+      if (!session) continue
+      const modelResult = latestCoachModelCueForSession(cueSpace(session.space), sessionId, Date.now(), false)
+      const summary = modelNoteSummary(modelResult)
+      if (!summary || summary === note.text) continue
+      const result = tasks.updateNote(task.id, note.id, summary, 'listen-ai')
+      if (result.ok) upgraded += 1
+    }
+  }
+  return upgraded
+}
+
+const upgradedListenNotes = upgradeListenNoteSummaries()
+if (upgradedListenNotes) console.log(`[coach] upgraded ${upgradedListenNotes} Listen note summar${upgradedListenNotes === 1 ? 'y' : 'ies'}`)
+
+const coachCueTimers = new Map()
+
+function scheduleCoachCue(session) {
+  if (!session?.active || session.context?.taskId === '__assistant__') return
+  const prior = coachCueTimers.get(session.id)
+  if (prior) clearTimeout(prior)
+  const expectedCount = session.segmentCount
+  const timer = setTimeout(() => {
+    coachCueTimers.delete(session.id)
+    const current = coach.currentSession(session.space)
+    if (!current || current.id !== session.id || current.segments.length !== expectedCount) return
+    queueCoachCue(session.space, { reason: 'speech-lull' })
+  }, AI_CUE_LULL_MS)
+  coachCueTimers.set(session.id, timer)
+}
+
 function queueCoachCue(space, { reason = 'poll', priority = 'normal' } = {}) {
   const safeSpace = cueSpace(space)
   const now = Date.now()
@@ -398,10 +488,8 @@ function queueCoachCue(space, { reason = 'poll', priority = 'normal' } = {}) {
   const session = snapshot.session
   if (!session?.active) return null
 
-  const bucket = Math.floor(now / AI_CUE_INTERVAL_MS)
   const sourceSession = coach.currentSession(safeSpace)
-  const recentSegments = (sourceSession?.segments ?? session.recentSegments)
-    .filter(segment => segment.final !== false)
+  const recentSegments = coalesceTranscriptSegments(sourceSession?.segments ?? session.recentSegments)
     .slice(-32)
   return jobs.create({
     capability: 'coach.cue',
@@ -427,10 +515,9 @@ function queueCoachCue(space, { reason = 'poll', priority = 'normal' } = {}) {
         allowedKinds: ['answer', 'followup', 'factcheck', 'advice', 'thought', 'recap'],
       },
     },
-    // One model pass per recap interval. STT can produce many short segments;
-    // including the latest segment id here turned every phrase into a separate
-    // model call instead of the promised "every couple of minutes" cadence.
-    idempotencyKey: `coach.cue:${session.id}:${bucket}`,
+    // A transcript revision is the unit of thought. Audio ingestion debounces
+    // this until a lull, and deliberate polls dedupe against the same revision.
+    idempotencyKey: `coach.cue:${session.id}:segments:${session.segmentCount}`,
     priority,
     replaceQueued: true,
   })
@@ -537,20 +624,6 @@ function stripTargetFromNote(rest, task) {
   return null
 }
 
-function parseTaskCommand(text) {
-  const raw = String(text || '').trim()
-  const patterns = [
-    /^(?:add|create|make)\s+(?:a\s+)?(?:task|to-?do|todo)\s+(?:to\s+)?(.+)$/i,
-    /^(?:remind me to|remember to|i need to|need to)\s+(.+)$/i,
-  ]
-  for (const pattern of patterns) {
-    const match = raw.match(pattern)
-    const label = match?.[1]?.trim()
-    if (label) return label.replace(/[.!?]+$/g, '').slice(0, 80)
-  }
-  return null
-}
-
 function parseNoteCommand(text, space) {
   const raw = String(text || '').trim()
   const match = raw.match(/^(?:(?:make|add|save|take)\s+)?(?:a\s+)?note\s+(?:on|for|about|to)\s+(.+)$/i)
@@ -587,81 +660,58 @@ function ensureCaptureTask(space, at = Date.now()) {
   )
 }
 
-function routeCoachSegment(session, segment) {
-  if (!session || !segment?.text) return null
-  const text = String(segment.text).trim()
-  if (!text) return null
-  const space = cueSpace(session.space)
-  const at = segment.at || Date.now()
+function consolidatedSessionNote(session) {
+  return transcriptText(session?.segments, 400)
+}
 
-  const taskText = parseTaskCommand(text)
+function routeCoachSession(session, at = Date.now()) {
+  const rawText = consolidatedSessionNote(session)
+  if (!rawText) return { kind: 'empty', result: { ok: true } }
+  const noteId = `${session.id}:note`
+  const space = cueSpace(session.space)
+
+  // Classification happens once, after the complete recording exists. A
+  // fixed-duration STT chunk is not an utterance and must never create state.
+  const taskText = parseTaskCommand(rawText)
   if (taskText) {
     const result = tasks.addTask({
       label: taskText,
       space,
       window: 'anytime',
       weight: 'big',
-      firstNote: text,
+      firstNote: rawText,
       by: 'listen',
-      clientId: `${segment.id}:task`,
+      clientId: `${session.id}:task`,
     }, at)
     return { kind: 'task', result }
   }
 
-  const explicit = parseNoteCommand(text, space)
+  const explicit = parseNoteCommand(rawText, space)
   if (explicit?.task?.id) {
-    const result = tasks.addNote(explicit.task.id, explicit.text, 'listen', segment.id, at)
+    const result = tasks.addNote(explicit.task.id, explicit.text, 'listen', noteId, at)
     return { kind: 'note', taskId: explicit.task.id, result }
   }
 
-  // Passive speech is transcript until the session ends. STT deliberately
-  // emits short chunks; filing each chunk here turned one spoken thought into
-  // six notes. Explicit task/note commands above still happen immediately.
-  return { kind: 'deferred' }
-}
-
-function consolidatedSessionNote(session) {
-  const space = cueSpace(session?.space)
-  const parts = (session?.segments ?? [])
-    .filter(segment => segment.final !== false)
-    .map(segment => String(segment.text || '').replace(/\s+/g, ' ').trim())
-    .filter(Boolean)
-    // Deepgram/Whisper sound labels are useful in a transcript and never a
-    // useful note. Keep the raw session; omit them only from the filed result.
-    .filter(text => !/^(?:\([^)]*\)|\[[^\]]*\]|\*[^*]+\*)[.!?]*$/i.test(text))
-    // These already produced their own durable task/note when the segment
-    // arrived. Do not repeat the command inside the session's passive note.
-    .filter(text => !parseTaskCommand(text) && !parseNoteCommand(text, space))
-
-  return parts
-    .join(' ')
-    .replace(/\s+([,.!?])/g, '$1')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 400)
-}
-
-function routeCoachSession(session, at = Date.now()) {
-  const text = consolidatedSessionNote(session)
-  if (!text) return { kind: 'empty', result: { ok: true } }
-  const noteId = `${session.id}:note`
+  const modelResult = latestCoachModelCueForSession(space, session.id, at, false)
+  const summaryText = modelNoteSummary(modelResult)
+  const noteText = summaryText || rawText
+  const noteBy = summaryText ? 'listen-ai' : 'listen'
 
   const contextTaskId = session.context?.taskId
   if (contextTaskId && tasks.has(contextTaskId)) {
-    const result = tasks.addNote(contextTaskId, text, 'listen', noteId, at)
+    const result = tasks.addNote(contextTaskId, noteText, noteBy, noteId, at)
     return { kind: 'task', taskId: contextTaskId, result }
   }
 
   const contextChoreId = session.context?.choreId
   if (contextChoreId && checklists.templates.has(contextChoreId)) {
-    const result = checklists.addNote(contextChoreId, text, 'listen', noteId, at)
+    const result = checklists.addNote(contextChoreId, noteText, noteBy, noteId, at)
     return { kind: 'chore', choreId: contextChoreId, result }
   }
 
-  const space = cueSpace(session.space)
   const capture = ensureCaptureTask(space, at)
   const taskId = capture.task?.id || CAPTURE_TASK_ID
-  const result = tasks.addNote(taskId, text, 'listen', noteId, at)
+  const result = tasks.addNote(taskId, noteText, noteBy, noteId, at)
   return { kind: 'capture', taskId, result }
 }
 
@@ -724,6 +774,10 @@ if (!INGEST_TOKEN) {
 const transcribeQueue = []
 let transcribing = false
 
+function pendingTranscriptions() {
+  return transcribeQueue.length + (transcribing ? 1 : 0)
+}
+
 /**
  * What the transcriber has actually been doing.
  *
@@ -779,6 +833,9 @@ async function drainTranscriptions() {
         }
         sttStats.ok += 1
         sttStats.lastText = text.slice(0, 60)
+        // Ambient labels are diagnostics, not conversation. Persisting them
+        // kept resetting the lull timer and buried speech under fake turns.
+        if (isNonSpeechText(text)) continue
         const result = coach.addSegment(sessionId, {
           text,
           speaker: body.speakerRole === 'self' ? 'me' : body.speaker || 'someone',
@@ -787,8 +844,9 @@ async function drainTranscriptions() {
           at: body.at,
         })
         if (result.ok && !result.duplicate) {
-          routeCoachSegment(result.session, result.segment)
-          queueCoachCue(result.session.space, { reason: 'audio' })
+          if (result.session.context?.taskId !== '__assistant__') {
+            scheduleCoachCue(result.session)
+          }
         }
       } catch (err) {
         sttStats.failed += 1
@@ -1005,8 +1063,8 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/coach/session/current') {
     if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
     const space = cueSpace(url.searchParams.get('space'))
-    const { snapshot } = coachSnapshotWithModel(space)
-    return json(res, 200, { ok: true, ...snapshot })
+    const { snapshot, modelCue } = coachSnapshotWithModel(space)
+    return json(res, 200, { ok: true, ...snapshot, cue: publicCoachModelCue(modelCue) })
   }
 
   if (req.method === 'POST' && url.pathname === '/coach/session/start') {
@@ -1043,6 +1101,7 @@ const server = http.createServer(async (req, res) => {
     if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
     const session = coach.session(decodeURIComponent(coachTranscriptMatch[1]))
     if (!session) return json(res, 404, { error: 'unknown session' })
+    const rawSegments = (session.segments ?? []).filter(segment => segment.final !== false)
     return json(res, 200, {
       ok: true,
       id: session.id,
@@ -1050,7 +1109,10 @@ const server = http.createServer(async (req, res) => {
       startedAt: session.startedAt,
       endedAt: session.endedAt,
       context: session.context ?? null,
-      segments: (session.segments ?? []).filter(segment => segment.final !== false),
+      // Readers get speech-sized blocks; diagnostics retain every exact STT
+      // transport chunk without forcing the glasses to display those chunks.
+      segments: coalesceTranscriptSegments(rawSegments),
+      rawSegments,
     })
   }
 
@@ -1069,8 +1131,14 @@ const server = http.createServer(async (req, res) => {
     if (action === 'end') {
       const id = decodeURIComponent(sessionId)
       const result = coach.endSession(id, body.at)
+      const timer = coachCueTimers.get(id)
+      if (timer) clearTimeout(timer)
+      coachCueTimers.delete(id)
       const session = result.ok ? coach.session(id) : null
-      const note = session ? routeCoachSession(session, body.at) : null
+      const note = session && session.context?.taskId !== '__assistant__'
+        ? routeCoachSession(session, body.at)
+        : null
+      if (session) jobs.discardQueuedCoachCuesForSession(session.id)
       return json(res, result.ok ? 200 : 404, { ...result, note })
     }
 
@@ -1106,8 +1174,9 @@ const server = http.createServer(async (req, res) => {
       at: body.at,
     })
     if (result.ok && !result.duplicate) {
-      routeCoachSegment(result.session, result.segment)
-      queueCoachCue(result.session.space, { reason: 'segment' })
+      if (result.session.context?.taskId !== '__assistant__') {
+        scheduleCoachCue(result.session)
+      }
     }
     return json(res, result.ok ? 200 : 400, result)
   }
@@ -1170,6 +1239,57 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { tasks: tasks.list() })
   }
 
+  // ---- assistant chat --------------------------------------------------
+  if (url.pathname === '/assistant/chat' || url.pathname === '/assistant/chat/from-session') {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    const querySpace = cueSpace(url.searchParams.get('space'))
+    const queryProvider = url.searchParams.get('provider') === 'claude' ? 'claude' : 'chatgpt'
+
+    if (req.method === 'GET' && url.pathname === '/assistant/chat') {
+      return json(res, 200, { ok: true, chat: assistant.snapshot(querySpace, queryProvider, jobs) })
+    }
+
+    let body = {}
+    try {
+      const raw = await readBody(req)
+      if (raw) body = JSON.parse(raw)
+    } catch (err) {
+      return json(res, 400, { error: `bad body: ${err.message}` })
+    }
+
+    if (req.method === 'POST' && url.pathname === '/assistant/chat/from-session') {
+      const pending = pendingTranscriptions()
+      if (pending > 0) {
+        return json(res, 409, { ok: false, pending: true, error: 'transcription still processing' })
+      }
+      const session = coach.session(String(body.sessionId || ''))
+      if (!session) return json(res, 404, { ok: false, error: 'unknown recording' })
+      const text = session.segments
+        .filter(segment => segment.final !== false)
+        .map(segment => String(segment.text || '').trim())
+        .filter(Boolean)
+        .join(' ')
+      const result = assistant.addTurn({
+        space: body.space ?? session.space,
+        provider: body.provider,
+        text,
+        clientId: body.clientId || `session:${session.id}`,
+      }, jobs)
+      return json(res, result.ok ? 202 : result.code || 400, result)
+    }
+
+    if (req.method === 'POST' && url.pathname === '/assistant/chat') {
+      if (body.clear === true) {
+        const result = assistant.clear(body.space, body.provider)
+        return json(res, result.ok ? 200 : result.code || 400, result)
+      }
+      const result = assistant.addTurn(body, jobs)
+      return json(res, result.ok ? 202 : result.code || 400, result)
+    }
+
+    return json(res, 405, { error: 'method not allowed' })
+  }
+
   if (req.method === 'POST' && url.pathname === '/note/delete') {
     if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
     let body = {}
@@ -1209,7 +1329,13 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && url.pathname === '/jobs') {
       const capability = url.searchParams.get('capability')
-      return json(res, 200, { jobs: jobs.available(capability), summary: jobs.summary() })
+      const available = capability === 'coach.cue'
+        ? jobs.availableCoachCues([
+            coach.currentSession('ops')?.id,
+            coach.currentSession('life')?.id,
+          ])
+        : jobs.available(capability)
+      return json(res, 200, { jobs: available, summary: jobs.summary() })
     }
 
     if (req.method === 'POST' && url.pathname === '/jobs') {
@@ -1271,6 +1397,10 @@ const server = http.createServer(async (req, res) => {
         ops: Boolean(coach.currentSession('ops')),
         life: Boolean(coach.currentSession('life')),
       },
+      assistant: {
+        chatgpt: assistant.providerReady.chatgpt,
+        claude: assistant.providerReady.claude,
+      },
       stt: transcriberInfo(),
     })
   }
@@ -1309,7 +1439,11 @@ const server = http.createServer(async (req, res) => {
       stats: checklists.allStats(),
       inbox: inbox.grouped(),
       tasks: tasks.list(),
-      stt: { ...sttStats, ...transcriberInfo() },
+      stt: { ...sttStats, pending: pendingTranscriptions(), ...transcriberInfo() },
+      assistant: {
+        chatgpt: assistant.providerReady.chatgpt,
+        claude: assistant.providerReady.claude,
+      },
       jobs: jobs.summary(),
     })
   }
