@@ -12,6 +12,7 @@ import { Inbox } from './inbox.js'
 import { Tasks } from './tasks.js'
 import { Triage, sweepInbox } from './triage.js'
 import { Jobs, JOB } from './jobs.js'
+import { distillNote } from './distill.js'
 import { Notifier, sweepWaits } from './notify.js'
 import { applyMessage, verifySignature, startSocketMode } from './slack.js'
 import { buildCue } from './cues.js'
@@ -453,9 +454,15 @@ function upgradeListenNoteSummaries() {
       const session = coach.session(sessionId)
       if (!session) continue
       const modelResult = latestCoachModelCueForSession(cueSpace(session.space), sessionId, Date.now(), false)
+      // A model summary when there is one; otherwise clean up the raw text
+      // that was saved while no worker was running. The newline test is what
+      // stops this running twice over the same note: a distilled note already
+      // has its title on the first line.
       const summary = modelNoteSummary(modelResult)
+        || (note.by === 'listen' && !note.text.includes('\n') ? distillNote(note.text) : null)
       if (!summary || summary === note.text) continue
-      const result = tasks.updateNote(task.id, note.id, summary, 'listen-ai')
+      const modelBacked = Boolean(modelNoteSummary(modelResult))
+      const result = tasks.updateNote(task.id, note.id, summary, modelBacked ? 'listen-ai' : 'listen')
       if (result.ok) upgraded += 1
     }
   }
@@ -694,7 +701,13 @@ function routeCoachSession(session, at = Date.now()) {
 
   const modelResult = latestCoachModelCueForSession(space, session.id, at, false)
   const summaryText = modelNoteSummary(modelResult)
-  const noteText = summaryText || rawText
+  // No model result means the Coach worker is not running — out of credit,
+  // not installed, laptop asleep. That used to save the raw transcript, which
+  // is how the Notes list ended up full of rows titled "uhh so I was
+  // thinking". The distiller understands nothing, but it removes what speech
+  // has and writing does not and puts a readable first line on top, which is
+  // the difference between a note you can find and one you never open.
+  const noteText = summaryText || distillNote(rawText) || rawText
   const noteBy = summaryText ? 'listen-ai' : 'listen'
 
   const contextTaskId = session.context?.taskId
@@ -795,6 +808,22 @@ const sttStats = {
   lastDebugFile: null,
 }
 
+/**
+ * Transcribe one clip and hand the text straight back.
+ *
+ * The iPad's record button is a person standing there waiting, not an ambient
+ * stream — but it must not start a second whisper process alongside a live
+ * coaching session, so it takes its turn in the same single-file queue and the
+ * caller awaits it.
+ */
+function transcribeClip(pcm, body = {}) {
+  return new Promise(resolve => {
+    transcribeQueue.push({ sessionId: null, pcm, body, resolve })
+    sttStats.queued += 1
+    void drainTranscriptions()
+  })
+}
+
 function enqueueTranscription(sessionId, pcm, body) {
   // A backlog means the model is slower than the speech. Dropping the oldest
   // is better than falling further behind for the rest of the conversation.
@@ -809,7 +838,7 @@ async function drainTranscriptions() {
   transcribing = true
   try {
     while (transcribeQueue.length) {
-      const { sessionId, pcm, body } = transcribeQueue.shift()
+      const { sessionId, pcm, body, resolve } = transcribeQueue.shift()
       const startedAt = Date.now()
       try {
         const out = await transcribePcm(pcm, {
@@ -824,17 +853,25 @@ async function drainTranscriptions() {
           sttStats.failed += 1
           sttStats.lastError = String(out.error || 'failed').slice(0, 60)
           console.warn(`[stt] ${out.error}`)
+          resolve?.({ ok: false, error: out.error })
           continue
         }
         const text = String(out.text || '').trim()
         if (!text) {
           sttStats.empty += 1
+          resolve?.({ ok: true, text: '' })
           continue
         }
         sttStats.ok += 1
         sttStats.lastText = text.slice(0, 60)
         // Ambient labels are diagnostics, not conversation. Persisting them
         // kept resetting the lull timer and buried speech under fake turns.
+        // A one-shot clip is answered here and never becomes a coach segment,
+        // so it cannot reset a lull timer or schedule a cue.
+        if (resolve) {
+          resolve({ ok: true, text: isNonSpeechText(text) ? '' : text })
+          continue
+        }
         if (isNonSpeechText(text)) continue
         const result = coach.addSegment(sessionId, {
           text,
@@ -852,6 +889,7 @@ async function drainTranscriptions() {
         sttStats.failed += 1
         sttStats.lastError = String(err.message || err).slice(0, 60)
         console.warn(`[stt] ${err.message}`)
+        resolve?.({ ok: false, error: err.message })
       }
     }
   } finally {
@@ -980,6 +1018,20 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/coach') {
     try {
       const html = readFileSync(join(WEB_DIR, 'coach.html'))
+      cors(res)
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
+      return res.end(html)
+    } catch {
+      return json(res, 404, { error: 'not found' })
+    }
+  }
+
+  // The iPad controller. The glasses are glanceable; this is the surface the
+  // system is actually driven from, with room for the columns nine lines has
+  // to compress.
+  if (req.method === 'GET' && url.pathname === '/pad') {
+    try {
+      const html = readFileSync(join(WEB_DIR, 'pad.html'))
       cors(res)
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
       return res.end(html)
@@ -1195,6 +1247,58 @@ const server = http.createServer(async (req, res) => {
     // dial to live.
     if (result.ok && !result.duplicate) enqueueTriage()
     return json(res, result.ok ? 200 : 400, result)
+  }
+
+  /*
+   * One-shot voice capture — the iPad's record button.
+   *
+   * Same contract as the typed box: capture never fails and never asks a
+   * question, so the transcript lands in the inbox as a raw line and triage
+   * sorts it later. The audio is transcribed and dropped; only the transcript
+   * is kept, and neither ever leaves the machine.
+   */
+  if (req.method === 'POST' && url.pathname === '/capture/audio') {
+    let body
+    try {
+      // ~90s of 16k mono PCM, base64. The page stops recording well before this.
+      body = JSON.parse(await readBody(req, 4 * 1024 * 1024))
+    } catch (err) {
+      return json(res, 400, { error: `bad body: ${err.message}` })
+    }
+
+    const encoded = String(body.pcmBase64 || body.audioPcm || '').replace(/^data:.*?;base64,/, '')
+    if (!encoded) return json(res, 400, { error: 'pcmBase64 required' })
+
+    let pcm
+    try {
+      pcm = Buffer.from(encoded, 'base64')
+    } catch {
+      return json(res, 400, { error: 'bad audio' })
+    }
+    if (pcm.length < 1600) return json(res, 200, { ok: true, empty: true, reason: 'too short' })
+
+    const out = await transcribeClip(pcm, {
+      sampleRate: body.sampleRate,
+      channels: body.channels,
+      clientId: body.clientId,
+    })
+    if (!out.ok) return json(res, 503, { ok: false, error: String(out.error || 'transcription failed') })
+
+    const text = String(out.text || '').trim()
+    if (!text) return json(res, 200, { ok: true, empty: true })
+
+    // Only an unmistakable command becomes a task on its own. Everything else
+    // is a raw line — guessing here is how the list fills with things nobody
+    // said.
+    const label = parseTaskCommand(text)
+    if (label) {
+      const created = tasks.addTask({ label, space: body.space === 'ops' ? 'ops' : 'life', clientId: body.clientId })
+      if (created.ok) return json(res, 200, { ok: true, text, task: created.task, tasks: tasks.list() })
+    }
+
+    const result = inbox.add(text, { by: body.by, clientId: body.clientId })
+    if (result.ok && !result.duplicate) enqueueTriage()
+    return json(res, result.ok ? 200 : 400, { ...result, text })
   }
 
   if (req.method === 'GET' && url.pathname === '/inbox') {

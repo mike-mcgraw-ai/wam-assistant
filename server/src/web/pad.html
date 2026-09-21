@@ -1,0 +1,827 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#111417">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>WAM Pad</title>
+<style>
+  :root{
+    --bg:#111417; --card:#191d21; --line:#262c31; --line2:#333b42;
+    --ink:#e8ecef; --dim:#8b969e; --accent:#5ac8a0; --warn:#e0b341; --hot:#e0655c;
+    color-scheme: dark;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:16px/1.45 system-ui,-apple-system,"SF Pro Text",Segoe UI,Roboto,sans-serif;
+    -webkit-text-size-adjust:100%;
+    padding:env(safe-area-inset-top) env(safe-area-inset-right)
+            env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  /* Numbers must line up down the page — that is the only thing the two
+     total columns are for. */
+  .num{font-variant-numeric:tabular-nums; font-feature-settings:"tnum" 1}
+
+  header{
+    position:sticky; top:0; z-index:10; background:var(--bg);
+    border-bottom:1px solid var(--line); padding:10px 18px 0;
+  }
+  .hrow{display:flex; align-items:center; gap:12px; flex-wrap:wrap}
+  h1{font-size:15px; margin:0; letter-spacing:.06em; color:var(--dim); font-weight:700}
+  .clock{font-size:15px; color:var(--dim); letter-spacing:.02em}
+  .spacer{flex:1}
+  .chip{
+    background:none; border:1px solid var(--line2); color:var(--dim);
+    border-radius:99px; padding:6px 14px; font-size:13px; font-weight:600;
+  }
+  .chip.on{background:var(--accent); color:#06231a; border-color:var(--accent)}
+  .seg{display:flex; border:1px solid var(--line2); border-radius:99px; overflow:hidden}
+  .seg button{
+    background:none; border:0; color:var(--dim); padding:6px 18px;
+    font-size:13px; font-weight:700; letter-spacing:.04em;
+  }
+  .seg button.on{background:var(--accent); color:#06231a}
+
+  /* ---- capture: the widest, loudest thing on the page ---- */
+  .capture{display:flex; gap:10px; padding:12px 0 10px; align-items:stretch}
+  #text{
+    flex:1; min-width:0; font-size:19px; padding:16px 16px;
+    background:var(--card); color:var(--ink);
+    border:1px solid var(--line2); border-radius:14px;
+  }
+  #text:focus{outline:none; border-color:var(--accent)}
+  .cbtn{
+    font-size:17px; font-weight:700; padding:0 22px; border:0;
+    border-radius:14px; background:var(--card); color:var(--ink);
+    border:1px solid var(--line2); white-space:nowrap;
+  }
+  #add{background:var(--accent); color:#06231a; border-color:var(--accent)}
+  #add:disabled{opacity:.35}
+  #rec{min-width:132px; display:flex; align-items:center; justify-content:center; gap:9px}
+  #rec .dot{width:13px; height:13px; border-radius:99px; background:var(--hot); flex:none}
+  #rec.live{background:var(--hot); color:#2a0b08; border-color:var(--hot)}
+  #rec.live .dot{background:#2a0b08; animation:pulse 1s ease-in-out infinite}
+  #rec.busy{opacity:.6}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+  @media (prefers-reduced-motion: reduce){ #rec.live .dot{animation:none} }
+  #status{padding:0 0 10px; font-size:13px; color:var(--dim); min-height:19px}
+  #status.warn{color:var(--warn)} #status.bad{color:var(--hot)}
+
+  /* ---- columns ---- */
+  main{
+    display:grid; gap:22px; padding:18px;
+    grid-template-columns:minmax(0,1.45fr) minmax(0,1fr);
+    align-items:start;
+  }
+  @media (max-width: 900px){ main{grid-template-columns:minmax(0,1fr)} }
+  section{background:var(--card); border:1px solid var(--line); border-radius:16px; overflow:hidden}
+  h2{
+    font-size:12px; letter-spacing:.14em; text-transform:uppercase; color:var(--dim);
+    margin:0; padding:14px 16px 10px; font-weight:700;
+    display:flex; align-items:center; gap:10px;
+  }
+  h2 .count{color:var(--line2); font-weight:700}
+  .rows{padding:0 0 6px}
+  .empty{padding:20px 16px 24px; color:var(--dim)}
+
+  /* ---- a row ---- */
+  .row{
+    display:grid; align-items:baseline; gap:10px;
+    grid-template-columns:52px 56px 30px minmax(0,1fr) 58px;
+    padding:11px 16px; border-top:1px solid var(--line);
+    cursor:default;
+  }
+  .rows > .row:first-child{border-top:0}
+  .row.tap{cursor:pointer}
+  .row.tap:active{background:#1f252a}
+  .row .c1,.row .c2,.row .c5{font-size:14px; color:var(--dim); text-align:right}
+  .row .c2{color:var(--ink)}
+  .row .mk{font-size:14px; color:var(--dim); text-align:center; letter-spacing:-.04em}
+  .row .lbl{min-width:0; font-size:17px; overflow-wrap:anywhere}
+  .row .sub{display:block; font-size:12.5px; color:var(--dim); margin-top:3px}
+  .row.big .lbl{font-weight:650}
+  .row.gap{opacity:.72}
+  .row.gap .lbl{font-style:italic}
+  .row.blocked{opacity:.55}
+  .row.done .lbl{color:var(--dim); text-decoration:line-through; text-decoration-color:var(--line2)}
+  .row.shut .mk{color:var(--warn)}
+  .opens{color:var(--warn); font-size:12.5px; margin-left:8px; white-space:nowrap}
+
+  /* ---- list rows (shared list) use a simpler grid ---- */
+  .lrow{display:grid; grid-template-columns:34px minmax(0,1fr); gap:12px;
+        padding:11px 16px; border-top:1px solid var(--line); align-items:start}
+  .rows > .lrow:first-child{border-top:0}
+  .lrow.pending{opacity:.5}
+  .tag{display:inline-block; border:1px solid var(--line2); border-radius:99px;
+       padding:1px 9px; margin-right:7px; font-size:11px; color:var(--dim)}
+
+  /* ---- controls ---- */
+  .acts{grid-column:4 / -1; display:flex; gap:8px; flex-wrap:wrap; padding-top:9px}
+  .lrow .acts{grid-column:2}
+  .btn{
+    font-size:13px; font-weight:700; padding:8px 14px; border-radius:10px;
+    background:#20262b; color:var(--ink); border:1px solid var(--line2);
+    letter-spacing:.02em;
+  }
+  .btn:active{background:#2a3138}
+  .btn.armed{background:var(--warn); color:#2a2003; border-color:var(--warn)}
+  .btn.go{border-color:#2f5d4d; color:var(--accent)}
+  .btn.tick{
+    width:34px; height:34px; padding:0; border-radius:9px;
+    color:var(--accent); font-size:16px; line-height:1;
+  }
+  .btn.tick.armed{color:#2a2003}
+  .btn:disabled{opacity:.3}
+
+  .notes{grid-column:4 / -1; padding-top:8px}
+  .note{font-size:14px; color:var(--dim); padding:5px 0 5px 12px;
+        border-left:2px solid var(--line2); margin-top:6px; overflow-wrap:anywhere}
+  .noteform{display:flex; gap:8px; margin-top:10px}
+  .noteform input{
+    flex:1; min-width:0; font-size:15px; padding:11px 12px; background:#14181b;
+    color:var(--ink); border:1px solid var(--line2); border-radius:10px;
+  }
+  .noteform input:focus{outline:none; border-color:var(--accent)}
+
+  .legend{padding:10px 18px 30px; color:var(--line2); font-size:12px; letter-spacing:.02em}
+  a.nav{color:var(--dim); text-decoration:none; font-size:13px; font-weight:600;
+        border:1px solid var(--line2); border-radius:99px; padding:6px 13px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="hrow">
+    <h1>WAM</h1>
+    <span class="clock num" id="clock">—</span>
+    <div class="seg" role="group" aria-label="Space">
+      <button id="sLife" class="on" type="button">LIFE</button>
+      <button id="sOps" type="button">OPS</button>
+    </div>
+    <span class="spacer"></span>
+    <a class="nav" href="/dashboard">Phone list</a>
+    <a class="nav" href="/coach">Coach</a>
+    <button class="chip" id="who" type="button">…</button>
+    <button class="chip" id="tok" type="button">token</button>
+  </div>
+
+  <form class="capture" id="form" autocomplete="off">
+    <input id="text" placeholder="Say it or type it — milk, call the dentist…"
+           enterkeyhint="done" autocomplete="off" autocapitalize="sentences" spellcheck="false">
+    <button class="cbtn" id="add" type="submit">Add</button>
+    <button class="cbtn" id="rec" type="button"><span class="dot"></span><span id="recLbl">Record</span></button>
+  </form>
+  <div id="status"></div>
+</header>
+
+<main>
+  <div>
+    <section>
+      <h2>Tasks <span class="count num" id="taskCount"></span></h2>
+      <div class="rows" id="tasks"><div class="empty">…</div></div>
+    </section>
+    <div style="height:22px"></div>
+    <section>
+      <h2>Running order <span class="count num" id="agendaCount"></span></h2>
+      <div class="rows" id="agenda"><div class="empty">…</div></div>
+    </section>
+  </div>
+
+  <div>
+    <section>
+      <h2>The list <span class="count num" id="inboxCount"></span></h2>
+      <div class="rows" id="inbox"><div class="empty">…</div></div>
+    </section>
+  </div>
+</main>
+
+<div class="legend">
+  [&gt;] ready &nbsp;·&nbsp; ( ) waiting on an earlier step &nbsp;·&nbsp; [!] task open &nbsp;·&nbsp;
+  (!) outside its window &nbsp;·&nbsp; ~ gap &nbsp;·&nbsp; [x] done today
+  &nbsp;&nbsp;|&nbsp;&nbsp; col 1 step &nbsp;·&nbsp; col 2 wall clock &nbsp;·&nbsp; col 5 work time
+</div>
+
+<script>
+/*
+ * WAM Pad — the operable surface.
+ *
+ * The glasses are glanceable: you read them and get on with it. This is the
+ * opposite end of the same system — the place you actually drive it from, with
+ * room for the columns the nine-line HUD has to compress.
+ *
+ * Three rules carried over from the HUD, because breaking them here would
+ * corrupt the same data:
+ *
+ *   1. Capture never fails. Text and voice both queue locally first.
+ *   2. Anything that changes state is armed, then confirmed. A stray tap on a
+ *      tablet lying on a counter must not start a step and leave it running
+ *      for five hours — that poisons the step's median, and the median is the
+ *      only reason any of this is worth looking at.
+ *   3. Never invent a number. No estimate renders as "--"; it is never guessed.
+ */
+
+const QUEUE_KEY = 'thelist.queue'
+const WHO_KEY   = 'thelist.who'
+const TOKEN_KEY = 'opsboard.readToken'      // same key the Coach page uses
+const SPACE_KEY = 'wampad.space'
+
+const $ = id => document.getElementById(id)
+const el = (tag, cls, txt) => {
+  const n = document.createElement(tag)
+  if (cls) n.className = cls
+  if (txt != null) n.textContent = txt
+  return n
+}
+const load = k => { try { return JSON.parse(localStorage.getItem(k)) || [] } catch { return [] } }
+const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)) } catch {} }
+const uid  = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random())
+
+let token = ''
+try { token = localStorage.getItem(TOKEN_KEY) || '' } catch {}
+let who = null
+try { who = localStorage.getItem(WHO_KEY) } catch {}
+if (!who) {
+  who = (prompt('Your name (once, so the list shows who added what):') || 'guest').trim().slice(0, 24)
+  try { localStorage.setItem(WHO_KEY, who) } catch {}
+}
+let space = 'life'
+try { space = localStorage.getItem(SPACE_KEY) === 'ops' ? 'ops' : 'life' } catch {}
+
+let queue   = load(QUEUE_KEY)
+let plan    = { tasks: [], agenda: [] }
+let items   = []
+let runs    = []          // checklists.active, for choreId -> runId
+let expanded = new Set()  // task ids showing their notes
+
+/* ---------- formatting ---------- */
+
+/** Durations read as "7m" / "2h05". Null is "--" and never a guess. */
+function dur(ms) {
+  if (typeof ms !== 'number' || !isFinite(ms)) return '--'
+  const total = Math.round(ms / 60000)
+  if (total < 60) return total + 'm'
+  return Math.floor(total / 60) + 'h' + String(total % 60).padStart(2, '0')
+}
+function clockOf(at) {
+  if (typeof at !== 'number') return ''
+  const d = new Date(at)
+  let h = d.getHours()
+  const ap = h >= 12 ? 'p' : 'a'
+  h = h % 12 || 12
+  return h + ':' + String(d.getMinutes()).padStart(2, '0') + ap
+}
+function tickClock() {
+  const d = new Date()
+  const days = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT']
+  $('clock').textContent =
+    days[d.getDay()] + ' ' + (d.getMonth() + 1) + '/' + d.getDate() + '  ' + clockOf(d.getTime())
+}
+
+function say(msg, level) {
+  $('status').textContent = msg || ''
+  $('status').className = level || ''
+}
+
+/* ---------- transport ---------- */
+
+const headers = (extra) => ({
+  ...(extra || {}),
+  ...(token ? { Authorization: 'Bearer ' + token } : {}),
+})
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    ...options,
+    cache: 'no-store',
+    headers: headers(options.body ? { 'Content-Type': 'application/json' } : undefined),
+  })
+  if (res.status === 401) { throw new Error('unauthorized') }
+  if (!res.ok) throw new Error(path + ' -> ' + res.status)
+  return res.json()
+}
+
+/*
+ * Arm, then confirm.
+ *
+ * The first tap only changes the label. Any other tap on the page disarms,
+ * which is the tablet equivalent of "cursor movement disarms" on the glasses.
+ * Four seconds of nothing also disarms, so a button never sits hot.
+ */
+let armedBtn = null
+let armTimer = null
+function disarm() {
+  if (!armedBtn) return
+  armedBtn.textContent = armedBtn.dataset.idle
+  armedBtn.classList.remove('armed')
+  armedBtn = null
+  clearTimeout(armTimer)
+}
+document.addEventListener('pointerdown', e => {
+  if (armedBtn && e.target !== armedBtn) disarm()
+}, true)
+
+function arm(btn, confirmLabel, run) {
+  btn.dataset.idle = btn.textContent
+  btn.onclick = async e => {
+    e.stopPropagation()
+    if (armedBtn === btn) {
+      const label = btn.dataset.idle
+      disarm()
+      btn.disabled = true
+      try { await run() } finally { btn.disabled = false; btn.textContent = label }
+      return
+    }
+    disarm()
+    armedBtn = btn
+    btn.textContent = confirmLabel
+    btn.classList.add('armed')
+    armTimer = setTimeout(disarm, 4000)
+  }
+  return btn
+}
+
+/* ---------- capture ---------- */
+
+async function flush() {
+  if (queue.length === 0) return true
+  const rest = []
+  for (const entry of queue) {
+    try {
+      const res = await fetch('/inbox', {
+        method: 'POST',
+        headers: headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(entry),
+      })
+      if (!res.ok) rest.push(entry)
+    } catch {
+      rest.push(entry)
+    }
+  }
+  queue = rest
+  save(QUEUE_KEY, queue)
+  return queue.length === 0
+}
+
+$('form').onsubmit = async e => {
+  e.preventDefault()
+  const body = $('text').value.trim()
+  if (!body) return
+  queue.push({ text: body, by: who, clientId: uid(), at: Date.now() })
+  save(QUEUE_KEY, queue)
+  // Clear and keep focus — the next thing is usually said straight after.
+  $('text').value = ''
+  $('text').focus()
+  renderInbox()
+  say('added')
+  await refresh()
+}
+
+/* ---------- voice ----------
+ *
+ * Recorded here, transcribed on the Mac by whisper, and dropped. The audio is
+ * never stored and never leaves the tailnet; only the transcript is kept.
+ *
+ * ScriptProcessorNode is deprecated but it is the one path that works the same
+ * on every iPad in the house, and it hands back raw float samples, which is
+ * what the hub's PCM endpoint already wants.
+ */
+const MAX_SECONDS = 90
+let media = null, audioCtx = null, proc = null, chunks = [], recording = false, recStart = 0, recTimer = null
+
+function pcm16k(buffers, fromRate) {
+  let length = 0
+  for (const b of buffers) length += b.length
+  const flat = new Float32Array(length)
+  let at = 0
+  for (const b of buffers) { flat.set(b, at); at += b.length }
+
+  const ratio = fromRate / 16000
+  const out = new Int16Array(Math.floor(flat.length / ratio))
+  for (let i = 0; i < out.length; i += 1) {
+    // Linear interpolation. Speech at 16k does not need better, and anything
+    // fancier is CPU the tablet would rather spend elsewhere.
+    const pos = i * ratio
+    const low = Math.floor(pos)
+    const frac = pos - low
+    const a = flat[low] || 0
+    const b = low + 1 < flat.length ? flat[low + 1] : a
+    const s = Math.max(-1, Math.min(1, a + (b - a) * frac))
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff
+  }
+  return out
+}
+
+function toBase64(int16) {
+  const bytes = new Uint8Array(int16.buffer, int16.byteOffset, int16.byteLength)
+  let binary = ''
+  // Chunked: one apply() over a minute of audio blows the argument limit.
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000))
+  }
+  return btoa(binary)
+}
+
+async function startRec() {
+  try {
+    media = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+    })
+  } catch (err) {
+    say('no microphone: ' + (err && err.name === 'NotAllowedError' ? 'permission denied' : err.message), 'bad')
+    return
+  }
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+  if (audioCtx.state === 'suspended') await audioCtx.resume()
+
+  const src = audioCtx.createMediaStreamSource(media)
+  proc = audioCtx.createScriptProcessor(4096, 1, 1)
+  chunks = []
+  proc.onaudioprocess = e => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)))
+
+  // Muted sink: some browsers will not run the processor unless it reaches a
+  // destination, and we obviously must not play the microphone back.
+  const mute = audioCtx.createGain()
+  mute.gain.value = 0
+  src.connect(proc); proc.connect(mute); mute.connect(audioCtx.destination)
+
+  recording = true
+  recStart = Date.now()
+  $('rec').classList.add('live')
+  say('listening — tap again to stop')
+  recTimer = setInterval(() => {
+    const secs = Math.round((Date.now() - recStart) / 1000)
+    $('recLbl').textContent = 'Stop ' + secs + 's'
+    if (secs >= MAX_SECONDS) stopRec()
+  }, 250)
+}
+
+async function stopRec() {
+  if (!recording) return
+  recording = false
+  clearInterval(recTimer)
+  const rate = audioCtx ? audioCtx.sampleRate : 48000
+
+  try { proc.disconnect() } catch {}
+  try { media.getTracks().forEach(t => t.stop()) } catch {}
+  try { await audioCtx.close() } catch {}
+  proc = null; media = null; audioCtx = null
+
+  $('rec').classList.remove('live')
+  $('rec').classList.add('busy')
+  $('recLbl').textContent = 'Transcribing'
+  say('transcribing on the Mac…')
+
+  const samples = pcm16k(chunks, rate)
+  chunks = []
+  if (samples.length < 800) {                       // under ~50ms of audio
+    $('rec').classList.remove('busy'); $('recLbl').textContent = 'Record'
+    say('too short', 'warn')
+    return
+  }
+
+  try {
+    const out = await api('/capture/audio', {
+      method: 'POST',
+      body: JSON.stringify({
+        pcmBase64: toBase64(samples),
+        sampleRate: 16000,
+        channels: 1,
+        by: who,
+        space,
+        clientId: uid(),
+      }),
+    })
+    if (out.empty) say('heard nothing', 'warn')
+    else if (out.task) say('task added — ' + out.task.label)
+    else say('added — "' + String(out.text || '').slice(0, 70) + '"')
+  } catch (err) {
+    say(err.message === 'unauthorized' ? 'set your token (top right)' : 'transcription failed: ' + err.message, 'bad')
+  } finally {
+    $('rec').classList.remove('busy')
+    $('recLbl').textContent = 'Record'
+    refresh()
+  }
+}
+
+$('rec').onclick = () => { recording ? stopRec() : startRec() }
+
+/* ---------- rendering ---------- */
+
+function runIdFor(choreId) {
+  const run = runs.find(r => r.checklistId === choreId && !r.complete)
+  return run ? run.runId : null
+}
+
+function renderTasks() {
+  const host = $('tasks')
+  host.innerHTML = ''
+  const rows = plan.tasks || []
+  $('taskCount').textContent = rows.length ? rows.length : ''
+  if (!rows.length) { host.appendChild(el('div', 'empty', 'Nothing big outstanding.')); return }
+
+  for (const t of rows) {
+    const row = el('div', 'row tap' + (t.weight === 'big' ? ' big' : '') + (t.open ? '' : ' shut'))
+    row.appendChild(el('div', 'c1 num', dur(t.ms)))
+    row.appendChild(el('div', 'c2 num', ''))
+    row.appendChild(el('div', 'mk', t.open ? '[!]' : '(!)'))
+
+    const lbl = el('div', 'lbl')
+    lbl.appendChild(document.createTextNode(t.label))
+    // The window annotates and never sorts: at 11pm the dentist call stays
+    // exactly where it is, marked with when it next opens.
+    if (!t.open && t.opensLabel) lbl.appendChild(el('span', 'opens', t.opensLabel))
+    const notes = t.notes || []
+    if (notes.length) lbl.appendChild(el('span', 'sub', notes.length + (notes.length === 1 ? ' note' : ' notes')))
+    else if (t.note) lbl.appendChild(el('span', 'sub', t.note))
+    row.appendChild(lbl)
+    row.appendChild(el('div', 'c5 num', ''))
+
+    const open = expanded.has(t.taskId)
+    row.onclick = () => { open ? expanded.delete(t.taskId) : expanded.add(t.taskId); renderTasks() }
+
+    if (open) {
+      const box = el('div', 'notes')
+      for (const n of notes) box.appendChild(el('div', 'note', n.text))
+
+      const form = el('form', 'noteform')
+      const input = el('input')
+      input.placeholder = 'Add what you found out — number, name, where'
+      input.enterKeyHint = 'done'
+      const send = el('button', 'btn go', 'Note')
+      send.type = 'submit'
+      form.append(input, send)
+      form.onsubmit = async e => {
+        e.preventDefault(); e.stopPropagation()
+        const text = input.value.trim()
+        if (!text) return
+        input.value = ''
+        try {
+          await api('/task/' + encodeURIComponent(t.taskId) + '/note', {
+            method: 'POST',
+            body: JSON.stringify({ text, by: who, clientId: uid() }),
+          })
+          say('note added')
+        } catch (err) { say('note not saved: ' + err.message, 'bad'); return }
+        await refresh()
+      }
+      form.onclick = e => e.stopPropagation()
+      box.appendChild(form)
+
+      const acts = el('div', 'acts')
+      acts.appendChild(arm(el('button', 'btn', 'Mark done'), 'Confirm done?', async () => {
+        try {
+          await api('/task/' + encodeURIComponent(t.taskId) + '/done', { method: 'POST' })
+          expanded.delete(t.taskId)
+          say('done — ' + t.label)
+        } catch (err) { say('not saved: ' + err.message, 'bad'); return }
+        await refresh()
+      }))
+      box.appendChild(acts)
+      row.appendChild(box)
+    }
+    host.appendChild(row)
+  }
+}
+
+function renderAgenda() {
+  const host = $('agenda')
+  host.innerHTML = ''
+  const rows = plan.agenda || []
+  const doable = rows.filter(r => r.kind === 'do').length
+  $('agendaCount').textContent = doable ? doable : ''
+  if (!rows.length) {
+    host.appendChild(el('div', 'empty', 'Nothing scheduled. Chores need every step estimated before they can be planned.'))
+    return
+  }
+
+  for (const r of rows) {
+    if (r.kind === 'gap') {
+      const row = el('div', 'row gap')
+      row.appendChild(el('div', 'c1 num', dur(r.ms)))
+      row.appendChild(el('div', 'c2 num', dur(r.cumulativeWallMs)))
+      row.appendChild(el('div', 'mk', '~'))
+      const what = r.running && r.running.length ? r.running.join(', ') + ' running' : 'gap'
+      const lbl = el('div', 'lbl', what)
+      if (r.nextFree) lbl.appendChild(el('span', 'sub', r.nextFree.step + ' frees up ' + clockOf(r.nextFree.endsAt)))
+      row.appendChild(lbl)
+      row.appendChild(el('div', 'c5 num', dur(r.cumulativeBusyMs)))
+      host.appendChild(row)
+      continue
+    }
+
+    if (r.kind === 'done') {
+      const row = el('div', 'row done')
+      row.appendChild(el('div', 'c1 num', dur(r.ms)))
+      row.appendChild(el('div', 'c2 num', clockOf(r.at)))
+      row.appendChild(el('div', 'mk', '[x]'))
+      const lbl = el('div', 'lbl', r.step)
+      lbl.appendChild(el('span', 'sub', r.chore))
+      row.appendChild(lbl)
+      row.appendChild(el('div', 'c5 num', ''))
+
+      const acts = el('div', 'acts')
+      acts.appendChild(arm(el('button', 'btn', 'Undo'), 'Confirm undo?', async () => {
+        try {
+          await api('/check', {
+            method: 'POST',
+            body: JSON.stringify({ runId: r.runId, itemId: r.stepId, done: false, by: 'pad' }),
+          })
+          say('reopened — ' + r.step)
+        } catch (err) { say('not saved: ' + err.message, 'bad'); return }
+        await refresh()
+      }))
+      row.appendChild(acts)
+      host.appendChild(row)
+      continue
+    }
+
+    // kind === 'do'
+    const row = el('div', 'row' + (r.open ? '' : ' blocked'))
+    row.appendChild(el('div', 'c1 num', dur(r.ms)))
+    row.appendChild(el('div', 'c2 num', dur(r.cumulativeWallMs)))
+    row.appendChild(el('div', 'mk', r.open ? '[>]' : '( )'))
+    const lbl = el('div', 'lbl', r.step)
+    const bits = [r.chore]
+    if (r.stepIndex && r.stepTotal) bits.push(r.stepIndex + '/' + r.stepTotal)
+    // Trust is surfaced, never implied: a measured median and a configured
+    // estimate must not look the same.
+    bits.push(r.measured ? 'measured' : 'est')
+    lbl.appendChild(el('span', 'sub', bits.join(' · ')))
+    row.appendChild(lbl)
+    row.appendChild(el('div', 'c5 num', dur(r.cumulativeBusyMs)))
+
+    if (r.open) {
+      const runId = runIdFor(r.choreId)
+      const acts = el('div', 'acts')
+
+      // Starting a step starts a clock that feeds the median. It is never
+      // automatic and always needs two taps.
+      acts.appendChild(arm(el('button', 'btn', runId ? 'Start step' : 'Start ' + r.chore), 'Confirm start?', async () => {
+        try {
+          let id = runId
+          if (!id) {
+            const started = await api('/run/start', {
+              method: 'POST', body: JSON.stringify({ checklistId: r.choreId }),
+            })
+            runs = (started.checklists && started.checklists.active) || runs
+            id = runIdFor(r.choreId)
+          }
+          if (!id) { say('could not start ' + r.chore, 'bad'); return }
+          await api('/step/begin', { method: 'POST', body: JSON.stringify({ runId: id, itemId: r.stepId }) })
+          say('started — ' + r.step)
+        } catch (err) { say('not started: ' + err.message, 'bad'); return }
+        await refresh()
+      }))
+
+      acts.appendChild(arm(el('button', 'btn go', 'Done'), 'Confirm done?', async () => {
+        try {
+          let id = runId
+          if (!id) {
+            const started = await api('/run/start', {
+              method: 'POST', body: JSON.stringify({ checklistId: r.choreId }),
+            })
+            runs = (started.checklists && started.checklists.active) || runs
+            id = runIdFor(r.choreId)
+          }
+          if (!id) { say('could not open ' + r.chore, 'bad'); return }
+          await api('/check', {
+            method: 'POST',
+            body: JSON.stringify({ runId: id, itemId: r.stepId, done: true, by: 'pad' }),
+          })
+          say('done — ' + r.step)
+        } catch (err) { say('not saved: ' + err.message, 'bad'); return }
+        await refresh()
+      }))
+
+      if (runId) {
+        // A step that ran while you were not watching must reset rather than
+        // complete, so a bad duration can never reach the median.
+        acts.appendChild(arm(el('button', 'btn', 'Reset'), 'Confirm reset?', async () => {
+          try {
+            await api('/step/reset', { method: 'POST', body: JSON.stringify({ runId, itemId: r.stepId }) })
+            say('reset — ' + r.step)
+          } catch (err) { say('not saved: ' + err.message, 'bad'); return }
+          await refresh()
+        }))
+      }
+      row.appendChild(acts)
+    }
+    host.appendChild(row)
+  }
+}
+
+function renderInbox() {
+  const host = $('inbox')
+  host.innerHTML = ''
+  const rows = [
+    ...queue.map(q => ({ id: q.clientId, text: q.text, by: q.by, pending: true })),
+    ...items.map(i => ({ ...i, pending: false })),
+  ]
+  $('inboxCount').textContent = rows.length ? rows.length : ''
+  if (!rows.length) { host.appendChild(el('div', 'empty', 'Nothing on the list.')); return }
+
+  for (const row of rows) {
+    const li = el('div', 'lrow' + (row.pending ? ' pending' : ''))
+    const tick = el('button', 'btn tick', '✓')
+    tick.type = 'button'
+    tick.setAttribute('aria-label', 'done')
+    if (row.pending) tick.disabled = true
+    else arm(tick, '!', async () => {
+      try { await api('/inbox/' + encodeURIComponent(row.id) + '/done', { method: 'POST' }) }
+      catch (err) { say('not saved: ' + err.message, 'bad'); return }
+      await refresh()
+    })
+
+    const body = el('div')
+    body.appendChild(el('div', null, row.text))
+    const meta = el('div', 'sub')
+    if (row.list) meta.appendChild(el('span', 'tag', row.list))
+    meta.appendChild(document.createTextNode(row.pending ? 'waiting to sync' : (row.by || '')))
+    body.appendChild(meta)
+
+    li.append(tick, body)
+    host.appendChild(li)
+  }
+}
+
+/* ---------- refresh ---------- */
+
+let refreshing = false
+async function refresh() {
+  if (refreshing) return
+  refreshing = true
+  try {
+    const drained = await flush()
+
+    try {
+      plan = await api('/plan?space=' + space)
+    } catch (err) {
+      if (err.message === 'unauthorized') { say('set your read token (top right)', 'bad'); return }
+      say('hub unreachable — showing the last good view', 'warn')
+      return
+    }
+
+    try {
+      const state = await api('/state')
+      runs = (state.checklists && state.checklists.active) || []
+      items = (state.inbox || []).flatMap(g => g.items || [])
+    } catch { /* the plan is the important half; the list can lag a poll */ }
+
+    if (drained && !$('status').classList.contains('bad')) say('')
+    else if (!drained) say(queue.length + ' waiting to sync', 'warn')
+
+    renderTasks(); renderAgenda(); renderInbox()
+  } finally {
+    refreshing = false
+  }
+}
+
+/* ---------- chrome ---------- */
+
+function setSpace(next) {
+  space = next
+  try { localStorage.setItem(SPACE_KEY, space) } catch {}
+  $('sLife').classList.toggle('on', space === 'life')
+  $('sOps').classList.toggle('on', space === 'ops')
+  refresh()
+}
+$('sLife').onclick = () => setSpace('life')
+$('sOps').onclick  = () => setSpace('ops')
+$('sLife').classList.toggle('on', space === 'life')
+$('sOps').classList.toggle('on', space === 'ops')
+
+$('who').textContent = who
+$('who').onclick = () => {
+  who = (prompt('Your name:', who) || who).trim().slice(0, 24)
+  try { localStorage.setItem(WHO_KEY, who) } catch {}
+  $('who').textContent = who
+}
+
+function paintToken() { $('tok').classList.toggle('on', Boolean(token)) }
+$('tok').onclick = () => {
+  // Never in source, never in the package — it lives here and nowhere else.
+  const next = prompt('READ_TOKEN (leave empty if the hub has none):', token)
+  if (next === null) return
+  token = next.trim()
+  try { localStorage.setItem(TOKEN_KEY, token) } catch {}
+  paintToken()
+  refresh()
+}
+paintToken()
+
+window.addEventListener('online', refresh)
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') refresh()
+})
+
+tickClock()
+setInterval(tickClock, 10000)
+refresh()
+setInterval(refresh, 15000)
+</script>
+</body>
+</html>
