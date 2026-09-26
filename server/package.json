@@ -1,6 +1,6 @@
 {
   "name": "wam-assistant-server",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": true,
   "type": "module",
   "description": "Aggregates building operations metrics from HTTP, Slack, or anything else and serves one JSON snapshot to the Even G2 plugin.",

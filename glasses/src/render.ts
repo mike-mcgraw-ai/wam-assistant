@@ -71,8 +71,11 @@ export type View =
    * the module because the screen repaints every two seconds while recording —
    * anything not in the view would be reset by the next frame, which is what
    * "I scrolled up and it snapped back" looks like.
+   *
+   * `startArmed` is the first tap in arm-then-confirm. Recording starts on the
+   * second tap only; movement or back leaves/cancels it.
    */
-  | { kind: 'cue'; scroll?: number; modeCursor?: number }
+  | { kind: 'cue'; scroll?: number; modeCursor?: number; startArmed?: boolean }
   | { kind: 'assistant'; phase: 'providers'; cursor: number }
   | { kind: 'assistant'; phase: 'chat'; provider: AssistantProvider; scroll?: number }
   | { kind: 'pong' }
@@ -93,6 +96,7 @@ export interface UiState {
   /** last plan fetched for the current window, null while loading or failed */
   plan: BlockPlan | null
   planLoading: boolean
+  planError: string | null
   /** latest foreground Coach cue returned by the hub */
   cue: CoachCue | null
   /** active listening session for the current space, if one exists */
@@ -105,6 +109,8 @@ export interface UiState {
   assistantChat: AssistantChat | null
   /** true while the glasses microphone is capturing a chat turn */
   assistantRecording: boolean
+  /** true after a chat turn is recorded but before it has been sent */
+  assistantReviewing: boolean
   /** true after capture while STT is draining and the turn is queued */
   assistantSending: boolean
   /** Loaded only while a note detail/transcript needs the original session. */
@@ -150,6 +156,8 @@ export interface UiState {
   stickyDone: Set<string>
   /** A second click deletes this selected user-created note; movement disarms. */
   armedNoteId: string | null
+  /** true after Listen is stopped but before its note is saved or discarded */
+  listenReviewing: boolean
   /**
    * Whether the glasses are currently showing us.
    *
@@ -256,8 +264,9 @@ export function planRows(state: UiState): PlanRow[] {
   const gap: PlanRow[] = agenda.length ? [{ kind: 'chores' }] : []
 
   // The LIFE line, made selectable. Scrolling up off the first task lands on
-  // it, and a click starts talking — general capture, no subject, which is the
-  // "just let me say a thing" case that otherwise needed the long-press menu.
+  // it, and a click opens the voice-note path — general capture, no subject,
+  // which is the "just let me say a thing" case that otherwise needed the
+  // long-press menu.
   // It costs no row: the header line was already on screen doing nothing.
   // Anything required today, above everything else, until it is done.
   //
@@ -351,14 +360,14 @@ function renderCapture(state: UiState, cursor: number): string {
   rows.forEach((row, i) => {
     const point = i === cursor ? '>' : ' '
     if (row.kind === 'listen') {
-      lines.push(clipToWidth(`${point}Listen        ${live ? 'recording now' : 'start talking'}`))
+      lines.push(clipToWidth(`${point}Listen        ${live ? 'recording now' : 'arm mic'}`))
     } else {
       lines.push(clipToWidth(`${point}Notes         ${notes === 0 ? 'nothing saved' : `${notes} saved`}`))
     }
   })
 
   lines.push('', rows[cursor]?.kind === 'listen'
-    ? live ? 'click to stop recording' : 'click and start talking'
+    ? live ? 'click to stop recording' : 'click to arm mic'
     : 'click to read them back')
   return assemble(lines, config.maxChars, config.maxLines)
 }
@@ -439,10 +448,16 @@ export function findNoteRow(
 }
 
 function shortNoteSummary(text: string): string {
-  const clean = String(text || '').replace(/\s+/g, ' ').trim()
+  const raw = String(text || '')
+  // A note written by the hub leads with its summary on its own line — the
+  // AI recap, or the distilled title when no model ran. That first line IS
+  // the summary, so flattening the whole note and hunting for a sentence
+  // ending threw it away and grabbed the start of the transcript instead.
+  const first = raw.split('\n').map(line => line.trim()).find(Boolean)
+  if (first) return first
+  const clean = raw.replace(/\s+/g, ' ').trim()
   if (!clean) return 'Untitled note'
-  const sentence = clean.match(/^.{12,}?[.!?](?:\s|$)/)?.[0]?.trim() ?? clean
-  return sentence
+  return clean.match(/^.{12,}?[.!?](?:\s|$)/)?.[0]?.trim() ?? clean
 }
 
 function renderNotes(state: UiState, cursor: number): string {
@@ -460,7 +475,21 @@ function renderNotes(state: UiState, cursor: number): string {
   for (let i = win.start; i < win.end; i += 1) {
     const { note, subject } = rows[i]
     const point = i === cursor ? '>' : ' '
-    lines.push(clipToWidth(`${point}${clip(shortNoteSummary(note.text), 28)} · ${subject.label}`))
+
+    // The summary gets the whole row.
+    //
+    // It used to be cut at 28 characters to make space for the subject, and
+    // the subject was "Captured notes" on almost every row — the hub's
+    // catch-all — so every line was truncated to append the same six words
+    // that said nothing. A label only earns space when it distinguishes this
+    // note from the one above it, which the catch-all never does.
+    //
+    // Where the subject IS real, it goes after the text and is the first
+    // thing clipped: knowing what a note says beats knowing where it is
+    // filed, and the detail screen carries the subject anyway.
+    const named =
+      subject.kind === 'task' && subject.id === CAPTURE_TASK_ID ? '' : `   ${subject.label}`
+    lines.push(clipToWidth(`${point}${shortNoteSummary(note.text)}${named}`))
   }
   return assemble(lines, config.maxChars, config.maxLines)
 }
@@ -845,7 +874,7 @@ function renderChecklist(state: UiState, runId: string, cursor: number): string 
   // the double-tap: going back is the one gesture that is already obvious.
   const item = run.items[cursor]
   if (cursor === run.items.length) {
-    lines.push(state.coachSession?.active ? 'recording - click to stop' : `click to talk about ${clip(run.name, 14)}`)
+    lines.push(state.coachSession?.active ? 'recording - click to stop' : 'click arms voice note')
     return assemble(lines, config.maxChars, config.maxLines)
   }
   const tip = item?.suspect
@@ -947,7 +976,8 @@ function planTip(state: UiState, rows: PlanRow[], cursor: number): string {
 function renderPlan(state: UiState, cursor: number): string {
   const plan = state.plan
   if (!plan) {
-    return `WAM\n\n${state.planLoading ? 'Working it out...' : 'No plan yet.'}\n\ndbl-tap to go back`
+    const detail = state.planLoading ? 'Working it out...' : `No plan - ${state.planError || 'waiting for hub'}`
+    return assemble(['WAM', '', ...wrap(detail, LINE_CHARS), '', 'dbl-tap to go back'], config.maxChars, config.maxLines)
   }
 
   const rows = planRows(state)
@@ -1203,16 +1233,24 @@ function listenSummary(session: CoachSessionSummary | null, cue: CoachCue | null
   const cueText = cue && (!session || cue.createdAt >= session.startedAt)
     ? cue.lines?.join(' ').replace(/\s+/g, ' ').trim()
     : ''
-  if (cueText) return clipToWidth(`! ${cueText}`)
+  if (cueText) return clipToWidth(`AI! ${cueText}`)
 
   const notes = session?.runningNote?.lines ?? []
   const raw = notes.find(line => /^Thread\s*:/i.test(line)) ?? notes[0]
   if (!raw) {
     const latest = session?.recentSegments?.at(-1)?.text.replace(/\s+/g, ' ').trim()
-    return latest ? clipToWidth(`= ${latest}`) : null
+    if (!latest) return null
+    if (session?.aiState?.status === 'thinking') return clipToWidth('AI thinking...')
+    return clipToWidth(`AI listening: ${latest}`)
   }
   const summary = raw.replace(/^(?:Thread|Now|Hold)\s*:\s*/i, '').trim()
-  return summary ? clipToWidth(`= ${summary}`) : null
+  if (!summary) return null
+  const status = session?.aiState?.status
+  if (status === 'thinking') return clipToWidth(`AI thinking: ${summary}`)
+  if (status === 'quiet') return clipToWidth(`AI quiet: ${summary}`)
+  if (status === 'error') return clipToWidth('AI error - recap still recording')
+  if (status === 'cue') return clipToWidth(`AI ready: ${summary}`)
+  return clipToWidth(`AI listening: ${summary}`)
 }
 
 function listenModeLabel(mode: CoachMode): string {
@@ -1234,21 +1272,25 @@ function renderCue(state: UiState, scrollBack = 0): string {
 
   if (!session && state.coachModes.length > 0) {
     const cursor = state.view.kind === 'cue' ? state.view.modeCursor ?? 0 : 0
+    const armed = state.view.kind === 'cue' && state.view.startArmed === true
     lines.push(clockLine(state), ruleCentred('Listen mode', false), '')
     state.coachModes.forEach((mode, index) => {
       const point = cursor === index ? '>' : ' '
-      const active = mode.id === state.coachModeId ? '[*]' : '[ ]'
+      const active = armed && cursor === index ? '[?]' : mode.id === state.coachModeId ? '[*]' : '[ ]'
       lines.push(clipToWidth(`${point}${active} ${listenModeLabel(mode)}`))
     })
+    lines.push('', armed ? 'armed - click starts' : 'click arms mic')
+    if (armed) lines.push('scroll/back cancels')
     return assemble(lines, config.maxChars, config.maxLines)
   }
 
   if (session?.active) {
+    const reviewing = state.listenReviewing
     const a = state.audio ?? { open: false, frames: 0, chunks: 0, sent: 0, rejected: 0, lastRms: 0, kind: '-', raw: 0, error: null }
     const mic = !a.open ? 'CLOSED' : a.sent > 0 ? 'MIC*' : a.frames > 0 ? 'MIC.' : 'MIC?'
     if (listenDebug) {
       lines.push(
-        clipToWidth(`${mic}  ${clip(session.modeName, 14)}  ${session.segmentCount} lines`),
+        clipToWidth(`${reviewing ? 'REVIEW' : mic}  ${clip(session.modeName, 14)}  ${session.segmentCount} lines`),
         clipToWidth(`raw ${a.raw}  frames ${a.frames}  chunks ${a.chunks}  sent ${a.sent}`),
         clipToWidth(`quiet ${a.rejected}  rms ${a.lastRms}/${config.audioMinRms}  pcm ${a.kind}`),
       )
@@ -1263,18 +1305,20 @@ function renderCue(state: UiState, scrollBack = 0): string {
         )
         if (stt.lastError) lines.push(clipToWidth(`stt err ${stt.lastError}`))
       }
-    } else lines.push(clipToWidth(`LISTEN  ${clip(session.modeName, 12)}  ${session.segmentCount} lines  ${mic}`))
+    } else lines.push(clipToWidth(`${reviewing ? 'REVIEW' : 'LISTEN'}  ${clip(session.modeName, 12)}  ${session.segmentCount} lines  ${reviewing ? 'STOP' : mic}`))
   } else {
     // Stopped is a screen you can act on, not a dead end. Listen from the menu
-    // brings you here without recording, so this line has to say how to start.
+    // brings you here without recording, so this line has to say how to arm it.
     const stt = state.snapshot?.stt
-    const lines0 = ['STOPPED Listen - click to start']
+    const armed = state.view.kind === 'cue' && state.view.startArmed === true
+    const lines0 = [armed ? 'READY? click again starts' : 'STOPPED Listen - click arms']
+    if (armed) lines0.push('scroll/back cancels')
     if (listenDebug && stt) lines0.push('', clipToWidth(`stt ${stt.provider}${stt.configured ? '' : ' UNSET'}  ok ${stt.ok}  empty ${stt.empty}  fail ${stt.failed}`))
     if (!cue && !session?.recentSegments?.length) return assemble(lines0, config.maxChars, config.maxLines)
     lines.push(...lines0)
   }
 
-  if (!listenDebug) {
+  if (!listenDebug && !state.listenReviewing) {
     const summary = listenSummary(session ?? null, cue ?? null)
     if (summary) lines.push(summary)
   } else if (cue) {
@@ -1285,9 +1329,13 @@ function renderCue(state: UiState, scrollBack = 0): string {
   }
 
   const segments = session?.recentSegments ?? []
+  const reviewFooter = session?.active && state.listenReviewing ? 'click saves - back discards' : null
   if (segments.length > 0) {
-    const room = Math.max(0, config.maxLines - lines.length)
-    if (room <= 0) return assemble(lines, config.maxChars, config.maxLines)
+    const room = Math.max(0, config.maxLines - lines.length - (reviewFooter ? 1 : 0))
+    if (room <= 0) {
+      if (reviewFooter) lines.push(clipToWidth(reviewFooter))
+      return assemble(lines, config.maxChars, config.maxLines)
+    }
 
     // Wrap everything first, then window over the wrapped lines. Windowing
     // over segments and wrapping after means one long sentence silently eats
@@ -1300,6 +1348,9 @@ function renderCue(state: UiState, scrollBack = 0): string {
     // Say so when you are not at the live end, or a paused view of an old line
     // reads as a transcript that has stopped moving.
     if (scroll > 0) lines.push(clipToWidth(`  ^ ${scroll} more below - scroll down for live`))
+    if (reviewFooter) lines.push(clipToWidth(reviewFooter))
+  } else if (reviewFooter) {
+    lines.push('', 'No transcript yet', clipToWidth(reviewFooter))
   } else if (session?.active) {
     // Name which half is quiet. "Nothing heard yet" is true whether the mic is
     // dead, the chunks never left, or the hub transcribed them to nothing —
@@ -1337,6 +1388,9 @@ function assistantMessageLines(chat: AssistantChat | null): string[] {
 export function assistantScrollMax(state: UiState): number {
   if (state.view.kind !== 'assistant' || state.view.phase !== 'chat' || state.assistantRecording) return 0
   const room = Math.max(1, config.maxLines - 2)
+  if (state.assistantReviewing) {
+    return Math.max(0, transcriptLines(state.coachSession?.recentSegments ?? []).length - room)
+  }
   return Math.max(0, assistantMessageLines(state.assistantChat).length - room)
 }
 
@@ -1357,24 +1411,32 @@ function renderAssistant(state: UiState): string {
   const label = view.provider === 'claude' ? 'Claude' : 'ChatGPT'
   const status = state.assistantRecording
     ? 'REC'
-    : state.assistantSending
-      ? 'sending'
-      : state.assistantChat?.busy
-        ? 'thinking'
-        : 'ready'
+    : state.assistantReviewing
+      ? 'REVIEW'
+      : state.assistantSending
+        ? 'sending'
+        : state.assistantChat?.busy
+          ? 'thinking'
+          : 'ready'
   const footer = state.assistantRecording
-    ? '[mic] click to send'
-    : state.assistantSending
-      ? 'Transcribing and sending...'
-      : state.assistantChat?.busy
-        ? `${label} is thinking...`
-        : '[mic] click to speak'
+    ? 'click stops to review'
+    : state.assistantReviewing
+      ? 'click sends - back discards'
+      : state.assistantSending
+        ? 'Transcribing and sending...'
+        : state.assistantChat?.busy
+          ? `${label} is thinking...`
+          : '[mic] click to speak'
   const room = Math.max(1, config.maxLines - 2)
   let content: string[]
 
-  if (state.assistantRecording) {
+  if (state.assistantRecording || state.assistantReviewing) {
     const segments = state.coachSession?.recentSegments ?? []
-    content = segments.length > 0 ? transcriptLines(segments) : ['Recording...', 'Speak, then click to send.']
+    content = segments.length > 0
+      ? transcriptLines(segments)
+      : state.assistantReviewing
+        ? ['No transcript yet.', 'Back discards.']
+        : ['Recording...', 'Speak, then click to review.']
   } else {
     content = assistantMessageLines(state.assistantChat)
     if (content.length === 0) content = ['No messages yet.']

@@ -241,7 +241,7 @@ const handlers = {
     }
 
     const transcript = segments
-      .slice(-16)
+      .slice(input.finalNote ? -64 : -16)
       .map(segment => `${segment.speaker || 'someone'}: ${trimText(segment.text, 500)}`)
       .join('\n')
     const mode = input.mode ?? {}
@@ -265,6 +265,11 @@ ${JSON.stringify(input.previousRunningNote ?? null, null, 2)}
 
 Recent transcript:
 ${transcript}
+
+${input.finalNote ? `The session has ended. This result will become the saved note, not a live interruption.
+Return kind "recap" with up to three concrete lines that summarize the complete transcript's main thread,
+important decisions or connections, and next action or unresolved point. The first line must identify the
+note clearly in the Notes list. Preserve the same ideas in runningNote. Do not return quiet.` : ''}
 `
 
     const reply = await think(prompt, 90_000)

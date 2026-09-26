@@ -189,6 +189,21 @@ export class Checklists {
     return { ok: true }
   }
 
+  updateNote(checklistId, noteId, text, by = 'listen-ai', now = Date.now()) {
+    if (!this.templates.has(checklistId)) {
+      return { ok: false, error: `unknown checklist "${checklistId}"` }
+    }
+    const note = this.notes_.get(checklistId)?.find(row => row.id === noteId)
+    if (!note) return { ok: false, error: 'unknown note' }
+    const body = String(text ?? '').trim().slice(0, 400)
+    if (!body) return { ok: false, error: 'empty note' }
+    note.text = body
+    note.by = String(by || note.by || 'me').slice(0, 16)
+    this.#log({ type: 'checklist_note_update', checklistId, noteId, text: body, by: note.by, at: now })
+    this.#persist()
+    return { ok: true }
+  }
+
   removeNote(checklistId, noteId) {
     if (!this.templates.has(checklistId)) {
       return { ok: false, error: `unknown checklist "${checklistId}"` }

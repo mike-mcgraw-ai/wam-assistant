@@ -1,6 +1,6 @@
 import http from 'node:http'
 import crypto from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { createReadStream, readFileSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -33,6 +33,8 @@ const CONFIG_PATH = process.env.CONFIG_PATH || join(HERE, 'boards.config.json')
 
 const CHECKLISTS_PATH = process.env.CHECKLISTS_PATH || join(HERE, 'checklists.config.json')
 const DATA_DIR = process.env.DATA_DIR || join(HERE, '..', 'data')
+const DOWNLOADS_DIR = process.env.DOWNLOADS_DIR || join(HERE, '..', 'downloads')
+const PHONE_PACKAGE_PATH = process.env.PHONE_PACKAGE_PATH || join(DOWNLOADS_DIR, 'wam-latest.ehpk')
 const AI_CUE_INTERVAL_MS = Math.max(30_000, Number(process.env.AI_CUE_INTERVAL_MS || 2 * 60_000))
 const AI_CUE_LULL_MS = Math.max(3_000, Number(process.env.AI_CUE_LULL_MS || 8_000))
 const AI_CUE_NOTIFY = process.env.AI_CUE_NOTIFY === '1'
@@ -375,6 +377,31 @@ function latestCoachModelCue(space, coachSnapshot, now = Date.now()) {
   return latestCoachModelCueForSession(space, coachSnapshot.session?.id, now)
 }
 
+function coachAiState(session) {
+  if (!session) return null
+  const segmentCount = Number(session.segmentCount) || 0
+  const latest = [...jobs.jobs.values()]
+    .filter(job => job.capability === 'coach.cue' && job.input?.sessionId === session.id)
+    .sort((a, b) => b.updatedAt - a.updatedAt)[0]
+
+  if (!latest) return { status: 'listening', segmentCount: 0, updatedAt: null }
+  const sourceSegmentCount = Number(latest.input?.session?.segmentCount) || 0
+  if (sourceSegmentCount < segmentCount) {
+    return { status: 'listening', segmentCount: sourceSegmentCount, updatedAt: latest.updatedAt }
+  }
+  if ([JOB.QUEUED, JOB.CLAIMED].includes(latest.status)) {
+    return { status: 'thinking', segmentCount: sourceSegmentCount, updatedAt: latest.updatedAt }
+  }
+  if (latest.status === JOB.FAILED) {
+    return { status: 'error', segmentCount: sourceSegmentCount, updatedAt: latest.updatedAt }
+  }
+  return {
+    status: latest.result?.quiet === true ? 'quiet' : 'cue',
+    segmentCount: sourceSegmentCount,
+    updatedAt: latest.updatedAt,
+  }
+}
+
 function modelRunningNote(modelResult, fallback = null) {
   const raw = modelResult?.runningNote
   const sourceLines = Array.isArray(raw?.lines)
@@ -412,6 +439,7 @@ function coachSnapshotWithModel(space, now = Date.now()) {
     snapshot.session = {
       ...snapshot.session,
       runningNote: modelRunningNote(modelCue, snapshot.session.runningNote),
+      aiState: coachAiState(snapshot.session),
     }
   }
   return { snapshot, modelCue }
@@ -443,6 +471,17 @@ function modelNoteSummary(modelResult) {
   const note = modelRunningNote(modelResult)
   if (!note?.lines?.length) return null
   return note.lines.slice(0, 3).join('\n').slice(0, 400)
+}
+
+function applyFinalListenSummary(job, modelResult) {
+  const target = job?.input?.finalNote
+  if (!target?.subjectId || !target?.noteId) return { ok: false, error: 'no final note target' }
+  const summary = modelNoteSummary(modelResult)
+  if (!summary) return { ok: false, error: 'model returned no summary' }
+  if (target.kind === 'chore') {
+    return checklists.updateNote(target.subjectId, target.noteId, summary, 'listen-ai')
+  }
+  return tasks.updateNote(target.subjectId, target.noteId, summary, 'listen-ai')
 }
 
 function upgradeListenNoteSummaries() {
@@ -488,32 +527,36 @@ function scheduleCoachCue(session) {
   coachCueTimers.set(session.id, timer)
 }
 
-function queueCoachCue(space, { reason = 'poll', priority = 'normal' } = {}) {
-  const safeSpace = cueSpace(space)
-  const now = Date.now()
-  const { snapshot, modelCue } = coachSnapshotWithModel(safeSpace, now)
-  const session = snapshot.session
-  if (!session?.active) return null
-
-  const sourceSession = coach.currentSession(safeSpace)
-  const recentSegments = coalesceTranscriptSegments(sourceSession?.segments ?? session.recentSegments)
-    .slice(-32)
+function createCoachCueJob(session, {
+  reason = 'poll',
+  priority = 'normal',
+  finalNote = null,
+  previousRunningNote = null,
+} = {}) {
+  if (!session) return null
+  const safeSpace = cueSpace(session.space)
+  const recentSegments = coalesceTranscriptSegments(session.segments ?? session.recentSegments)
+    .slice(finalNote ? -64 : -32)
+  if (recentSegments.length === 0) return null
+  const mode = coach.getMode(session.modeId) ?? coach.activeMode(safeSpace)
+  const segmentCount = session.segments?.length ?? session.segmentCount ?? recentSegments.length
   return jobs.create({
     capability: 'coach.cue',
     input: {
       space: safeSpace,
       reason,
-      mode: snapshot.mode,
+      mode,
       sessionId: session.id,
       session: {
         id: session.id,
         title: session.title,
         startedAt: session.startedAt,
         updatedAt: session.updatedAt,
-        segmentCount: session.segmentCount,
+        segmentCount,
       },
       recentSegments,
-      previousRunningNote: modelRunningNote(modelCue, session.runningNote),
+      previousRunningNote,
+      ...(finalNote ? { finalNote } : {}),
       constraints: {
         titleChars: 30,
         lineChars: 44,
@@ -524,9 +567,25 @@ function queueCoachCue(space, { reason = 'poll', priority = 'normal' } = {}) {
     },
     // A transcript revision is the unit of thought. Audio ingestion debounces
     // this until a lull, and deliberate polls dedupe against the same revision.
-    idempotencyKey: `coach.cue:${session.id}:segments:${session.segmentCount}`,
+    idempotencyKey: finalNote
+      ? `coach.cue:${session.id}:final:${segmentCount}`
+      : `coach.cue:${session.id}:segments:${segmentCount}`,
     priority,
     replaceQueued: true,
+  })
+}
+
+function queueCoachCue(space, { reason = 'poll', priority = 'normal' } = {}) {
+  const safeSpace = cueSpace(space)
+  const now = Date.now()
+  const { snapshot, modelCue } = coachSnapshotWithModel(safeSpace, now)
+  const session = snapshot.session
+  const sourceSession = coach.currentSession(safeSpace)
+  if (!session?.active || !sourceSession) return null
+  return createCoachCueJob(sourceSession, {
+    reason,
+    priority,
+    previousRunningNote: modelRunningNote(modelCue, session.runningNote),
   })
 }
 
@@ -713,19 +772,34 @@ function routeCoachSession(session, at = Date.now()) {
   const contextTaskId = session.context?.taskId
   if (contextTaskId && tasks.has(contextTaskId)) {
     const result = tasks.addNote(contextTaskId, noteText, noteBy, noteId, at)
-    return { kind: 'task', taskId: contextTaskId, result }
+    return {
+      kind: 'task',
+      taskId: contextTaskId,
+      result,
+      summaryTarget: { kind: 'task', subjectId: contextTaskId, noteId },
+    }
   }
 
   const contextChoreId = session.context?.choreId
   if (contextChoreId && checklists.templates.has(contextChoreId)) {
     const result = checklists.addNote(contextChoreId, noteText, noteBy, noteId, at)
-    return { kind: 'chore', choreId: contextChoreId, result }
+    return {
+      kind: 'chore',
+      choreId: contextChoreId,
+      result,
+      summaryTarget: { kind: 'chore', subjectId: contextChoreId, noteId },
+    }
   }
 
   const capture = ensureCaptureTask(space, at)
   const taskId = capture.task?.id || CAPTURE_TASK_ID
   const result = tasks.addNote(taskId, noteText, noteBy, noteId, at)
-  return { kind: 'capture', taskId, result }
+  return {
+    kind: 'capture',
+    taskId,
+    result,
+    summaryTarget: { kind: 'task', subjectId: taskId, noteId },
+  }
 }
 
 function summaryText(text, max = 88) {
@@ -899,7 +973,7 @@ async function drainTranscriptions() {
 
 function cors(res) {
   res.setHeader('Access-Control-Allow-Origin', process.env.ALLOWED_ORIGIN || '*')
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, HEAD, OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
   res.setHeader('Access-Control-Max-Age', '86400')
 }
@@ -913,6 +987,45 @@ function json(res, code, body) {
     'Cache-Control': 'no-store',
   })
   res.end(payload)
+}
+
+function phonePackageName() {
+  try {
+    const app = JSON.parse(readFileSync(join(HERE, '..', '..', 'glasses', 'app.json'), 'utf8'))
+    return `wam-${app.version || 'latest'}.ehpk`
+  } catch {
+    return 'wam-latest.ehpk'
+  }
+}
+
+function servePhonePackage(req, res) {
+  let stats
+  try {
+    stats = statSync(PHONE_PACKAGE_PATH)
+  } catch {
+    return json(res, 404, {
+      error: 'no phone package yet',
+      hint: 'run npm run pack:private from glasses/',
+    })
+  }
+
+  if (!stats.isFile()) return json(res, 404, { error: 'phone package path is not a file' })
+
+  cors(res)
+  res.writeHead(200, {
+    'Content-Type': 'application/octet-stream',
+    'Content-Length': stats.size,
+    'Content-Disposition': `attachment; filename="${phonePackageName()}"`,
+    'Cache-Control': 'no-store',
+  })
+  if (req.method === 'HEAD') return res.end()
+
+  const stream = createReadStream(PHONE_PACKAGE_PATH)
+  stream.on('error', err => {
+    if (!res.headersSent) return json(res, 500, { error: err.message })
+    res.destroy(err)
+  })
+  return stream.pipe(res)
 }
 
 function readBody(req, limitBytes = 256 * 1024) {
@@ -951,6 +1064,11 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(204)
     res.end()
     return
+  }
+
+  if ((req.method === 'GET' || req.method === 'HEAD')
+    && (url.pathname === '/downloads/latest' || url.pathname === '/downloads/latest.ehpk')) {
+    return servePhonePackage(req, res)
   }
 
   // ---- the capture page -------------------------------------------------
@@ -1168,7 +1286,7 @@ const server = http.createServer(async (req, res) => {
     })
   }
 
-  const coachSessionMatch = url.pathname.match(/^\/coach\/session\/([^/]+)\/(segment|audio|end)$/)
+  const coachSessionMatch = url.pathname.match(/^\/coach\/session\/([^/]+)\/(segment|audio|end|discard)$/)
   if (req.method === 'POST' && coachSessionMatch) {
     if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
     const [, sessionId, action] = coachSessionMatch
@@ -1178,6 +1296,16 @@ const server = http.createServer(async (req, res) => {
       if (raw) body = JSON.parse(raw)
     } catch (err) {
       return json(res, 400, { error: `bad body: ${err.message}` })
+    }
+
+    if (action === 'discard') {
+      const id = decodeURIComponent(sessionId)
+      const timer = coachCueTimers.get(id)
+      if (timer) clearTimeout(timer)
+      coachCueTimers.delete(id)
+      const result = coach.removeSession(id)
+      if (result.ok) jobs.removeForCoachSession(id)
+      return json(res, result.ok ? 200 : 404, result)
     }
 
     if (action === 'end') {
@@ -1190,7 +1318,18 @@ const server = http.createServer(async (req, res) => {
       const note = session && session.context?.taskId !== '__assistant__'
         ? routeCoachSession(session, body.at)
         : null
-      if (session) jobs.discardQueuedCoachCuesForSession(session.id)
+      if (session) {
+        jobs.discardQueuedCoachCuesForSession(session.id)
+        if (note?.result?.ok && note.summaryTarget) {
+          const prior = latestCoachModelCueForSession(cueSpace(session.space), session.id, Date.now(), false)
+          createCoachCueJob(session, {
+            reason: 'session-end',
+            priority: 'now',
+            finalNote: note.summaryTarget,
+            previousRunningNote: modelRunningNote(prior),
+          })
+        }
+      }
       return json(res, result.ok ? 200 : 404, { ...result, note })
     }
 
@@ -1480,6 +1619,11 @@ const server = http.createServer(async (req, res) => {
           const applied = applyTriageResult(body.result)
           console.log(`[triage] applied ${applied} item(s) from ${agent}`)
         }
+        if (result.ok && job?.capability === 'coach.cue' && job.input?.finalNote) {
+          const applied = applyFinalListenSummary(job, body.result)
+          if (applied.ok) console.log(`[coach] applied final Listen summary from ${agent}`)
+          else console.warn(`[coach] could not apply final Listen summary: ${applied.error}`)
+        }
       } else {
         result = jobs.fail(id, agent, body.error, body.retry !== false)
       }
@@ -1683,6 +1827,7 @@ server.listen(PORT, HOST, () => {
   console.log(`[server] listening on http://${HOST}:${PORT}`)
   console.log(`[server] ${store.index.size} metrics across ${config.boards.length} boards`)
   console.log(`[server] capture page at http://<your-lan-ip>:${PORT}/`)
+  console.log(`[server] phone package at http://<your-tailnet-host>:${PORT}/downloads/latest`)
   console.log(`[server] ${checklists.templates.size} checklists, day ${checklists.dayKey()} (reset ${checklists.resetHour}:00 ${checklists.timezone})`)
 })
 

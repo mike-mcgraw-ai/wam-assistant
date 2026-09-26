@@ -24,3 +24,19 @@ test('stale Coach cleanup never removes unrelated work', () => {
   assert.equal(jobs.available('coach.cue').length, 1)
   assert.equal(jobs.available('assistant.chat').length, 1)
 })
+
+test('a final Listen summary remains available after its session ends', () => {
+  const jobs = makeJobs()
+  const final = jobs.create({
+    capability: 'coach.cue',
+    input: {
+      sessionId: 'ended',
+      finalNote: { kind: 'task', subjectId: 'captured-notes', noteId: 'ended:note' },
+    },
+    idempotencyKey: 'ended-final',
+  }).job
+
+  assert.deepEqual(jobs.availableCoachCues([]).map(job => job.id), [final.id])
+  assert.equal(jobs.discardStaleCoachCues([]), 0)
+  assert.equal(jobs.available('coach.cue').length, 1)
+})

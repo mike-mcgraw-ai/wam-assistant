@@ -24,6 +24,7 @@ import {
   completeInboxItem,
   completeTask,
   deleteNote,
+  discardCoachSession,
   fetchAssistantChat,
   fetchNoteTranscript,
   endCoachSession,
@@ -140,12 +141,14 @@ const state: UiState = {
   alertsOnly: false,
   plan: null,
   planLoading: false,
+  planError: null,
   cue: null,
   coachSession: null,
   coachModes: [],
   coachModeId: null,
   assistantChat: null,
   assistantRecording: false,
+  assistantReviewing: false,
   assistantSending: false,
   noteTranscript: null,
   cueReturn: null,
@@ -160,6 +163,7 @@ const state: UiState = {
   armedTaskId: null,
   stickyDone: new Set<string>(),
   armedNoteId: null,
+  listenReviewing: false,
   foreground: true,
   lastAudioAt: null,
   audio: { open: false, frames: 0, chunks: 0, sent: 0, rejected: 0, lastRms: 0, kind: '-', raw: 0, error: null },
@@ -241,13 +245,18 @@ async function paint(): Promise<void> {
 let paintErrors = 0
 let inFlight = false
 
+function clearArmedConfirms(): void {
+  state.armedTaskId = null
+  state.armedNoteId = null
+  if (state.view.kind === 'cue') state.view.startArmed = false
+}
+
 async function sleepDisplay(): Promise<void> {
   if (asleep) return
   asleep = true
   // An armed confirm must not survive the nap. Waking and tapping once should
   // never complete something you armed before you put them down.
-  state.armedTaskId = null
-  state.armedNoteId = null
+  clearArmedConfirms()
   await paint()
 }
 
@@ -288,6 +297,15 @@ async function refresh(): Promise<void> {
       // blanking: aging data that is visibly marked as aging beats no data.
       state.error = result.error
     }
+    if (state.view.kind === 'plan' || state.view.kind === 'notes' || state.view.kind === 'note') {
+      const plan = await fetchPlan(state.space)
+      if (plan.ok) {
+        state.plan = plan.plan
+        state.planError = null
+      } else if (state.view.kind === 'plan') {
+        state.planError = plan.error
+      }
+    }
     state.loading = false
     // Keep polling while the game is up — you want current data the moment
     // you quit — but do not repaint over the field. Asleep, keep fetching and
@@ -305,6 +323,17 @@ function copyView(view: View): View {
 
 function homeView(): View {
   return state.space === 'life' ? { kind: 'plan', cursor: 0 } : { kind: 'index', cursor: 0 }
+}
+
+async function openNotes(cursor = 0): Promise<void> {
+  state.noteTranscript = null
+  state.view = { kind: 'notes', cursor }
+  state.scrollTop = Math.max(0, cursor)
+  const plan = await fetchPlan(state.space)
+  if (plan.ok) state.plan = plan.plan
+  else state.error = plan.error
+  clampCursor()
+  await paint()
 }
 
 function dismissCue(): void {
@@ -353,6 +382,8 @@ async function refreshCoachSession(): Promise<void> {
     state.coachSession = result.session
     state.coachModes = result.modes ?? state.coachModes
     state.coachModeId = result.mode.id
+    if (!result.session?.active) state.listenReviewing = false
+    if (!result.session && state.assistantReviewing) state.assistantReviewing = false
     if (result.cue && (!state.cue || result.cue.createdAt >= state.cue.createdAt)) state.cue = result.cue
     state.error = null
   } else {
@@ -606,8 +637,9 @@ async function syncAudioToCoachSession(): Promise<void> {
  * It used to start a session when none was running, which made opening the
  * screen to look at it the same gesture as recording — so checking on it while
  * stopped started it, and the only way back out was to open the menu again and
- * pick Listen a second time to cancel. Menu opens; the click on this screen
- * starts and stops. One gesture, one meaning.
+ * pick Listen a second time to cancel. Menu opens; the first click on this
+ * screen arms the microphone, and the second starts it. One gesture, one
+ * meaning, with a visible cancel point in between.
  */
 async function openListening(context: ListenContext | undefined = undefined): Promise<void> {
   const current = await fetchCoachSession(state.space)
@@ -615,6 +647,7 @@ async function openListening(context: ListenContext | undefined = undefined): Pr
     state.coachSession = current.session
     state.coachModes = current.modes ?? state.coachModes
     state.coachModeId = current.mode.id
+    if (!current.session?.active) state.listenReviewing = false
   }
   else state.error = current.error
 
@@ -680,8 +713,8 @@ function currentTaskContext(): ListenContext {
  * than we thought" is about laundry, and nothing in the sentence says so.
  *
  * Opening never starts the microphone. It lands on the mode picker with this
- * subject retained; only the explicit Start listening row begins recording.
- * Clicking an active contextual Listen still stops the existing session.
+ * subject retained; only a confirmed click begins recording. Clicking an
+ * active contextual Listen still stops the existing session.
  */
 async function talkAbout(context: ListenContext): Promise<void> {
   if (state.coachSession?.active) {
@@ -702,6 +735,7 @@ async function beginListening(): Promise<void> {
   }
   state.coachSession = started.session
   state.coachModeId = started.session.modeId
+  state.listenReviewing = false
   await startAudioCapture(started.session.id)
   if (!audioOpen) localCoachCue('Mic did not open', ['Glasses audioControl returned false.'])
   state.error = null
@@ -718,6 +752,7 @@ async function refreshAssistant(provider: AssistantProvider): Promise<void> {
 
 async function openAssistant(): Promise<void> {
   state.assistantRecording = false
+  state.assistantReviewing = false
   state.assistantSending = false
   state.assistantChat = null
   state.view = { kind: 'assistant', phase: 'providers', cursor: 0 }
@@ -744,6 +779,7 @@ async function startAssistantCapture(provider: AssistantProvider): Promise<void>
   }
   state.coachSession = started.session
   state.assistantRecording = true
+  state.assistantReviewing = false
   state.assistantSending = false
   state.error = null
   await startAudioCapture(started.session.id)
@@ -751,6 +787,87 @@ async function startAssistantCapture(provider: AssistantProvider): Promise<void>
 }
 
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+async function waitForTranscriptionsToDrain(): Promise<void> {
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    const snapshot = await fetchSnapshot()
+    if (snapshot.ok) state.snapshot = snapshot.snapshot
+    if ((state.snapshot?.stt?.pending ?? 0) <= 0) return
+    await wait(500)
+  }
+}
+
+async function reviewListeningSession(): Promise<void> {
+  const sessionId = state.coachSession?.id
+  if (!sessionId) return
+
+  state.listenReviewing = true
+  await stopAudioCapture()
+  await paint()
+  await waitForTranscriptionsToDrain()
+  await refreshCoachSession()
+  state.listenReviewing = state.coachSession?.id === sessionId && state.coachSession.active
+  await paint()
+}
+
+async function saveReviewedListeningSession(): Promise<void> {
+  const sessionId = state.coachSession?.id
+  if (!sessionId) {
+    state.listenReviewing = false
+    await paint()
+    return
+  }
+
+  state.listenReviewing = false
+  const stopped = await endCoachSession(sessionId)
+  if (stopped.ok) state.coachSession = stopped.session
+  else state.error = stopped.error
+  await paint()
+
+  const summary = await fetchSessionSummary(sessionId)
+  if (summary && state.view.kind === 'cue') {
+    localCoachCue(summary.title, summary.lines)
+    await paint()
+  }
+}
+
+async function discardListeningSession(): Promise<void> {
+  const sessionId = state.coachSession?.id
+  await stopAudioCapture()
+  state.listenReviewing = false
+  if (sessionId) {
+    const discarded = await discardCoachSession(sessionId)
+    if (!discarded.ok) {
+      state.error = discarded.error
+      await paint()
+      return
+    }
+  }
+  state.coachSession = null
+  state.cue = null
+  state.error = null
+  dismissCue()
+  await paint()
+}
+
+async function reviewAssistantCapture(): Promise<void> {
+  const sessionId = state.coachSession?.id
+  if (!sessionId) {
+    state.assistantRecording = false
+    state.error = 'No recording to review'
+    await paint()
+    return
+  }
+
+  state.assistantRecording = false
+  state.assistantReviewing = true
+  await stopAudioCapture()
+  await paint()
+  await waitForTranscriptionsToDrain()
+  await refreshCoachSession()
+  state.assistantReviewing = state.coachSession?.id === sessionId
+  await paint()
+}
 
 async function finishAssistantCapture(provider: AssistantProvider): Promise<void> {
   const sessionId = state.coachSession?.id
@@ -762,10 +879,11 @@ async function finishAssistantCapture(provider: AssistantProvider): Promise<void
   }
 
   state.assistantRecording = false
+  state.assistantReviewing = false
   state.assistantSending = true
-  await stopAudioCapture()
   await paint()
 
+  await waitForTranscriptionsToDrain()
   let sent: Awaited<ReturnType<typeof sendAssistantSession>> | null = null
   for (let attempt = 0; attempt < 24; attempt += 1) {
     const snapshot = await fetchSnapshot()
@@ -796,9 +914,14 @@ async function finishAssistantCapture(provider: AssistantProvider): Promise<void
 async function cancelAssistantCapture(): Promise<void> {
   const sessionId = state.coachSession?.id
   await stopAudioCapture()
-  if (sessionId) await endCoachSession(sessionId)
-  state.coachSession = null
+  if (sessionId) {
+    const discarded = await discardCoachSession(sessionId)
+    if (!discarded.ok) state.error = discarded.error
+    else state.error = null
+  }
+  if (!state.error) state.coachSession = null
   state.assistantRecording = false
+  state.assistantReviewing = false
   state.assistantSending = false
 }
 
@@ -923,6 +1046,7 @@ function move(delta: number): void {
   }
 
   if (view.kind === 'cue') {
+    view.startArmed = false
     if (!state.coachSession && state.coachModes.length > 0) {
       view.modeCursor = Math.max(
         0,
@@ -1147,8 +1271,10 @@ async function openPlan(): Promise<void> {
   state.planLoading = false
   if (result.ok) {
     state.plan = result.plan
+    state.planError = null
     state.error = null
   } else {
+    state.planError = result.error
     state.error = result.error
   }
   await paint()
@@ -1261,35 +1387,31 @@ async function activate(): Promise<void> {
       await paint()
       return
     }
-    if (state.assistantRecording) await finishAssistantCapture(view.provider)
+    if (state.assistantRecording) await reviewAssistantCapture()
+    else if (state.assistantReviewing) await finishAssistantCapture(view.provider)
     else await startAssistantCapture(view.provider)
     return
   }
 
   if (view.kind === 'cue') {
-    // Click here ends the session. Deliberate, on the screen showing what it
-    // has captured, rather than as a side effect of opening the menu.
+    // Click here stops the microphone first, then asks for a deliberate save.
+    // A live transcript can be visibly wrong; stopping must leave a way out
+    // before those words are filed as a note.
     if (state.coachSession?.active) {
-      const sessionId = state.coachSession.id
-      const stopped = await endCoachSession(sessionId)
-      await stopAudioCapture()
-      if (stopped.ok) state.coachSession = stopped.session
-      else state.error = stopped.error
-      // Land on the transcript immediately; the summary replaces the cue when
-      // and if the hub produces one. Waiting for it before painting would mean
-      // staring at a live-looking screen for however long inference takes.
-      await paint()
-      const summary = await fetchSessionSummary(sessionId)
-      if (summary && state.view.kind === 'cue') {
-        localCoachCue(summary.title, summary.lines)
-        await paint()
-      }
+      if (state.listenReviewing) await saveReviewedListeningSession()
+      else await reviewListeningSession()
       return
     }
     if (!state.coachSession && state.coachModes.length > 0) {
       const cursor = view.modeCursor ?? 0
       const mode = state.coachModes[cursor]
       if (mode) {
+        if (!view.startArmed) {
+          view.startArmed = true
+          await paint()
+          return
+        }
+        view.startArmed = false
         const activated = await activateCoachMode(state.space, mode.id)
         if (activated.ok) {
           state.coachModeId = activated.mode.id
@@ -1302,9 +1424,14 @@ async function activate(): Promise<void> {
         return
       }
     }
-    // Stopped: this click starts it. Leaving is the double-tap, same as every
-    // other screen. Click used to dismiss, which left no way to start from
-    // here at all and pushed starting back into the menu.
+    // Stopped: first click arms, second click starts. Leaving is the double-tap,
+    // same as every other screen; movement also disarms.
+    if (!view.startArmed) {
+      view.startArmed = true
+      await paint()
+      return
+    }
+    view.startArmed = false
     await beginListening()
     return
   }
@@ -1315,10 +1442,7 @@ async function activate(): Promise<void> {
       await talkAbout(null)
       return
     }
-    state.view = { kind: 'notes', cursor: 0 }
-    state.scrollTop = 0
-    clampCursor()
-    await paint()
+    await openNotes()
     return
   }
 
@@ -1589,11 +1713,7 @@ async function activate(): Promise<void> {
       // Captured notes is the same collection exposed by the Notes menu, not
       // an ordinary task with a competing detail screen.
       if (row.task.taskId === CAPTURE_TASK_ID) {
-        state.noteTranscript = null
-        state.view = { kind: 'notes', cursor: 0 }
-        state.scrollTop = 0
-        clampCursor()
-        await paint()
+        await openNotes()
         return
       }
       // Open it rather than tick it. A one-off usually has something you need
@@ -1697,7 +1817,13 @@ async function back(): Promise<void> {
   }
 
   if (state.view.kind === 'assistant') {
-    if (state.assistantRecording || state.assistantSending) await cancelAssistantCapture()
+    if (state.assistantRecording || state.assistantReviewing || state.assistantSending) {
+      await cancelAssistantCapture()
+      if (state.error) {
+        await paint()
+        return
+      }
+    }
     if (state.view.phase === 'chat') {
       state.assistantChat = null
       state.view = { kind: 'assistant', phase: 'providers', cursor: 0 }
@@ -1712,6 +1838,10 @@ async function back(): Promise<void> {
   }
 
   if (state.view.kind === 'cue') {
+    if (state.listenReviewing && state.coachSession?.active) {
+      await discardListeningSession()
+      return
+    }
     dismissCue()
     await paint()
     return
@@ -1852,10 +1982,7 @@ async function onMenu(itemID: number): Promise<void> {
       await paint()
       break
     case MENU.NOTES:
-      state.view = { kind: 'notes', cursor: 0 }
-      state.scrollTop = 0
-      clampCursor()
-      await paint()
+      await openNotes()
       break
     case MENU.COACH:
       await openCoachCue()
@@ -2059,8 +2186,7 @@ bridge.onEvenHubEvent((event: EvenHubEvent) => {
     // armed confirm does not survive the trip — coming back to a row already
     // asking "done?" is one tap from ticking off something you never did.
     state.foreground = false
-    state.armedTaskId = null
-    state.armedNoteId = null
+    clearArmedConfirms()
     state.lastEvent = `sys${sysType}`
     void stopAudioCapture()
     return

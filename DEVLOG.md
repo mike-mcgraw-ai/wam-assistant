@@ -14,3 +14,4 @@ These are the real completion dates of private device builds. The sanitized port
 | v0.8.0 | 2026-09-17 | 0.83.0 | **A conversation compass:** Selectable modes preserve the main thread, current topic, and parked tangent. |
 | v0.9.0 | 2026-09-20 | 0.87.0 | **Assistant turns:** Voice requests reach local assistants and routing operates on complete thoughts. |
 | v0.10.0 | 2026-09-21 | 0.89.0 | **Useful without a model:** Deterministic local distillation keeps captured notes readable when the AI worker is unavailable. |
+| v0.11.0 | 2026-09-26 | 0.95.0 | **Review before committing:** Voice notes and assistant turns can be checked or discarded before saving or sending. |

@@ -5,6 +5,7 @@ import type {
   BlockPlan,
   ChecklistsState,
   CoachCueResponse,
+  CoachSessionDiscardResponse,
   CoachMode,
   CoachSessionResponse,
   CoachSessionWriteResponse,
@@ -424,6 +425,34 @@ export const startCoachSession = (
 
 export const endCoachSession = (sessionId: string) =>
   postCoach(`/coach/session/${encodeURIComponent(sessionId)}/end`, {})
+
+export async function discardCoachSession(
+  sessionId: string,
+): Promise<CoachSessionDiscardResponse> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), config.timeoutMs)
+  try {
+    const res = await fetch(`${config.serverUrl}/coach/session/${encodeURIComponent(sessionId)}/discard`, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: '{}',
+      signal: controller.signal,
+    })
+    const payload = await res.json().catch(() => null)
+    if (!res.ok) return { ok: false, error: payload?.error ?? `server ${res.status}` }
+    return { ok: true }
+  } catch (err: unknown) {
+    const message =
+      err instanceof DOMException && err.name === 'AbortError'
+        ? 'timeout'
+        : err instanceof Error
+          ? err.message
+          : 'network error'
+    return { ok: false, error: message.slice(0, 40) }
+  } finally {
+    clearTimeout(timer)
+  }
+}
 
 export async function sendCoachAudio(
   sessionId: string,

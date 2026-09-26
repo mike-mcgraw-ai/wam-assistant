@@ -354,6 +354,11 @@ export interface CoachSessionSummary {
   segmentCount: number
   recentSegments: CoachSegment[]
   runningNote: CoachRunningNote | null
+  aiState?: {
+    status: 'listening' | 'thinking' | 'quiet' | 'cue' | 'error'
+    segmentCount: number
+    updatedAt: number | null
+  } | null
   lastCueAt: number | null
   lastRecapAt: number | null
 }
@@ -373,6 +378,10 @@ export type CoachSessionResponse =
 
 export type CoachSessionWriteResponse =
   | { ok: true; session: CoachSessionSummary; existing?: boolean }
+  | { ok: false; error: string }
+
+export type CoachSessionDiscardResponse =
+  | { ok: true }
   | { ok: false; error: string }
 
 export interface ChecklistStats {

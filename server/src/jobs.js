@@ -166,16 +166,16 @@ export class Jobs {
   }
 
   /**
-   * Coach cues only matter while their conversation is live. Return at most
-   * the newest queued snapshot per active session so a sleeping worker never
-   * replays every two-minute window when it wakes up.
+   * Live Coach cues only matter while their conversation is active. A final
+   * note job is deliberately different: it remains useful after Stop because
+   * its result replaces the fallback summary already saved for that session.
    */
   availableCoachCues(activeSessionIds = [], now = Date.now()) {
     const active = new Set(activeSessionIds.filter(Boolean))
     const newest = new Map()
     for (const job of this.available('coach.cue', now)) {
       const sessionId = job.input?.sessionId
-      if (!active.has(sessionId)) continue
+      if (!active.has(sessionId) && !job.input?.finalNote) continue
       const prior = newest.get(sessionId)
       if (!prior || job.updatedAt > prior.updatedAt) newest.set(sessionId, job)
     }
@@ -188,6 +188,7 @@ export class Jobs {
     let removed = 0
     for (const [id, job] of this.jobs) {
       if (job.capability !== 'coach.cue' || job.status !== JOB.QUEUED) continue
+      if (job.input?.finalNote) continue
       if (active.has(job.input?.sessionId)) continue
       this.jobs.delete(id)
       removed += 1
