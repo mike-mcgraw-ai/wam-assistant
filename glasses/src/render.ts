@@ -78,6 +78,7 @@ export type View =
   | { kind: 'cue'; scroll?: number; modeCursor?: number; startArmed?: boolean }
   | { kind: 'assistant'; phase: 'providers'; cursor: number }
   | { kind: 'assistant'; phase: 'chat'; provider: AssistantProvider; scroll?: number }
+  | { kind: 'timerReset'; done?: boolean; count?: number }
   | { kind: 'pong' }
   | { kind: 'fonttest'; page: number }
   | { kind: 'inbox'; group: string; cursor: number }
@@ -912,6 +913,56 @@ function renderPicker(state: UiState, cursor: number): string {
   return assemble(lines, config.maxChars, config.maxLines)
 }
 
+function activeTimerCount(state: UiState): number {
+  let count = 0
+  for (const run of state.snapshot?.checklists?.active ?? []) {
+    for (const item of run.items) {
+      if (item.done) continue
+      if (item.running || (item.stepKind === 'wait' && item.endsAt !== null)) count += 1
+    }
+  }
+  return count
+}
+
+function renderTimerReset(state: UiState): string {
+  const done = state.view.kind === 'timerReset' && state.view.done
+  const count = done && state.view.kind === 'timerReset'
+    ? state.view.count ?? 0
+    : activeTimerCount(state)
+  const plural = count === 1 ? '' : 's'
+
+  if (done) {
+    return assemble(
+      [
+        clockLine(state),
+        ruleCentred('Reset timers', false),
+        '',
+        `Canceled ${count} timer${plural}.`,
+        'Running order is clean.',
+        '',
+        'tap or dbl-tap to return',
+      ],
+      config.maxChars,
+      config.maxLines,
+    )
+  }
+
+  return assemble(
+    [
+      clockLine(state),
+      ruleCentred('Reset timers', false),
+      '',
+      count === 0 ? 'No active timers.' : `${count} active timer${plural}.`,
+      count === 0 ? 'Nothing to cancel.' : 'Tap cancels all active.',
+      'Done steps stay saved.',
+      '',
+      'dbl-tap backs out',
+    ],
+    config.maxChars,
+    config.maxLines,
+  )
+}
+
 function renderInbox(state: UiState, group: string, cursor: number): string {
   const items = inboxItems(state, group)
   if (items.length === 0) return `WAM\n\n${group} is clear.\n\ndbl-tap to go back`
@@ -1010,16 +1061,17 @@ function renderPlan(state: UiState, cursor: number): string {
   // the page it belonged to — visible here, only selectable on the next page.
   // Walking the boundaries makes the rule hold everywhere: what you can see,
   // you can select.
-  const ruleAtBody = body.findIndex(r => r.kind === 'chores')
   const FULL = config.maxLines - 2
   let start = 0
   let size = FULL
+  // Every page now ends in the hint line (v0.117.0): it moved off the Chores
+  // rule so the rule stays the same while the cursor moves, and on the glasses
+  // the hint is native text, so scrolling never redraws the list picture.
   for (;;) {
-    size = ruleAtBody >= start && ruleAtBody < start + FULL ? FULL : FULL - 1
+    size = FULL - 1
     if (bodyCursor < start + size || start + size >= body.length) break
     start += size
   }
-  const ruleShown = ruleAtBody >= start && ruleAtBody < start + size
   const win = { start, end: Math.min(body.length, start + size) }
 
   const lines: string[] = [clockLine(state), spaceLine(state, cursor === 0)]
@@ -1027,7 +1079,7 @@ function renderPlan(state: UiState, cursor: number): string {
     const row = body[i]
     const point = i === bodyCursor && cursor > 0 ? '>' : ' '
     if (row.kind === 'chores') {
-      lines.push(ruleCentred(planTip(state, rows, cursor), i === bodyCursor && cursor > 0))
+      lines.push(ruleCentred('Chores', i === bodyCursor && cursor > 0))
     } else if (row.kind === 'daily') {
       const selected = i === bodyCursor && cursor > 0
       if (selected && state.armedTaskId === `${row.runId}:${row.item.id}`) {
@@ -1054,7 +1106,7 @@ function renderPlan(state: UiState, cursor: number): string {
     }
   }
 
-  if (!ruleShown) lines.push(planTip(state, rows, cursor))
+  lines.push(planTip(state, rows, cursor))
 
   return assemble(lines, config.maxChars, config.maxLines)
 }
@@ -1673,6 +1725,8 @@ function renderView(state: UiState): string {
       return renderCue(state, state.view.scroll ?? 0)
     case 'assistant':
       return renderAssistant(state)
+    case 'timerReset':
+      return renderTimerReset(state)
     case 'pong':
       return state.pong ? renderPong(state.pong) : 'PONG\n\nloading...'
     case 'fonttest':

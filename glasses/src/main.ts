@@ -19,11 +19,13 @@ import {
 } from '@evenrealities/even_hub_sdk'
 
 import { config } from './config'
-import { dashboardFrame, TILES, TILE_H, TILE_W, hashTile, listenFrame, splitTiles, textFrame } from './fullpanel'
+import { PANEL_ROWS, dashboardFrame, TILES, TILE_H, TILE_W, hashTile, listenFrame, splitTiles, textFrame } from './fullpanel'
+import { measure } from './metrics'
 import { listenBoard } from './listenboard'
 import {
   activateCoachMode,
   beginStep,
+  resetActiveTimers,
   resetStep,
   checkItem,
   completeInboxItem,
@@ -91,6 +93,9 @@ import type { AssistantProvider } from './types'
 
 const CONTAINER_ID = 1
 const CONTAINER_NAME = 'board'
+/** Native text over the bottom-right tile: live timers, one text update per tick. */
+const TIMERS_ID = 6
+const TIMERS_NAME = 'timers'
 // Four 288x144 tiles covering the whole 576x288 panel (v0.103.0 claim).
 // Ordinary screens draw where the old centred bands sat; Listen uses all four.
 const IMAGE_CONTAINER_IDS = [2, 3, 4, 5] as const
@@ -113,6 +118,7 @@ const MENU = {
   LISTEN: 12,
   NOTES: 13,
   CHAT: 14,
+  RESET_TIMERS: 15,
   START: 10,
   EXIT: 9,
 } as const
@@ -246,8 +252,8 @@ const DIM = 0
 let compactFailures = 0
 /** Hash of what each tile currently shows; null means "unknown, send it". */
 let tileHashes: Array<number | null> = IMAGE_CONTAINER_IDS.map(() => null)
-/** The event-capture text layer only needs blanking once, not every paint. */
-let textLayerBlank = false
+/** What each native text container shows now; a write is skipped when equal. */
+const shownText = new Map<number, string>()
 let painting = false
 let repaintQueued = false
 
@@ -315,6 +321,100 @@ function dashboardRail() {
   }
 }
 
+/** Firmware-font pixels a native text line may use in the left column. */
+const LEFT_TEXT_PX = TILE_W - 12
+/** Firmware-font pixels for a timer row over the bottom-right tile. */
+const TIMER_TEXT_PX = TILE_W - 12
+/** Native text rows over one 144 px tile: 5 x 27 = 135. */
+const TIMER_ROWS = 5
+
+function clipNative(text: string, width: number): string {
+  if (measure(text) <= width) return text
+  let cut = text.length
+  while (cut > 0 && measure(`${text.slice(0, cut).trimEnd()}..`) > width) cut -= 1
+  return `${text.slice(0, cut).trimEnd()}..`
+}
+
+/**
+ * Write a native text container only when its content changed.
+ * Returns true when something was sent.
+ */
+async function setText(containerID: number, containerName: string, content: string): Promise<boolean> {
+  if (shownText.get(containerID) === content) return false
+  await bridge.textContainerUpgrade(
+    new TextContainerUpgrade({
+      containerID,
+      containerName,
+      content,
+      // Omitting this keeps whatever brightness the container had.
+      textColor: content.trim() ? BRIGHT : DIM,
+    }),
+  )
+  shownText.set(containerID, content)
+  return true
+}
+
+/**
+ * Render for the panel's row budget: PANEL_ROWS rows, plus the clock line on
+ * screens that start with one (dashboardContent drops it; the rail has the
+ * time). A screen without a clock line is rendered again with one row less,
+ * rather than losing its last row off the bottom.
+ */
+function renderForPanel(): string {
+  const saved = config.maxLines
+  try {
+    config.maxLines = PANEL_ROWS + 1
+    const withClock = render(state)
+    if (dashboardContent(withClock) !== withClock) return withClock
+    config.maxLines = PANEL_ROWS
+    return render(state)
+  } finally {
+    config.maxLines = saved
+  }
+}
+
+/**
+ * Split the cursor (and on the running order, the hint line) out of the list.
+ *
+ * Every screen marks its selected row with `>` in column 0. That character is
+ * blanked in the picture and drawn instead by the native text layer on the
+ * same line, so moving the cursor changes text only. The running order's last
+ * line is its hint ("Ready - click to start"), which also follows the cursor,
+ * so it moves to the text layer's bottom line.
+ */
+function cursorLayer(content: string): { rows: string[]; overlay: string } {
+  const rows = content.split('\n').slice(0, PANEL_ROWS)
+  const overlay = Array.from({ length: PANEL_ROWS }, () => ' ')
+  let used = false
+
+  if (state.view.kind === 'plan' && rows.length > 1) {
+    overlay[PANEL_ROWS - 1] = clipNative(rows.pop()!.trim(), LEFT_TEXT_PX)
+    used = true
+  }
+  // Screens with a real cursor. Chat and Listen use `>` for "you said".
+  if ('cursor' in state.view) {
+    const row = rows.findIndex(line => line.startsWith('>'))
+    if (row >= 0) {
+      rows[row] = ` ${rows[row].slice(1)}`
+      overlay[row] = '>'
+      used = true
+    }
+  }
+  if (!used) return { rows, overlay: SLEEP_CONTENT }
+  let last = overlay.length - 1
+  while (last > 0 && overlay[last] === ' ') last -= 1
+  return { rows, overlay: overlay.slice(0, last + 1).join('\n') }
+}
+
+/** Live timers as native text: counter first, so the numbers line up. */
+function timersLayer(timers: Array<{ label: string; value: string }>): string {
+  if (timers.length === 0) return SLEEP_CONTENT
+  const shown = timers.slice(0, TIMER_ROWS)
+  const rows = shown.map(timer => clipNative(`${timer.value}  ${timer.label}`, TIMER_TEXT_PX))
+  if (timers.length > TIMER_ROWS) rows[TIMER_ROWS - 1] = clipNative(`+${timers.length - TIMER_ROWS + 1} more timers`, TIMER_TEXT_PX)
+  return rows.join('\n')
+}
+
 /**
  * One paint at a time. Four tile sends can take most of a second, and the 1 s
  * Listen loop would otherwise start a second paint in the middle of the first.
@@ -340,7 +440,7 @@ async function paintNow(): Promise<void> {
   try {
     // Rendered once, used twice: the glasses and the mirror must never be
     // able to show different frames.
-    const content = asleep ? SLEEP_CONTENT : render(state)
+    const content = asleep ? SLEEP_CONTENT : renderForPanel()
     // The mirror shows what the glasses show, sleep included — an iPad still
     // lit while the glasses are dark is two devices disagreeing about state.
     mirror(content)
@@ -352,11 +452,30 @@ async function paintNow(): Promise<void> {
     // compact rendering can never turn a working screen into a blank one.
     if (compactFailures < 3) {
       const board = asleep ? null : listenBoard(state)
-      const frame = asleep
-        ? textFrame(content)
-        : board
-          ? listenFrame(board)
-          : dashboardFrame(dashboardContent(content), dashboardRail())
+      let overlay = SLEEP_CONTENT
+      let timersText = SLEEP_CONTENT
+      let frame: number[]
+      if (asleep) {
+        frame = textFrame(content)
+      } else if (board) {
+        frame = listenFrame(board)
+      } else {
+        const rail = dashboardRail()
+        const layer = cursorLayer(dashboardContent(content))
+        frame = dashboardFrame(layer.rows, rail)
+        overlay = layer.overlay
+        timersText = timersLayer(rail.timers)
+      }
+
+      // Text first: the cursor and hint are what a scroll changes, and a
+      // text update is small and drawn in one go. Pictures follow, and only
+      // when their pixels changed (a page turn, a ticked row).
+      const textStart = performance.now()
+      const textSent = [
+        await setText(CONTAINER_ID, CONTAINER_NAME, overlay),
+        await setText(TIMERS_ID, TIMERS_NAME, timersText),
+      ].filter(Boolean).length
+      const textMs = Math.round(performance.now() - textStart)
       const tiles = splitTiles(frame)
       const updates = tiles.flatMap((tile, index) => {
         // Only tiles whose pixels changed are sent: each send is ~100 ms of
@@ -385,10 +504,12 @@ async function paintNow(): Promise<void> {
           }),
         ).finally(() => { doneAt[order] = Math.round(performance.now() - sendStart) })),
       )
-      if (updates.length > 0) {
+      if (updates.length > 0 || textSent > 0) {
         paintLog({
           view: state.view.kind,
           asleep,
+          text: textSent,
+          textMs,
           sent: updates.map(({ index }) => IMAGE_CONTAINER_NAMES[index]),
           doneMs: doneAt,
           failed: results.flatMap((result, resultIndex) =>
@@ -411,24 +532,14 @@ async function paintNow(): Promise<void> {
       })
       if (compactOk) {
         compactFailures = 0
-        if (!textLayerBlank) {
-          await bridge.textContainerUpgrade(
-            new TextContainerUpgrade({
-              containerID: CONTAINER_ID,
-              containerName: CONTAINER_NAME,
-              content: SLEEP_CONTENT,
-              textColor: DIM,
-            }),
-          )
-          textLayerBlank = true
-        }
         return
       }
       compactFailures += 1
     }
 
-    textLayerBlank = false
-
+    // Native-text fallback: the whole frame in the capture layer.
+    shownText.set(CONTAINER_ID, content)
+    await setText(TIMERS_ID, TIMERS_NAME, SLEEP_CONTENT)
     await bridge.textContainerUpgrade(
       new TextContainerUpgrade({
         containerID: CONTAINER_ID,
@@ -1182,6 +1293,47 @@ function removeLocalNote(row: ReturnType<typeof noteRows>[number]): void {
   }
 }
 
+function activeTimerCount(): number {
+  let count = 0
+  for (const run of state.snapshot?.checklists?.active ?? []) {
+    for (const item of run.items) {
+      if (item.done) continue
+      if (item.running || (item.stepKind === 'wait' && item.endsAt !== null)) count += 1
+    }
+  }
+  return count
+}
+
+async function confirmResetTimers(): Promise<void> {
+  const count = activeTimerCount()
+  if (count === 0) {
+    state.view = { kind: 'timerReset', done: true, count: 0 }
+    await paint()
+    return
+  }
+
+  const result = await resetActiveTimers()
+  if (!result.ok) {
+    state.error = result.error
+    await paint()
+    return
+  }
+
+  if (state.snapshot) state.snapshot.checklists = result.checklists
+  const plan = await fetchPlan(state.space)
+  if (plan.ok) {
+    state.plan = plan.plan
+    state.planError = null
+  } else {
+    state.planError = plan.error
+  }
+  state.error = null
+  state.stickyDone.clear()
+  state.armedTaskId = null
+  state.view = { kind: 'timerReset', done: true, count }
+  await paint()
+}
+
 // ---- navigation ------------------------------------------------------------
 
 function rowCount(): number {
@@ -1219,6 +1371,7 @@ function rowCount(): number {
       ).length
     case 'assistant':
       return state.view.phase === 'providers' ? 2 : 0
+    case 'timerReset':
     case 'cue':
     case 'transcript':
     case 'pong':
@@ -1232,6 +1385,7 @@ function clampCursor(): void {
   if (
     view.kind === 'pong' ||
     view.kind === 'fonttest' ||
+    view.kind === 'timerReset' ||
     view.kind === 'cue' ||
     view.kind === 'transcript' ||
     (view.kind === 'assistant' && view.phase === 'chat')
@@ -1268,6 +1422,8 @@ function move(delta: number): void {
     view.page = (view.page + 1) % 5
     return
   }
+
+  if (view.kind === 'timerReset') return
 
   if (view.kind === 'cue') {
     view.startArmed = false
@@ -1592,6 +1748,21 @@ async function activate(): Promise<void> {
   const view = state.view
 
   if (view.kind !== 'index') state.lastEvent = `clk:${view.kind}`
+
+  if (view.kind === 'timerReset') {
+    if (view.done) {
+      if (state.space === 'life') await openPlan()
+      else {
+        state.view = homeView()
+        state.scrollTop = 0
+        clampCursor()
+        await paint()
+      }
+      return
+    }
+    await confirmResetTimers()
+    return
+  }
 
   if (view.kind === 'assistant') {
     if (view.phase === 'providers') {
@@ -2031,6 +2202,17 @@ async function activate(): Promise<void> {
 
 async function back(): Promise<void> {
   state.armedNoteId = null
+  if (state.view.kind === 'timerReset') {
+    if (state.space === 'life') await openPlan()
+    else {
+      state.view = homeView()
+      state.scrollTop = 0
+      clampCursor()
+      await paint()
+    }
+    return
+  }
+
   if (state.view.kind === 'transcript') {
     const { subjectKind, subjectId, noteId } = state.view
     state.view = { kind: 'note', subjectKind, subjectId, noteId, cursor: 0 }
@@ -2195,6 +2377,7 @@ async function onMenu(itemID: number): Promise<void> {
         state.view.kind !== 'plan' &&
         state.view.kind !== 'pong' &&
         state.view.kind !== 'fonttest' &&
+        state.view.kind !== 'timerReset' &&
         state.view.kind !== 'cue' &&
         state.view.kind !== 'transcript' &&
         state.view.kind !== 'assistant'
@@ -2235,6 +2418,13 @@ async function onMenu(itemID: number): Promise<void> {
     case MENU.CHAT:
       await openAssistant()
       break
+    case MENU.RESET_TIMERS:
+      state.view = { kind: 'timerReset' }
+      state.scrollTop = 0
+      state.armedTaskId = null
+      state.armedNoteId = null
+      await paint()
+      break
     case MENU.DIAG:
       state.diagnostics = !state.diagnostics
       await paint()
@@ -2259,7 +2449,7 @@ async function onMenu(itemID: number): Promise<void> {
 // ---- boot ------------------------------------------------------------------
 
 const page = new CreateStartUpPageContainer({
-  containerTotalNum: 5,
+  containerTotalNum: 6,
   textObject: [
     new TextContainerProperty({
       xPosition: 0,
@@ -2277,6 +2467,23 @@ const page = new CreateStartUpPageContainer({
       textColor: DIM,
       isEventCapture: 1,
       zOrderIndex: 5,
+    }),
+    // Live timers as native text over the bottom-right tile (v0.117.0). A
+    // ticking second is one small text update instead of a ~400 ms image.
+    new TextContainerProperty({
+      xPosition: TILE_W,
+      yPosition: TILE_H,
+      width: TILE_W,
+      height: TILE_H,
+      borderWidth: 0,
+      borderColor: 5,
+      paddingLength: 4,
+      containerID: TIMERS_ID,
+      containerName: TIMERS_NAME,
+      content: SLEEP_CONTENT,
+      textColor: DIM,
+      isEventCapture: 0,
+      zOrderIndex: 6,
     }),
   ],
   imageObject: [
@@ -2310,6 +2517,7 @@ const page = new CreateStartUpPageContainer({
       new MenuItemProperty({ itemName: 'Chat', itemID: MENU.CHAT }),
       new MenuItemProperty({ itemName: 'Notes', itemID: MENU.NOTES }),
       new MenuItemProperty({ itemName: 'Lists', itemID: MENU.LISTS }),
+      new MenuItemProperty({ itemName: 'Reset timers', itemID: MENU.RESET_TIMERS }),
       new MenuItemProperty({ itemName: 'Diagnostics', itemID: MENU.DIAG }),
     ],
   }),

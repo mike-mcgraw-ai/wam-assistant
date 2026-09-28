@@ -119,6 +119,9 @@ export const beginStep = (runId: string, itemId: string) => post('/step/begin', 
 /** Put a step back to not-started, discarding a bogus elapsed time. */
 export const resetStep = (runId: string, itemId: string) => post('/step/reset', { runId, itemId })
 
+/** Clear every active unfinished timer across open checklist runs. */
+export const resetActiveTimers = () => post('/timers/reset', {})
+
 /**
  * Tick something off the shared list. Returns nothing useful, so the caller
  * refetches — the inbox is shared, and the server's view of it is the only one

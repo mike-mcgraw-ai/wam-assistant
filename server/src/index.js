@@ -1813,7 +1813,7 @@ const server = http.createServer(async (req, res) => {
   // ---- checklist writes -------------------------------------------------
   // Gated by READ_TOKEN: these come from the glasses app, not from machines,
   // so they carry the same credential the app already uses to read /state.
-  if (req.method === 'POST' && ['/check', '/run/start', '/run/finish', '/step/begin', '/step/reset', '/remind'].includes(url.pathname)) {
+  if (req.method === 'POST' && ['/check', '/run/start', '/run/finish', '/step/begin', '/step/reset', '/timers/reset', '/remind'].includes(url.pathname)) {
     if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
 
     let body
@@ -1832,6 +1832,8 @@ const server = http.createServer(async (req, res) => {
       result = checklists.beginStep(body.runId, body.itemId)
     } else if (url.pathname === '/step/reset') {
       result = checklists.resetStep(body.runId, body.itemId)
+    } else if (url.pathname === '/timers/reset') {
+      result = checklists.resetActiveTimers(Date.now(), body.by || 'glasses')
     } else if (url.pathname === '/remind') {
       // Ad-hoc reminder, for things the phone's own timer cannot know about.
       const delayMs = Math.max(0, Number(body.inMinutes ?? 0)) * 60_000

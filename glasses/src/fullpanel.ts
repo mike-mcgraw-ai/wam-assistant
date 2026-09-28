@@ -58,8 +58,28 @@ const PENDING_INK = 110
 const BLOCK_ROWS = 7
 const FIRST_BASELINE_PX = TITLE_BAND_PX + 12
 /** Fixed two-column timer grid, relative to the bottom-right tile. */
-const TIMER_VALUE_X = 154
-const TIMER_COLUMN_GAP_PX = 14
+
+/**
+ * The left column of ordinary screens (v0.117.0).
+ *
+ * The list is a picture, but the `>` cursor and the running-order hint live in
+ * the native text layer on top of it, so a scroll is one small text update and
+ * no image transfer (an image tile costs ~400 ms on Mike's phone and the
+ * firmware draws tiles one after another). For the cursor to sit on its row,
+ * picture rows use the native text line height.
+ */
+/** Native firmware text line height (@evenrealities/pretext: 27 px). */
+export const TEXT_PITCH_PX = 27
+/** Rows the column holds: 10 x 27 = 270 of 288. */
+export const PANEL_ROWS = 10
+/**
+ * Baseline of picture row 0. Tuned so the small picture text sits level with
+ * the native `>` on the same line; the one number to nudge if the cursor
+ * reads high or low on the glasses.
+ */
+export const ROW_BASELINE_PX = 21
+/** Picture text starts here, clear of the native `>` (drawn at the text padding). */
+export const CURSOR_COL_PX = 17
 
 function blit(target: number[], source: number[], width: number, height: number, x0: number, y0: number): void {
   for (let y = 0; y < height; y += 1) {
@@ -83,7 +103,7 @@ export function textFrame(content: string): number[] {
  * independently changing dashboard rail on the right. A list scroll therefore
  * changes only the left tiles; the clock changes only the top-right tile.
  */
-export function dashboardFrame(content: string, rail: DashboardRail): number[] {
+export function dashboardFrame(rows: string[], rail: DashboardRail): number[] {
   const canvas = document.createElement('canvas')
   canvas.width = PANEL_W
   canvas.height = PANEL_H
@@ -106,27 +126,22 @@ export function dashboardFrame(content: string, rail: DashboardRail): number[] {
   drawLine(ctx, rail.connection, rightX, 91, COLUMN_W)
   drawLine(ctx, rail.status, rightX, 109, COLUMN_W)
   drawLine(ctx, rail.version, rightX, 127, COLUMN_W)
+  // Bottom-right is left dark: timers are native text there (main.ts), so a
+  // ticking second never costs an image transfer.
 
-  const shownTimers = rail.timers.slice(0, BLOCK_ROWS)
-  const timerNote = rail.timers.length > BLOCK_ROWS
-    ? `${BLOCK_ROWS}/${rail.timers.length} active`
-    : rail.timers.length ? `${rail.timers.length} active` : ''
-  drawBlock(ctx, 3, 'TIMERS', timerNote, shownTimers.length > 0 ? [] : ['No timers running.'])
-  if (shownTimers.length > 0) {
-    const { x, y } = TILES[3]
-    const labelX = x + PAD_PX
-    const valueX = x + TIMER_VALUE_X
-    const labelWidth = TIMER_VALUE_X - PAD_PX - TIMER_COLUMN_GAP_PX
-    const valueWidth = TILE_W - TIMER_VALUE_X - PAD_PX
-    ctx.font = CONTENT_FONT
-    shownTimers.forEach((timer, index) => {
-      const label = clipPx(ctx, timer.label, labelWidth)
-      const value = clipPx(ctx, timer.value, valueWidth)
-      const baseline = y + FIRST_BASELINE_PX + index * LINE_PX
-      drawLine(ctx, label, labelX, baseline, labelWidth)
-      drawLine(ctx, value, valueX, baseline, valueWidth)
-    })
-  }
+  // The list: no cursor in it (main.ts moves `>` into the text layer), rows
+  // on the native line height.
+  // Long rows give up tracking first (drawLine), then are cut at the column
+  // edge; nothing may spill into the rail, or it would redraw with the list.
+  const listWidth = TILE_W - CURSOR_COL_PX - 4
+  ctx.save()
+  ctx.beginPath()
+  ctx.rect(0, 0, TILE_W - 3, PANEL_H)
+  ctx.clip()
+  rows.slice(0, PANEL_ROWS).forEach((text, row) =>
+    drawLine(ctx, text, CURSOR_COL_PX, ROW_BASELINE_PX + row * TEXT_PITCH_PX, listWidth),
+  )
+  ctx.restore()
 
   const rgba = ctx.getImageData(0, 0, PANEL_W, PANEL_H).data
   const frame = new Array<number>(PANEL_W * PANEL_H)
@@ -137,16 +152,6 @@ export function dashboardFrame(content: string, rail: DashboardRail): number[] {
   // header: time is bright; date, context and build identity sit back.
   dim(frame, TILES[1].x, TILES[1].y + 28, TILE_W, 48, TITLE_INK)
   dim(frame, TILES[1].x, TILES[1].y + 112, TILE_W, 32, TITLE_INK)
-  dim(frame, TILES[3].x, TILES[3].y, TILE_W, TITLE_BAND_PX, TITLE_INK)
-  if (shownTimers.length === 0) {
-    dim(frame, TILES[3].x, TILES[3].y + TITLE_BAND_PX, TILE_W, TILE_H - TITLE_BAND_PX, PENDING_INK)
-  }
-
-  // Preserve the exact compact rendering and vertical placement that was
-  // proven readable on the glasses; only move it from centre to the left.
-  const [top, bottom] = renderCompactDisplay(content)
-  blit(frame, top, COMPACT_W, COMPACT_PANEL_H, 0, COMPACT_Y)
-  blit(frame, bottom, COMPACT_W, COMPACT_PANEL_H, 0, COMPACT_Y + COMPACT_PANEL_H)
   return frame
 }
 

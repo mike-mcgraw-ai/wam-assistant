@@ -168,6 +168,10 @@ export class Checklists {
     return this.templates.get(checklistId)?.items.find(i => i.id === itemId)
   }
 
+  #stepKind(template, item) {
+    return item.kind ?? (template.timed === false ? 'check' : 'do')
+  }
+
   notes(checklistId) {
     return this.notes_.get(checklistId) ?? []
   }
@@ -235,27 +239,33 @@ export class Checklists {
    * it comes due. Starting is idempotent — arriving at the same step twice
    * must not restart a wash cycle that is already running.
    */
-  beginStep(runId, itemId, now = Date.now()) {
+  beginStep(runId, itemId, now = Date.now(), by = 'glasses') {
     const run = this.runs.get(runId)
     if (!run) return { ok: false, error: 'unknown run' }
     const step = this.step(run.checklistId, itemId)
     if (!step) return { ok: false, error: `unknown item "${itemId}"` }
+    const template = this.templates.get(run.checklistId)
+    const stepKind = this.#stepKind(template, step)
+    if (stepKind === 'check') {
+      if (run.checked[itemId]) return { ok: true, already: true }
+      return this.check(runId, itemId, true, now, by)
+    }
     if (run.timing[itemId]) return { ok: true, already: true }
 
-    const endsAt = step.kind === 'wait' && step.waitMinutes
+    const endsAt = stepKind === 'wait' && step.waitMinutes
       ? now + step.waitMinutes * 60_000
       : null
 
     // Lag: how long between finishing the previous step and starting this one.
     // This is the number that says whether a step needs an explicit start at
     // all — a step you always begin immediately can have the click removed.
-    const items = this.templates.get(run.checklistId).items
+    const items = template.items
     const index = items.findIndex(i => i.id === itemId)
     const previousAt = index > 0 ? run.checked[items[index - 1].id]?.at ?? null : null
     const lagMs = previousAt === null ? null : Math.max(0, now - previousAt)
 
     run.timing[itemId] = { startedAt: now, endsAt, lagMs }
-    this.#log({ type: 'step_start', runId, checklistId: run.checklistId, itemId, kind: step.kind ?? 'do', at: now, endsAt, lagMs })
+    this.#log({ type: 'step_start', runId, checklistId: run.checklistId, itemId, kind: stepKind, at: now, endsAt, lagMs })
     this.#persist()
     return { ok: true }
   }
@@ -270,19 +280,24 @@ export class Checklists {
     }
 
     const step = this.step(run.checklistId, itemId)
+    const stepKind = this.#stepKind(template, step)
 
     if (done) {
-      // If the step was never explicitly begun, fall back to the end of the
-      // previous step so a duration is still recorded rather than lost.
-      if (!run.timing[itemId]) {
-        const items = template.items
-        const index = items.findIndex(i => i.id === itemId)
-        const previous = index > 0 ? run.checked[items[index - 1].id]?.at : null
-        run.timing[itemId] = { startedAt: previous ?? run.startedAt, endsAt: null, inferred: true }
+      if (stepKind === 'check') {
+        delete run.timing[itemId]
+      } else {
+        // If the step was never explicitly begun, fall back to the end of the
+        // previous step so a duration is still recorded rather than lost.
+        if (!run.timing[itemId]) {
+          const items = template.items
+          const index = items.findIndex(i => i.id === itemId)
+          const previous = index > 0 ? run.checked[items[index - 1].id]?.at : null
+          run.timing[itemId] = { startedAt: previous ?? run.startedAt, endsAt: null, inferred: true }
+        }
+        const timing = run.timing[itemId]
+        timing.completedAt = now
+        timing.durationMs = Math.max(0, now - timing.startedAt)
       }
-      const timing = run.timing[itemId]
-      timing.completedAt = now
-      timing.durationMs = Math.max(0, now - timing.startedAt)
       run.checked[itemId] = { at: now, by }
     } else {
       delete run.checked[itemId]
@@ -292,9 +307,9 @@ export class Checklists {
     this.#log({
       type: done ? 'check' : 'uncheck',
       runId, checklistId: run.checklistId, itemId,
-      kind: step?.kind ?? 'do',
+      kind: stepKind,
       at: now, by,
-      durationMs: done ? run.timing[itemId]?.durationMs ?? null : null,
+      durationMs: done && stepKind !== 'check' ? run.timing[itemId]?.durationMs ?? null : null,
     })
     this.#persist()
 
@@ -310,7 +325,7 @@ export class Checklists {
       const items = template.items
       const index = items.findIndex(i => i.id === itemId)
       const next = items[index + 1]
-      if (next && ((next.kind ?? 'do') === 'wait' || next.autoStart === true)) {
+      if (next && (this.#stepKind(template, next) === 'wait' || next.autoStart === true)) {
         this.beginStep(runId, next.id, now)
       }
     }
@@ -338,6 +353,39 @@ export class Checklists {
     return { ok: true }
   }
 
+  /**
+   * Emergency cleanup for accidental clocks. Clears unfinished running `do`
+   * steps and live/overdue waits across open runs, without touching completed
+   * ticks or measured history.
+   */
+  resetActiveTimers(now = Date.now(), by = 'glasses') {
+    const reset = []
+
+    for (const run of this.runs.values()) {
+      if (run.finishedAt) continue
+
+      for (const [itemId, timing] of Object.entries(run.timing)) {
+        if (run.checked[itemId]) continue
+        if (!timing?.startedAt && !timing?.endsAt) continue
+
+        const discarded = timing
+        delete run.timing[itemId]
+        run.notified = run.notified.filter(id => id !== itemId)
+        reset.push({ runId: run.runId, checklistId: run.checklistId, itemId, discarded })
+      }
+    }
+
+    for (const row of reset) {
+      this.#log({ type: 'step_reset', ...row, at: now, by })
+    }
+    if (reset.length > 0) {
+      this.#log({ type: 'timers_reset', count: reset.length, at: now, by })
+      this.#persist()
+    }
+
+    return { ok: true, reset: reset.length }
+  }
+
   finish(runId, now = Date.now()) {
     const run = this.runs.get(runId)
     if (!run) return { ok: false, error: 'unknown run' }
@@ -353,13 +401,13 @@ export class Checklists {
     const template = this.templates.get(run.checklistId)
 
     const items = template.items.map(item => {
-      const timing = run.timing[item.id]
       // `check` is a step that is only ever ticked: one click, done, and the
       // time it happened is the whole record. A list marked `timed: false`
       // makes every step one, which is what a morning routine is — you are not
       // going to come back and stop the clock on the shower, and a step left
       // running forever is worse than a step that was never timed.
       const stepKind = item.kind ?? (template.timed === false ? 'check' : 'do')
+      const timing = stepKind === 'check' ? null : run.timing[item.id]
       const endsAt = timing?.endsAt ?? null
 
       return {
@@ -469,14 +517,15 @@ export class Checklists {
       .filter(r => r.complete)
 
     const estimateMs = template.items
-      .filter(i => (i.kind ?? 'do') === 'do')
+      .filter(i => this.#stepKind(template, i) === 'do')
       .reduce((sum, i) => sum + (i.estimateMinutes ?? 0) * 60_000, 0)
 
-    const estimateWallMs = template.items.reduce(
-      (sum, i) =>
-        sum + ((i.kind === 'wait' ? i.waitMinutes : i.estimateMinutes) ?? 0) * 60_000,
-      0,
-    )
+    const estimateWallMs = template.items.reduce((sum, i) => {
+      const stepKind = this.#stepKind(template, i)
+      if (stepKind === 'wait') return sum + (i.waitMinutes ?? 0) * 60_000
+      if (stepKind === 'do') return sum + (i.estimateMinutes ?? 0) * 60_000
+      return sum
+    }, 0)
 
     const activeMedian = Checklists.median(finished.map(r => r.activeMs).filter(Boolean))
     const wallMedian = Checklists.median(finished.map(r => r.wallMs).filter(Boolean))
@@ -500,9 +549,11 @@ export class Checklists {
        */
       plan: template.items.map(item => {
         const stepKind = item.kind ?? (template.timed === false ? 'check' : 'do')
-        const durations = finished
-          .map(r => r.items.find(i => i.id === item.id)?.durationMs)
-          .filter(d => typeof d === 'number' && d > 0)
+        const durations = stepKind === 'check'
+          ? []
+          : finished
+            .map(r => r.items.find(i => i.id === item.id)?.durationMs)
+            .filter(d => typeof d === 'number' && d > 0)
         const median = durations.length >= 3 ? Checklists.median(durations) : null
         const declared = stepKind === 'wait' ? item.waitMinutes : item.estimateMinutes
         return {
@@ -520,13 +571,17 @@ export class Checklists {
         }
       }),
       steps: template.items.map(item => {
-        const shaped = finished.map(r => r.items.find(i => i.id === item.id))
-        const durations = shaped
-          .map(i => i?.durationMs)
-          .filter(d => typeof d === 'number' && d > 0)
-        const lags = shaped.map(i => i?.lagMs).filter(l => typeof l === 'number')
-
         const stepKind = item.kind ?? (template.timed === false ? 'check' : 'do')
+        const shaped = finished.map(r => r.items.find(i => i.id === item.id))
+        const durations = stepKind === 'check'
+          ? []
+          : shaped
+            .map(i => i?.durationMs)
+            .filter(d => typeof d === 'number' && d > 0)
+        const lags = stepKind === 'check'
+          ? []
+          : shaped.map(i => i?.lagMs).filter(l => typeof l === 'number')
+
         const medianLagMs = Checklists.median(lags)
 
         // If you always start this step the moment the previous one ends, the

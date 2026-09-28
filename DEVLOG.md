@@ -19,3 +19,4 @@ These are the real completion dates of private device builds. The sanitized port
 | v0.13.0 | 2026-09-28 | 0.108.0 | **The full listening board:** Transcript, topics, points, summaries, and cues occupy four coordinated panels. |
 | v0.14.0 | 2026-09-28 | 0.109.0 | **Intentional hardware controls:** An explicit double-click wakes the display without accidental actions. |
 | v0.15.0 | 2026-09-28 | 0.115.0 | **Preserve speech on exit:** Leaving Listen flushes and saves useful words without keeping empty recordings. |
+| v0.16.0 | 2026-09-28 | 0.117.0 | **Hardware-safe live updates:** Transcript priority and native text updates reduce slow sequential image redraws. |
