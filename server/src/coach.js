@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { coalesceTranscriptSegments } from './transcript.js'
+import { displayTranscriptSegments } from './transcript.js'
 
 const SPACES = new Set(['ops', 'life'])
 const SPEAK_UP = new Set(['low', 'medium', 'high'])
@@ -125,7 +125,7 @@ function looksOpen(text) {
 function noteKind(text) {
   if (looksOpen(text)) return 'Open'
   if (/\b(?:decided|decision|agreed|settled|plan is|we will|we're going to|i will|i'll)\b/i.test(text)) return 'Decided'
-  if (/\b(?:remind me to|remember to|need to|have to|should|follow up|call|text|email|send|book|schedule|pay|check|buy|file|finish|ask|tell)\b/i.test(text)) return 'Next'
+  if (/\b(?:remind me to|remember to|need to|want(?:ed)? to|better way to|have to|should|follow up|call|text|email|send|book|schedule|pay|check|buy|file|finish|ask|tell)\b/i.test(text)) return 'Next'
   if (/\b(?:connect|connected|dots?|because|so that|which means|means that|ties? to|related|thread|pattern|point is|trying to say|lost|tangent|back to|where we were)\b/i.test(text)) return 'Dot'
   return 'Now'
 }
@@ -140,7 +140,7 @@ function runningNoteLine(label, text) {
 
 function runningConversationNote(session) {
   const pieces = []
-  for (const segment of coalesceTranscriptSegments(session?.segments)) {
+  for (const segment of displayTranscriptSegments(session?.segments)) {
     for (const text of splitThoughts(segment.text)) {
       pieces.push({ text, kind: noteKind(text), at: segment.at })
     }
@@ -166,7 +166,8 @@ function runningConversationNote(session) {
   )
   const parkedThread = tangentAt > 0 ? recent[tangentAt - 1] : null
   const connectedThread = [...recent].reverse().find(piece => piece.kind === 'Dot' || piece.kind === 'Decided')
-  const thread = parkedThread || connectedThread || recent[0] || latest
+  const actionableThread = [...recent].reverse().find(piece => piece.kind === 'Next' || piece.kind === 'Open')
+  const thread = parkedThread || connectedThread || actionableThread || recent[0] || latest
   const visibleKeys = new Set([noteKey(thread?.text), noteKey(latest?.text)])
   const actionableHold = [...recent]
     .reverse()
@@ -244,7 +245,7 @@ function publicSession(session, mode = null) {
     // Raw two-second chunks are an implementation detail. The live display
     // gets speech-sized blocks; the transcript endpoint includes raw chunks
     // separately for recovery and inspection.
-    recentSegments: coalesceTranscriptSegments(session.segments).slice(-24),
+    recentSegments: displayTranscriptSegments(session.segments, { maxBlocks: 12 }),
     runningNote: runningConversationNote(session),
     lastCueAt: session.lastCueAt ?? null,
     lastRecapAt: session.lastRecapAt ?? null,

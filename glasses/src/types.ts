@@ -59,10 +59,19 @@ export interface AssistantMessage {
   at: number
 }
 
+export interface AssistantPendingJob {
+  status: 'queued' | 'claimed' | 'blocked' | 'done' | 'failed'
+  claimedBy: string | null
+  attempts: number
+  createdAt: number
+  updatedAt: number
+}
+
 export interface AssistantChat {
   provider: AssistantProvider
   ready: boolean
   busy: boolean
+  pending: AssistantPendingJob | null
   messages: AssistantMessage[]
   updatedAt: number
 }

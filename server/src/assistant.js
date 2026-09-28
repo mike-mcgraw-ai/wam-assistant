@@ -119,6 +119,15 @@ export class AssistantChat {
       provider: thread.provider,
       ready: this.providerReady[thread.provider],
       busy: Boolean(pending && ['queued', 'claimed'].includes(pending.status)),
+      pending: pending
+        ? {
+            status: pending.status,
+            claimedBy: pending.claimedBy ?? null,
+            attempts: pending.attempts ?? 0,
+            createdAt: pending.createdAt ?? 0,
+            updatedAt: pending.updatedAt ?? 0,
+          }
+        : null,
       messages: thread.messages.slice(-40),
       updatedAt: thread.updatedAt,
     }

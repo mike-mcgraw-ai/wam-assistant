@@ -1,6 +1,9 @@
 import {
   waitForEvenAppBridge,
   CreateStartUpPageContainer,
+  ImageContainerProperty,
+  ImageRawDataUpdate,
+  ImageRawDataUpdateResult,
   TextContainerProperty,
   TextContainerUpgrade,
   MenuContainerProperty,
@@ -16,6 +19,7 @@ import {
 } from '@evenrealities/even_hub_sdk'
 
 import { config } from './config'
+import { COMPACT_PANEL_H, COMPACT_W, COMPACT_X, COMPACT_Y, renderCompactDisplay } from './compactdisplay'
 import {
   activateCoachMode,
   beginStep,
@@ -85,6 +89,8 @@ import type { AssistantProvider } from './types'
 
 const CONTAINER_ID = 1
 const CONTAINER_NAME = 'board'
+const IMAGE_CONTAINER_IDS = [2, 3] as const
+const IMAGE_CONTAINER_NAMES = ['compact-top', 'compact-bottom'] as const
 const CAPTURE_TASK_ID = 'captured-notes'
 
 const MENU = {
@@ -147,6 +153,7 @@ const state: UiState = {
   coachModes: [],
   coachModeId: null,
   assistantChat: null,
+  assistantThreads: {},
   assistantRecording: false,
   assistantReviewing: false,
   assistantSending: false,
@@ -181,6 +188,8 @@ let audioLastRole = AudioSpeakerRole.Unknown
 let audioLastDirection: number | null = null
 let audioLogLastAt = 0
 
+const ASSISTANT_PROVIDERS: AssistantProvider[] = ['chatgpt', 'claude']
+
 // ---- rendering -------------------------------------------------------------
 
 /**
@@ -214,6 +223,7 @@ let asleep = false
 const SLEEP_CONTENT = ' '
 const BRIGHT = 4
 const DIM = 0
+let compactFailures = 0
 
 async function paint(): Promise<void> {
   try {
@@ -223,6 +233,44 @@ async function paint(): Promise<void> {
     // The mirror shows what the glasses show, sleep included — an iPad still
     // lit while the glasses are dark is two devices disagreeing about state.
     mirror(content)
+
+    // The SDK's native text renderer has one fixed size. Draw the same frame
+    // into a smaller centred image so it occupies less of the visual field,
+    // while the full-screen text container remains available for ring input.
+    // A failed image transfer falls through to native text for this frame, so
+    // compact rendering can never turn a working screen into a blank one.
+    if (compactFailures < 3) {
+      const panels = renderCompactDisplay(content)
+      let compactOk = true
+      for (let index = 0; index < panels.length; index += 1) {
+        const imageResult = await bridge.updateImageRawData(
+          new ImageRawDataUpdate({
+            containerID: IMAGE_CONTAINER_IDS[index],
+            containerName: IMAGE_CONTAINER_NAMES[index],
+            imageData: panels[index],
+          }),
+        )
+        if (!ImageRawDataUpdateResult.isSuccess(imageResult)) {
+          compactOk = false
+          console.warn('[paint] compact image failed:', imageResult)
+          break
+        }
+      }
+      if (compactOk) {
+        compactFailures = 0
+        await bridge.textContainerUpgrade(
+          new TextContainerUpgrade({
+            containerID: CONTAINER_ID,
+            containerName: CONTAINER_NAME,
+            content: SLEEP_CONTENT,
+            textColor: DIM,
+          }),
+        )
+        return
+      }
+      compactFailures += 1
+    }
+
     await bridge.textContainerUpgrade(
       new TextContainerUpgrade({
         containerID: CONTAINER_ID,
@@ -641,7 +689,7 @@ async function syncAudioToCoachSession(): Promise<void> {
  * screen arms the microphone, and the second starts it. One gesture, one
  * meaning, with a visible cancel point in between.
  */
-async function openListening(context: ListenContext | undefined = undefined): Promise<void> {
+async function openListening(context: ListenContext = null): Promise<void> {
   const current = await fetchCoachSession(state.space)
   if (current.ok) {
     state.coachSession = current.session
@@ -653,7 +701,7 @@ async function openListening(context: ListenContext | undefined = undefined): Pr
 
   if (state.view.kind !== 'cue') {
     state.cueReturn = copyView(state.view)
-    listenContext = context === undefined ? currentTaskContext() : context
+    listenContext = context
   }
   const activeIndex = state.coachModes.findIndex(mode => mode.id === state.coachModeId)
   state.view = { kind: 'cue', modeCursor: Math.max(0, activeIndex) }
@@ -662,48 +710,16 @@ async function openListening(context: ListenContext | undefined = undefined): Pr
 }
 
 /**
- * What was on screen when Listen was opened.
- *
- * Captured at open rather than at start, because opening Listen is what takes
- * you off the task row — by the time you click to record, the screen no longer
- * knows what you were looking at.
- */
-/**
  * What a captured line is about.
  *
- * `taskId` is what the hub routes on today. `choreId` is sent for a note taken
- * inside a chore's steps; the hub does not read it yet and falls back to the
- * capture task, which is the right failure — a note in the wrong place beats a
- * note nowhere. See docs/NOTES-AI-HANDOFF.md.
+ * General Listen is intentionally unbound and lands in Captured notes. A
+ * subject is only sent by explicit "Note on this task/list" rows; menu Listen
+ * must not silently file a car note under Dishes just because that row was
+ * selected.
  */
 type ListenContext = { taskId?: string; choreId?: string; label: string } | null
 
 let listenContext: ListenContext = null
-
-function currentTaskContext(): ListenContext {
-  const view = state.view
-  if (view.kind === 'task') {
-    const task = state.plan?.tasks?.find(t => t.taskId === view.taskId)
-    return task ? { taskId: task.taskId, label: task.label } : null
-  }
-  if (view.kind === 'plan') {
-    const row = planRows(state)[view.cursor]
-    if (row?.kind === 'task') return { taskId: row.task.taskId, label: row.task.label }
-    if (row?.kind === 'agenda' && row.row.kind !== 'gap') {
-      return { choreId: row.row.choreId, label: row.row.chore }
-    }
-  }
-  if (view.kind === 'checklist') {
-    const run = findRun(state, view.runId)
-    if (run) return { choreId: run.checklistId, label: run.name }
-  }
-  if (view.kind === 'chores') {
-    const row = choreRows(state)[view.cursor]
-    if (row?.kind === 'run') return { choreId: row.run.checklistId, label: row.run.name }
-    if (row?.kind === 'start') return { choreId: row.list.id, label: row.list.name }
-  }
-  return null
-}
 
 /**
  * Open Listen for something, from wherever you are.
@@ -745,9 +761,17 @@ async function beginListening(): Promise<void> {
 async function refreshAssistant(provider: AssistantProvider): Promise<void> {
   const result = await fetchAssistantChat(state.space, provider)
   if (result.ok) {
+    state.assistantThreads[provider] = result.chat
     state.assistantChat = result.chat
     state.error = null
   } else state.error = result.error
+}
+
+async function refreshAssistantSummaries(): Promise<void> {
+  const results = await Promise.all(ASSISTANT_PROVIDERS.map(provider => fetchAssistantChat(state.space, provider)))
+  results.forEach((result, index) => {
+    if (result.ok) state.assistantThreads[ASSISTANT_PROVIDERS[index]] = result.chat
+  })
 }
 
 async function openAssistant(): Promise<void> {
@@ -756,8 +780,10 @@ async function openAssistant(): Promise<void> {
   state.assistantSending = false
   state.assistantChat = null
   state.view = { kind: 'assistant', phase: 'providers', cursor: 0 }
+  await paint()
   await refresh()
-  if (inFlight) await paint()
+  await refreshAssistantSummaries()
+  await paint()
 }
 
 async function startAssistantCapture(provider: AssistantProvider): Promise<void> {
@@ -905,6 +931,7 @@ async function finishAssistantCapture(provider: AssistantProvider): Promise<void
   state.assistantSending = false
   if (sent?.ok) {
     state.assistantChat = sent.chat
+    state.assistantThreads[provider] = sent.chat
     state.error = null
   } else state.error = sent?.error ?? 'Transcription timed out'
   if (!stopped.ok && !state.error) state.error = stopped.error
@@ -1378,6 +1405,8 @@ async function activate(): Promise<void> {
         return
       }
       state.view = { kind: 'assistant', phase: 'chat', provider, scroll: 0 }
+      state.assistantChat = state.assistantThreads[provider] ?? null
+      await paint()
       await refreshAssistant(provider)
       await paint()
       return
@@ -1828,6 +1857,8 @@ async function back(): Promise<void> {
       state.assistantChat = null
       state.view = { kind: 'assistant', phase: 'providers', cursor: 0 }
       await paint()
+      await refreshAssistantSummaries()
+      await paint()
       return
     }
     state.view = homeView()
@@ -2017,7 +2048,7 @@ async function onMenu(itemID: number): Promise<void> {
 // ---- boot ------------------------------------------------------------------
 
 const page = new CreateStartUpPageContainer({
-  containerTotalNum: 1,
+  containerTotalNum: 3,
   textObject: [
     new TextContainerProperty({
       xPosition: 0,
@@ -2029,11 +2060,26 @@ const page = new CreateStartUpPageContainer({
       paddingLength: 4,
       containerID: CONTAINER_ID,
       containerName: CONTAINER_NAME,
-      // Draw the cached view straight into the create call: one fewer round
-      // trip before anything readable is on the glasses.
-      content: render(state),
+      // This transparent full-panel layer owns input. paint() fills the image
+      // below it, or restores native text here if image transfer fails.
+      content: SLEEP_CONTENT,
+      textColor: DIM,
       isEventCapture: 1,
+      zOrderIndex: 3,
     }),
+  ],
+  imageObject: [
+    ...IMAGE_CONTAINER_IDS.map((containerID, index) =>
+      new ImageContainerProperty({
+        xPosition: COMPACT_X,
+        yPosition: COMPACT_Y + index * COMPACT_PANEL_H,
+        width: COMPACT_W,
+        height: COMPACT_PANEL_H,
+        containerID,
+        containerName: IMAGE_CONTAINER_NAMES[index],
+        zOrderIndex: index + 1,
+      }),
+    ),
   ],
   menuObject: new MenuContainerProperty({
     menuItems: [
@@ -2069,6 +2115,7 @@ const createResult = await bridge.createStartUpPageContainer(page)
 if (createResult !== StartUpPageCreateResult.success) {
   console.error('[boot] createStartUpPageContainer:', StartUpPageCreateResult[createResult])
 }
+await paint()
 
 /**
  * Coerce whatever the host sent into an OsEventTypeList.

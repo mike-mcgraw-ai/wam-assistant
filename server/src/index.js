@@ -407,28 +407,18 @@ function modelRunningNote(modelResult, fallback = null) {
   const sourceLines = Array.isArray(raw?.lines)
     ? raw.lines
     : [raw?.thread && `Thread: ${raw.thread}`, raw?.now && `Now: ${raw.now}`, raw?.hold && `Hold: ${raw.hold}`]
-  let lines = sourceLines
+  const lines = sourceLines
     .map(line => String(line || '').replace(/\s+/g, ' ').trim().slice(0, 42))
     .filter(Boolean)
     .slice(0, 3)
 
   if (lines.length === 0) return fallback
   const sourceSegmentCount = Number(modelResult.sourceSegmentCount) || 0
-  if (fallback?.lines?.length && sourceSegmentCount < fallback.segmentCount) {
-    const labeled = (rows, label) => rows.find(line => line.toLowerCase().startsWith(`${label.toLowerCase()}:`))
-    // The model carries the durable thread across tangents. Between model
-    // passes, the zero-latency fallback keeps Now and Hold caught up to speech.
-    lines = [
-      labeled(lines, 'Thread') || labeled(fallback.lines, 'Thread'),
-      labeled(fallback.lines, 'Now') || labeled(lines, 'Now'),
-      labeled(fallback.lines, 'Hold') || labeled(lines, 'Hold'),
-    ].filter(Boolean)
-  }
   return {
     title: 'Conversation compass',
     lines,
     updatedAt: modelResult.jobUpdatedAt || Date.now(),
-    segmentCount: Math.max(sourceSegmentCount, fallback?.segmentCount || 0),
+    segmentCount: sourceSegmentCount,
   }
 }
 

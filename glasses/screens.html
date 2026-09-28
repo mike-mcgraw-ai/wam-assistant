@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WAM screens</title>
+    <!--
+      Dev only. `vite build` builds index.html and nothing else, so this page
+      and src/screens-dev.ts never reach the packed .ehpk. Open it with
+      `npm run screens`, or at http://localhost:5173/screens.html while
+      `npm run dev` is already running.
+    -->
+    <!-- Roboto is only for the "Android font" toggle; offline, that toggle says so. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400&display=swap" rel="stylesheet" />
+    <style>
+      :root {
+        --bg: #0b0d0c;
+        --card: #131715;
+        --line: #232a26;
+        --text: #d7e0da;
+        --muted: #8a968f;
+        --accent: #5fe08a;
+        --warn: #f0b429;
+        --bad: #ff6b6b;
+        --add: #ffe14d;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; background: var(--bg); color: var(--text); }
+      body { font: 13px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif; }
+      header {
+        position: sticky; top: 0; z-index: 5;
+        background: rgba(11, 13, 12, 0.94); backdrop-filter: blur(6px);
+        border-bottom: 1px solid var(--line);
+        padding: 10px 16px;
+      }
+      .bar { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+      h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 600; letter-spacing: 0.01em; }
+      h1 small { color: var(--muted); font-weight: 400; margin-left: 6px; }
+      label, .seg { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); white-space: nowrap; }
+      .seg button {
+        background: transparent; color: var(--muted); border: 1px solid var(--line);
+        padding: 3px 8px; font: inherit; cursor: pointer;
+      }
+      .seg button:first-of-type { border-radius: 4px 0 0 4px; }
+      .seg button:last-of-type { border-radius: 0 4px 4px 0; }
+      .seg button + button { border-left: 0; }
+      .seg button[aria-pressed='true'] { color: var(--bg); background: var(--accent); border-color: var(--accent); }
+      button.plain {
+        background: transparent; color: var(--text); border: 1px solid var(--line);
+        border-radius: 4px; padding: 3px 8px; font: inherit; cursor: pointer;
+      }
+      button.plain[aria-pressed='true'] { border-color: var(--add); color: var(--add); }
+      input[type='search'], input[type='time'] {
+        background: var(--card); color: var(--text); border: 1px solid var(--line);
+        border-radius: 4px; padding: 3px 6px; font: inherit;
+      }
+      input[type='search'] { width: 160px; }
+      .status { margin-top: 6px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 16px; }
+      .status .bad { color: var(--bad); }
+      .status .warn { color: var(--warn); }
+      .key { display: inline-flex; align-items: center; gap: 5px; }
+      .sw { display: inline-block; width: 14px; height: 0; border-top: 2px solid; vertical-align: middle; }
+      #error {
+        display: none; margin: 12px 16px 0; padding: 10px 12px; border: 1px solid var(--bad);
+        border-radius: 6px; color: var(--bad); white-space: pre-wrap; font: 12px/1.4 ui-monospace, Menlo, monospace;
+      }
+      main { padding: 16px; display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+      .card {
+        background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+        padding: 10px; max-width: 100%;
+      }
+      .card.live { border-color: #2f5a3e; }
+      .card[hidden] { display: none; }
+      .head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+      .head h2 { font-size: 13px; margin: 0; font-weight: 600; flex: 1; min-width: 0; }
+      .badge { font-size: 11px; color: var(--bg); background: var(--add); border-radius: 3px; padding: 0 5px; white-space: nowrap; }
+      .badge:empty { display: none; }
+      .badge.age { color: var(--text); background: #24473a; }
+      .frame { position: relative; line-height: 0; max-width: 100%; overflow: auto; }
+      .frame canvas { image-rendering: pixelated; image-rendering: crisp-edges; display: block; background: #000; }
+      .frame svg { position: absolute; left: 0; top: 0; pointer-events: none; }
+      body:not(.guides) .frame svg { display: none; }
+      .stats { margin-top: 6px; color: var(--muted); font-variant-numeric: tabular-nums; }
+      .warns { margin: 4px 0 0; padding: 0; list-style: none; }
+      .warns li { color: var(--warn); }
+      .warns li.bad { color: var(--bad); }
+      pre.text {
+        margin: 8px 0 0; padding: 8px; background: #000; color: #9fe8b5; border-radius: 4px;
+        font: 11px/1.35 ui-monospace, Menlo, monospace; overflow-x: auto; display: none;
+      }
+      body.show-text pre.text { display: block; }
+      .foot { display: flex; gap: 8px; margin-top: 6px; }
+      .empty { color: var(--muted); padding: 24px 16px; }
+    </style>
+  </head>
+  <body class="guides">
+    <header>
+      <div class="bar">
+        <h1>WAM screens <small id="version"></small></h1>
+        <span class="seg" role="group" aria-label="Zoom">
+          Zoom
+          <button data-zoom="1">1×</button><button data-zoom="2">2×</button><button data-zoom="3">3×</button>
+        </span>
+        <span class="seg" role="group" aria-label="Font">
+          Font
+          <button data-font="system" title="Whatever this browser uses for sans-serif (Helvetica on a Mac)">This browser</button><button data-font="roboto" title="Roboto, stock Android's sans-serif. Your phone may use another.">Android (Roboto)</button>
+        </span>
+        <label><input type="checkbox" id="guides" /> Guides</label>
+        <label><input type="checkbox" id="changes" /> Changes</label>
+        <label><input type="checkbox" id="text" /> Text</label>
+        <label><input type="checkbox" id="live" /> Live</label>
+        <label>Clock <input type="time" id="clock" /></label>
+        <button class="plain" id="clock-now" title="Hold the demo clock at the current time">now</button>
+        <button class="plain" id="pin" aria-pressed="false" title="Compare against these frames until unpinned, instead of against the last update">Pin</button>
+        <input type="search" id="filter" placeholder="Filter screens" aria-label="Filter screens" />
+      </div>
+      <div class="status">
+        <span id="summary">Loading…</span>
+        <span class="key"><span class="sw" style="border-color:#3fb8c9"></span>image containers (live layout)</span>
+        <span class="key"><span class="sw" style="border-color:#5c6b63;border-top-style:dashed"></span>2×2 tiling, 288×144 each</span>
+        <span class="key" id="changes-key"><span class="sw" style="border-color:var(--add)"></span>new ink <span class="sw" style="border-color:var(--bad)"></span>removed ink</span>
+        <span id="font-note"></span>
+      </div>
+    </header>
+    <div id="error"></div>
+    <main id="grid"></main>
+    <script type="module" src="/src/screens-dev.ts"></script>
+  </body>
+</html>

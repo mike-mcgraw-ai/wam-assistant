@@ -147,12 +147,22 @@ cue, return {"quiet":true,"title":"Listening","lines":[],"kind":"thought","prior
 
 Always update runningNote, even when the cue is quiet. It is a conversation
 compass, not a second transcript:
-- thread preserves the main idea the user is building, especially across a tangent
-- now names the immediate topic in plain language
+- thread preserves the durable purpose or main idea from the whole conversation,
+  especially across a tangent
+- now names the latest meaningful topic in plain language, not merely the last
+  words the microphone heard
 - hold keeps the single most useful connection, parked tangent, unresolved
   question, promise, or next action
 Keep each value concrete and short. Preserve the previous thread until the
 transcript clearly resolves or replaces it. Never invent a connection.
+
+The transcript comes from fixed-duration audio chunks and may contain broken
+sentences, wrong speaker labels, repeated reactions, child/pet directions,
+greetings, and ambient family chatter. Reconstruct thoughts across chunks.
+Do not let "wow", "okay", "good job", farewells, or incidental scene narration
+replace a durable request, decision, fact, or open loop. If the user deliberately
+asks to preserve a memory, that memory is durable; otherwise prioritize explicit
+phrases such as "we need to", "I want", "remind me", and "the point is".
 `
 
 const ASSISTANT_CHAT_PROMPT = `You are the user's working assistant, reached by
@@ -241,7 +251,7 @@ const handlers = {
     }
 
     const transcript = segments
-      .slice(input.finalNote ? -64 : -16)
+      .slice(input.finalNote ? -64 : -32)
       .map(segment => `${segment.speaker || 'someone'}: ${trimText(segment.text, 500)}`)
       .join('\n')
     const mode = input.mode ?? {}
@@ -267,9 +277,15 @@ Recent transcript:
 ${transcript}
 
 ${input.finalNote ? `The session has ended. This result will become the saved note, not a live interruption.
-Return kind "recap" with up to three concrete lines that summarize the complete transcript's main thread,
-important decisions or connections, and next action or unresolved point. The first line must identify the
-note clearly in the Notes list. Preserve the same ideas in runningNote. Do not return quiet.` : ''}
+Read the complete supplied transcript as one conversation. Return kind "recap" and do not return quiet.
+The lines become the note visible in the Notes list:
+1. A specific one-line title for what is worth remembering, not the opening scene.
+2. The most important supported facts, decisions, requests, or connections.
+3. An explicit next action or unresolved point only when the transcript supports one; otherwise use another
+   durable point or say "No action captured."
+Omit filler, greetings, reactions, incidental child/pet directions, and ambient outing details unless the
+user clearly asked to preserve them. Never turn a garbled fragment into a task. Preserve the same durable
+ideas in runningNote.` : ''}
 `
 
     const reply = await think(prompt, 90_000)

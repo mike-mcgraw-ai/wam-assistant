@@ -177,7 +177,7 @@ export class Jobs {
       const sessionId = job.input?.sessionId
       if (!active.has(sessionId) && !job.input?.finalNote) continue
       const prior = newest.get(sessionId)
-      if (!prior || job.updatedAt > prior.updatedAt) newest.set(sessionId, job)
+      if (!prior || job.updatedAt >= prior.updatedAt) newest.set(sessionId, job)
     }
     return [...newest.values()]
   }

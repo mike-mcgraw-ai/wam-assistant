@@ -77,13 +77,13 @@ const DEFAULTS = {
   /** Show Listen's mic/STT counters instead of giving the transcript the room. */
   listenDebug: false,
   /**
-   * Rows of content, between header and footer.
-   * 9 visible lines total: header + blank + 6 rows + footer.
+   * Rows of content, between header and footer. The compact image display has
+   * twelve visible lines total.
    */
   /**
    * Show the marker key and the click hint on the running order.
    *
-   * Two rows out of nine, which is expensive — this is here because the
+   * Two rows out of twelve, which is expensive — this is here because the
    * markers are new, and it is one line to turn off once they are not.
    */
   hints: true,
@@ -106,7 +106,7 @@ const DEFAULTS = {
   /**
    * Line numbers on every rendered line.
    *
-   * On by default. The screen is nine lines and the only way to describe one
+   * On by default. The screen has few lines and the only way to describe one
    * from a walk is to point at a row; "line 4 will not select" is a bug report,
    * "the vacuum one" is three messages of guessing. It costs two characters of
    * width, which is cheaper than the round trip.
@@ -119,16 +119,16 @@ const DEFAULTS = {
    */
   diagnostics: false,
 
-  rowsPerPage: 7,
+  rowsPerPage: 10,
   /**
    * Hard ceilings per rendered page.
    *
-   * maxLines is the binding one and it is now measured, not guessed: 9 lines
-   * are visible on real hardware. The firmware will scroll past that, but a
-   * row you have to scroll to find is a row you did not see.
+   * Compact bitmap rendering gives twelve deliberately separated rows. Native
+   * text fallback still clips at this boundary; it may scroll on hardware,
+   * which is preferable to silently losing the extra content after a fallback.
    * maxChars is the firmware's own limit (2000 on upgrade) with room spare.
    */
-  maxLines: 9,
+  maxLines: 12,
   maxChars: 900,
 }
 

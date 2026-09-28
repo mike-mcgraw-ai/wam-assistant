@@ -1,5 +1,5 @@
 # Sanitization record
 
-Generated from private source commit `b34bf9d2ffcf`.
+Generated from private source commit `956b628b8e04`.
 
-This export contains 74 allowlisted files, synthetic configuration, and no Git objects from the private repository.
+This export contains 82 allowlisted files, synthetic configuration, and no Git objects from the private repository.

@@ -8,12 +8,13 @@ to an agent, get back an ASCII mockup, wire it up later.
 ## The canvas
 
 ```
-44 characters wide  x  11 lines tall
+about 44 characters wide  x  12 lines tall
 ```
 
-Hard limits, both of them. Text past line 11 is not scrolled — it is simply not
-on the glasses. A line over 44 characters wraps, which costs a whole row and
-pushes the bottom off the screen.
+Hard limits, both of them. Text past line 12 is not scrolled — it is simply not
+on the glasses (`config.maxLines`). Width is really a pixel budget, not a
+character count: a row that is too wide runs off the edge of the compact bitmap
+and is cut, and in the native text fallback it wraps and costs a row.
 
 - **ASCII only, 32–126.** The firmware silently drops any glyph it lacks, and a
   dropped status marker reads as "fine" — the worst failure this device has.
@@ -145,6 +146,10 @@ API looks like. Layout only.
 node tools/checkscreen.mjs my-screen.txt
 ```
 
-It reports over-long lines, too many lines, non-ASCII characters, and a missing
-cursor. Run it before handing a design back — it catches the three mistakes
-that make a screen unusable on real hardware.
+It reads its limits from the app (`config.maxLines`, `config.maxChars`,
+`metrics.measure`) and reports too many lines, too many characters, non-ASCII
+characters, rows too wide for the native text fallback, and a missing cursor.
+
+It cannot say whether a row fits the compact bitmap — that depends on the
+phone's font. Once a screen is wired up, the screens page (`npm run screens`)
+draws it with the real render path and flags any row that runs off the edge.

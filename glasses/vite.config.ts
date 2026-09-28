@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { defineConfig } from 'vite'
+import { screensPage } from './tools/screens-plugin'
 
 /**
  * The app's own version, baked in from app.json.
@@ -21,6 +22,9 @@ const APP_VERSION = JSON.parse(readFileSync(new URL('./app.json', import.meta.ur
 const LAN_IP = process.env.LAN_IP
 
 export default defineConfig({
+  // Every screen as real pixels at http://localhost:5173/screens.html.
+  // Dev server only (`apply: 'serve'`); the build never sees it.
+  plugins: [screensPage()],
   define: {
     __APP_VERSION__: JSON.stringify(APP_VERSION),
   },

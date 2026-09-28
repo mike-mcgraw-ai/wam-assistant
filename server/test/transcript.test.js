@@ -1,7 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { coalesceTranscriptSegments, parseTaskCommand, transcriptText } from '../src/transcript.js'
+import {
+  cleanTranscriptForDisplay,
+  coalesceTranscriptSegments,
+  displayTranscriptSegments,
+  parseTaskCommand,
+  transcriptText,
+} from '../src/transcript.js'
 
 const chunks = texts => texts.map((text, index) => ({
   id: `s${index}`,
@@ -28,6 +34,33 @@ test('joins transport chunks despite noisy speaker direction', () => {
 test('non-speech labels stay out of meaning-sized text', () => {
   const text = transcriptText(chunks(['Refilling the ice machine.', '(birds chirping)', 'All the way to the top.']))
   assert.equal(text, 'Refilling the ice machine. All the way to the top.')
+})
+
+test('face transcript removes reactions but keeps the complete request', () => {
+  const segments = chunks([
+    'Wow.',
+    'Yeah.',
+    'We need a quick way to hide the screen.',
+    'Thank you.',
+  ])
+
+  assert.equal(
+    displayTranscriptSegments(segments).map(segment => segment.text).join(' '),
+    'We need a quick way to hide the screen.',
+  )
+  assert.match(transcriptText(segments), /Wow/)
+  assert.match(transcriptText(segments), /Thank you/)
+})
+
+test('face cleanup preserves short meaningful directions', () => {
+  assert.equal(cleanTranscriptForDisplay('Okay. Go left. Wow!'), 'Go left.')
+})
+
+test('face cleanup leads with an explicit request buried after chatter', () => {
+  assert.equal(
+    cleanTranscriptForDisplay('Wow. The rain is really coming down. Anyway, I want to hide the screen with one gesture.'),
+    'I want to hide the screen with one gesture.',
+  )
 })
 
 test('ordinary need language is not a task command', () => {

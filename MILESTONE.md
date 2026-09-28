@@ -1,10 +1,8 @@
-# Review before committing
+# Fast-glance readability
 
-Public version: `v0.11.0`  
-Face build: `0.95.0`  
-Originally completed: `2026-09-26`  
+Public version: `v0.12.0`  
+Face build: `0.102.0`  
+Originally completed: `2026-09-27`  
 Sanitized and published: `2026-09-29`
 
-Voice notes and assistant turns can be checked or discarded before saving or sending.
-
-Known historical issue: A same-millisecond Coach job ordering test is flaky here; face build 0.98.0 fixes the timestamp tie.
+Measured typography, compact layouts, simulator tooling, and display QA.

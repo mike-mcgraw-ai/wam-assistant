@@ -29,11 +29,15 @@ scanline grouping loses the row entirely.
 
 ## Checking a layout
 
-    node tools/ruler.mjs        # every row's pixel width and where its columns land
-    node tools/shot.mjs out.png # render a screen in the simulator and save the pixels
+    node tools/ruler.mjs        # every row's pixel width in the firmware font
+    npm run screens             # every screen as compact-bitmap pixels, in a browser tab
+    node tools/shot.mjs out.png # what the simulator's display shows now, on black
 
-`ruler.mjs` is the fast one and catches ragged columns immediately. `shot.mjs`
-is the proof.
+`ruler.mjs` measures against the firmware font, which is what the native text
+fallback uses. Since v0.100.0 the glasses show a bitmap drawn with the WebView's
+own sans-serif instead, so for what is actually on your face use the screens
+page (`screens.html`, see `docs/SIM-LOOP.md`). `shot.mjs` is the check that the
+simulator — the real SDK placing the real containers — agrees with it.
 
 ## The one thing these cannot tell you
 
@@ -41,5 +45,9 @@ Absolute size. The simulator and the hardware disagree: a line of 35 `m`
 wrapped on real glasses, where these widths say it fits. Relative widths are
 what alignment depends on and those do transfer, but the line budget does not
 — which is why `USABLE_PX` is 480 rather than 576, set from the hardware
-observation rather than the simulator. If a line that fits in `shot.mjs` wraps
-on the glasses, that constant is what to lower.
+observation rather than the simulator. If a line that fits in the simulator
+wraps on the glasses, that constant is what to lower.
+
+The simulator is not a font oracle either: it draws the compact bitmap with
+its own WebView's sans-serif (DejaVu Sans on Linux, about 13% wider than
+Helvetica or Roboto at 11px), not the phone's.

@@ -107,6 +107,8 @@ export interface UiState {
   coachModeId: string | null
   /** persistent selected-provider conversation from the hub */
   assistantChat: AssistantChat | null
+  /** latest known conversations for the provider picker */
+  assistantThreads: Partial<Record<AssistantProvider, AssistantChat>>
   /** true while the glasses microphone is capturing a chat turn */
   assistantRecording: boolean
   /** true after a chat turn is recorded but before it has been sent */
@@ -1036,7 +1038,10 @@ function renderPlan(state: UiState, cursor: number): string {
       const armed = state.armedTaskId === row.task.taskId
       lines.push(clip(`${point}${taskRow(row.task, armed)}`, LINE_CHARS))
     } else if (row.kind === 'agenda') {
-      lines.push(clip(`${point}${agendaRow(row.row, isRunning(state, row.row))}`, LINE_CHARS))
+      // agendaRow already enforces the measured pixel width. A second
+      // character-count cap chopped the final `r` from "Take out of dryer"
+      // even though the row still had physical room on the display.
+      lines.push(clipToWidth(`${point}${agendaRow(row.row, isRunning(state, row.row))}`))
     }
   }
 
@@ -1207,9 +1212,7 @@ function renderNoteTranscript(
 export function transcriptScrollMax(state: UiState): number {
   const segments = state.coachSession?.recentSegments ?? []
   if (segments.length === 0) return 0
-  // Two lines of chrome above the transcript at the very least; being a little
-  // generous here only ever means one extra flick, never a wall.
-  const room = Math.max(1, config.maxLines - 2)
+  const room = listenTranscriptRoom(state)
   return Math.max(0, transcriptLines(segments).length - room)
 }
 
@@ -1227,30 +1230,45 @@ function transcriptWindow(lines: string[], room: number, scrollBack: number): st
   return window
 }
 
-function listenSummary(session: CoachSessionSummary | null, cue: CoachCue | null): string | null {
-  // A timely interjection outranks the background summary while it is visible.
-  // It still gets exactly one row: Listen is primarily a transcript reader.
+function listenSummaryLines(session: CoachSessionSummary | null, cue: CoachCue | null): string[] {
+  const rows: string[] = []
+  // A timely interjection gets the first row, but no longer replaces the
+  // conversation compass. The whole point of the compass is surviving the
+  // tangent that produced the interjection.
   const cueText = cue && (!session || cue.createdAt >= session.startedAt)
     ? cue.lines?.join(' ').replace(/\s+/g, ' ').trim()
     : ''
-  if (cueText) return clipToWidth(`AI! ${cueText}`)
+  if (cueText) rows.push(clipToWidth(`AI! ${cueText}`))
 
   const notes = session?.runningNote?.lines ?? []
-  const raw = notes.find(line => /^Thread\s*:/i.test(line)) ?? notes[0]
-  if (!raw) {
-    const latest = session?.recentSegments?.at(-1)?.text.replace(/\s+/g, ' ').trim()
-    if (!latest) return null
-    if (session?.aiState?.status === 'thinking') return clipToWidth('AI thinking...')
-    return clipToWidth(`AI listening: ${latest}`)
+  const ordered = cueText
+    ? [
+        notes.find(line => /^Thread\s*:/i.test(line)),
+        notes.find(line => /^Hold\s*:/i.test(line)),
+        notes.find(line => /^Now\s*:/i.test(line)),
+      ]
+    : notes
+  for (const note of ordered) {
+    const clean = note?.replace(/\s+/g, ' ').trim()
+    if (!clean || rows.some(row => row.toLowerCase() === clean.toLowerCase())) continue
+    rows.push(clipToWidth(clean))
+    if (rows.length >= 3) break
   }
-  const summary = raw.replace(/^(?:Thread|Now|Hold)\s*:\s*/i, '').trim()
-  if (!summary) return null
-  const status = session?.aiState?.status
-  if (status === 'thinking') return clipToWidth(`AI thinking: ${summary}`)
-  if (status === 'quiet') return clipToWidth(`AI quiet: ${summary}`)
-  if (status === 'error') return clipToWidth('AI error - recap still recording')
-  if (status === 'cue') return clipToWidth(`AI ready: ${summary}`)
-  return clipToWidth(`AI listening: ${summary}`)
+
+  if (rows.length === 0) {
+    const status = session?.aiState?.status
+    if (status === 'error') rows.push('Summary unavailable - still recording')
+    else if (status === 'thinking') rows.push('Summary: updating...')
+    else rows.push('Summary: listening for the thread...')
+  }
+  return rows.slice(0, 3)
+}
+
+function listenTranscriptRoom(state: UiState): number {
+  if (config.listenDebug) return Math.max(1, config.maxLines - 3)
+  const summaryRows = listenSummaryLines(state.coachSession ?? null, state.cue ?? null).length
+  const footerRows = state.coachSession?.active && state.listenReviewing ? 1 : 0
+  return Math.max(1, config.maxLines - 1 - summaryRows - footerRows)
 }
 
 function listenModeLabel(mode: CoachMode): string {
@@ -1305,7 +1323,10 @@ function renderCue(state: UiState, scrollBack = 0): string {
         )
         if (stt.lastError) lines.push(clipToWidth(`stt err ${stt.lastError}`))
       }
-    } else lines.push(clipToWidth(`${reviewing ? 'REVIEW' : 'LISTEN'}  ${clip(session.modeName, 12)}  ${session.segmentCount} lines  ${reviewing ? 'STOP' : mic}`))
+    } else {
+      const rewind = scrollBack > 0 ? `  ^${scrollBack}` : ''
+      lines.push(clipToWidth(`${reviewing ? 'REVIEW' : 'LISTEN'}  ${clip(session.modeName, 12)}  ${session.segmentCount} lines  ${reviewing ? 'STOP' : mic}${rewind}`))
+    }
   } else {
     // Stopped is a screen you can act on, not a dead end. Listen from the menu
     // brings you here without recording, so this line has to say how to arm it.
@@ -1318,9 +1339,8 @@ function renderCue(state: UiState, scrollBack = 0): string {
     lines.push(...lines0)
   }
 
-  if (!listenDebug && !state.listenReviewing) {
-    const summary = listenSummary(session ?? null, cue ?? null)
-    if (summary) lines.push(summary)
+  if (!listenDebug) {
+    lines.push(...listenSummaryLines(session ?? null, cue ?? null))
   } else if (cue) {
     lines.push('')
     for (const line of cue.lines) {
@@ -1342,12 +1362,7 @@ function renderCue(state: UiState, scrollBack = 0): string {
     // the whole screen and the scroll position stops meaning anything.
     const all = transcriptLines(segments)
 
-    const maxScroll = Math.max(0, all.length - room)
-    const scroll = Math.min(Math.max(0, scrollBack), maxScroll)
     for (const line of transcriptWindow(all, room, scrollBack)) lines.push(line)
-    // Say so when you are not at the live end, or a paused view of an old line
-    // reads as a transcript that has stopped moving.
-    if (scroll > 0) lines.push(clipToWidth(`  ^ ${scroll} more below - scroll down for live`))
     if (reviewFooter) lines.push(clipToWidth(reviewFooter))
   } else if (reviewFooter) {
     lines.push('', 'No transcript yet', clipToWidth(reviewFooter))
@@ -1385,9 +1400,135 @@ function assistantMessageLines(chat: AssistantChat | null): string[] {
   return lines
 }
 
+function assistantClean(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+function assistantRequestText(text: string): string {
+  const cleaned = assistantClean(text)
+    .replace(
+      /^((ok|okay|alright|so|hey|hi|um|uh|please|thanks|thank you)[,.\s]+)+/i,
+      '',
+    )
+    .replace(/^(chat\s*gpt|chatgpt|claude|codex)[,:\s-]+/i, '')
+    .replace(/[,.\s]+(thanks|thank you)[.!?]?$/i, '')
+    .trim()
+  return cleaned || 'new voice request'
+}
+
+function assistantSnippet(text: string, prefix = ''): string {
+  return clipToWidth(`${prefix}${assistantClean(text)}`)
+}
+
+function assistantLabel(provider: AssistantProvider): string {
+  return provider === 'claude' ? 'Claude' : 'ChatGPT'
+}
+
+function assistantIsReady(state: UiState, provider: AssistantProvider, chat: AssistantChat | null): boolean | null {
+  if (chat) return chat.ready
+  const ready = state.snapshot?.assistant?.[provider]
+  return typeof ready === 'boolean' ? ready : null
+}
+
+function latestAssistantMessage(chat: AssistantChat | null): AssistantChat['messages'][number] | null {
+  const messages = chat?.messages ?? []
+  return messages.length > 0 ? messages[messages.length - 1] : null
+}
+
+function latestUserMessage(chat: AssistantChat | null): AssistantChat['messages'][number] | null {
+  const messages = chat?.messages ?? []
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === 'user') return messages[i]
+  }
+  return null
+}
+
+function latestReplyMessage(chat: AssistantChat | null): AssistantChat['messages'][number] | null {
+  const messages = chat?.messages ?? []
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === 'assistant') return messages[i]
+  }
+  return null
+}
+
+function assistantStatusBadge(state: UiState, provider: AssistantProvider, chat: AssistantChat | null): string {
+  if (chat?.busy) return chat.pending?.status === 'queued' ? 'QUEUED' : 'WORKING'
+  const ready = assistantIsReady(state, provider, chat)
+  if (ready === true) return 'READY'
+  if (ready === false) return 'SETUP'
+  return 'CHECKING'
+}
+
+function assistantGoalLine(state: UiState, provider: AssistantProvider, chat: AssistantChat | null): string {
+  if (assistantIsReady(state, provider, chat) === false) return '  Goal: connect Mac setup'
+  const latest = latestUserMessage(chat)
+  return clipToWidth(`  Goal: ${latest ? assistantRequestText(latest.text) : 'waiting for your ask'}`)
+}
+
+function assistantNowText(state: UiState, provider: AssistantProvider, chat: AssistantChat | null): string {
+  if (chat?.busy) {
+    if (chat.pending?.status === 'queued') return 'reply queued for Mac'
+    if (chat.pending?.status === 'claimed') {
+      const who = assistantClean(chat.pending.claimedBy ?? '')
+      return who ? `${who} drafting reply` : 'drafting reply on Mac'
+    }
+    return 'reply in progress'
+  }
+
+  const ready = assistantIsReady(state, provider, chat)
+  if (ready === false) return 'setup needed on Mac'
+
+  const latest = latestAssistantMessage(chat)
+  if (!latest) return ready === true ? 'waiting for your first ask' : 'loading thread'
+  if (latest.role === 'system') return assistantClean(latest.text) || 'last turn failed'
+  if (latest.role === 'user') return 'sent; waiting for reply'
+  return 'ready for next turn'
+}
+
+function assistantNowLine(state: UiState, provider: AssistantProvider, chat: AssistantChat | null): string {
+  return clipToWidth(`  Now: ${assistantNowText(state, provider, chat)}`)
+}
+
+function assistantProviderRows(
+  state: UiState,
+  provider: { id: AssistantProvider; label: string },
+  selected: boolean,
+): string[] {
+  const chat = state.assistantThreads[provider.id] ?? null
+  const point = selected ? '>' : ' '
+  return [
+    clipToWidth(`${point}${provider.label}  ${assistantStatusBadge(state, provider.id, chat)}`),
+    assistantGoalLine(state, provider.id, chat),
+    assistantNowLine(state, provider.id, chat),
+  ]
+}
+
+function assistantTranscriptGoal(state: UiState): string {
+  const text = (state.coachSession?.recentSegments ?? []).map(segment => segment.text).join(' ')
+  return assistantRequestText(text)
+}
+
+function assistantActiveGoalLine(state: UiState, provider: AssistantProvider): string {
+  if (state.assistantRecording || state.assistantReviewing || state.assistantSending) {
+    return clipToWidth(`Goal: ${assistantTranscriptGoal(state)}`)
+  }
+  return assistantGoalLine(state, provider, state.assistantChat).trimStart()
+}
+
+function assistantActiveNowLine(state: UiState, provider: AssistantProvider): string {
+  if (state.assistantRecording) return 'Now: capturing your ask'
+  if (state.assistantReviewing) return 'Now: checking transcript'
+  if (state.assistantSending) return `Now: queuing ${assistantLabel(provider)}`
+  return assistantNowLine(state, provider, state.assistantChat).trimStart()
+}
+
+function assistantContentRoom(): number {
+  return Math.max(1, config.maxLines - 4)
+}
+
 export function assistantScrollMax(state: UiState): number {
   if (state.view.kind !== 'assistant' || state.view.phase !== 'chat' || state.assistantRecording) return 0
-  const room = Math.max(1, config.maxLines - 2)
+  const room = assistantContentRoom()
   if (state.assistantReviewing) {
     return Math.max(0, transcriptLines(state.coachSession?.recentSegments ?? []).length - room)
   }
@@ -1398,36 +1539,33 @@ function renderAssistant(state: UiState): string {
   const view = state.view
   if (view.kind !== 'assistant') return ''
   if (view.phase === 'providers') {
-    const lines = [clockLine(state), ruleCentred('Chat', false), '']
+    const lines = [clockLine(state), ruleCentred('Chat', false)]
     ASSISTANT_PROVIDERS.forEach((provider, index) => {
-      const point = view.cursor === index ? '>' : ' '
-      const ready = state.snapshot?.assistant?.[provider.id] === true
-      lines.push(clipToWidth(`${point}${provider.label}  ${ready ? 'ready' : 'setup needed'}`))
+      lines.push(...assistantProviderRows(state, provider, view.cursor === index))
     })
-    lines.push('', 'click to choose')
     return assemble(lines, config.maxChars, config.maxLines)
   }
 
-  const label = view.provider === 'claude' ? 'Claude' : 'ChatGPT'
+  const label = assistantLabel(view.provider)
   const status = state.assistantRecording
     ? 'REC'
     : state.assistantReviewing
       ? 'REVIEW'
       : state.assistantSending
-        ? 'sending'
+        ? 'SENDING'
         : state.assistantChat?.busy
-          ? 'thinking'
-          : 'ready'
+          ? assistantStatusBadge(state, view.provider, state.assistantChat)
+          : assistantStatusBadge(state, view.provider, state.assistantChat)
   const footer = state.assistantRecording
     ? 'click stops to review'
     : state.assistantReviewing
       ? 'click sends - back discards'
       : state.assistantSending
-        ? 'Transcribing and sending...'
+        ? 'voice is being queued'
         : state.assistantChat?.busy
-          ? `${label} is thinking...`
-          : '[mic] click to speak'
-  const room = Math.max(1, config.maxLines - 2)
+          ? 'screen refreshes while open'
+          : 'ready - click to talk'
+  const room = assistantContentRoom()
   let content: string[]
 
   if (state.assistantRecording || state.assistantReviewing) {
@@ -1437,16 +1575,27 @@ function renderAssistant(state: UiState): string {
       : state.assistantReviewing
         ? ['No transcript yet.', 'Back discards.']
         : ['Recording...', 'Speak, then click to review.']
+  } else if (state.assistantSending) {
+    content = ['Transcribing voice...', 'Then the Mac runner takes it.']
+  } else if (state.assistantChat?.busy) {
+    const prior = latestReplyMessage(state.assistantChat)
+    content = prior ? [assistantSnippet(prior.text, 'Prev: ')] : []
   } else {
     content = assistantMessageLines(state.assistantChat)
-    if (content.length === 0) content = ['No messages yet.']
+    if (content.length === 0) content = ['Ready for your next message.']
   }
 
   const scroll = Math.max(0, Math.min(assistantScrollMax(state), view.scroll ?? 0))
   const end = content.length - scroll
   const window = content.slice(Math.max(0, end - room), end)
   return assemble(
-    [clipToWidth(`${label}  ${status}`), ...window, clipToWidth(footer)],
+    [
+      clipToWidth(`${label}  ${status}`),
+      assistantActiveGoalLine(state, view.provider),
+      assistantActiveNowLine(state, view.provider),
+      ...window,
+      clipToWidth(footer),
+    ],
     config.maxChars,
     config.maxLines,
   )
