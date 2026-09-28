@@ -29,9 +29,22 @@
     border-radius:50%; background:#2bff6a; opacity:.9;
   }
   #stale.off{background:#444}
+  /* Keyboard: a one-line note of the last key, and a key list that shows on
+     load and on "?" so it never sits over the frame on the iPad. */
+  #sent,#keys{
+    position:absolute; left:2%; bottom:2%; margin:0;
+    font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; color:#8fd9a8;
+    background:rgba(0,0,0,.94); padding:4px 8px; border-radius:4px;
+    transition:opacity .3s; pointer-events:none;
+  }
+  #sent{opacity:0}
+  #sent.on{opacity:1}
+  #sent.warn{color:#f0b429}
+  #keys{bottom:auto; top:2%; white-space:pre; opacity:0}
+  #keys.on{opacity:1}
 </style>
 
-<div id="panel"><pre id="screen">connecting…</pre><div id="stale"></div></div>
+<div id="panel"><pre id="screen">connecting…</pre><div id="stale"></div><p id="sent"></p><p id="keys"></p></div>
 
 <script>
 /*
@@ -63,4 +76,87 @@ async function tick() {
 
 tick()
 setInterval(tick, 1000)
+
+/*
+ * Drive the glasses from the keyboard.
+ *
+ * Each key is posted to /input; the app on the glasses long-polls it and
+ * handles the key exactly like the matching ring gesture. The OS menu cannot
+ * be opened remotely, so the number keys pick its items directly — the IDs are
+ * the menuItems in glasses/src/main.ts.
+ */
+const MENU = [
+  ['1', 'Listen', 12],
+  ['2', 'Chat', 14],
+  ['3', 'Notes', 13],
+  ['4', 'Lists', 6],
+  ['5', 'Diagnostics', 7],
+]
+const KEYS = {
+  ArrowUp: ['up', '↑ up'], k: ['up', '↑ up'],
+  ArrowDown: ['down', '↓ down'], j: ['down', '↓ down'],
+  ArrowRight: ['click', 'click'], ' ': ['click', 'click'],
+  Escape: ['double', 'double-tap (back)'], Backspace: ['double', 'double-tap (back)'],
+}
+for (const [key, name, id] of MENU) KEYS[key] = ['menu:' + id, 'menu: ' + name]
+
+const sent = document.getElementById('sent')
+const keysBox = document.getElementById('keys')
+keysBox.textContent = [
+  '↑ ↓  or  k j   scroll',
+  '→ / Space       click',
+  'Esc / ⌫        double-tap (back)',
+  ...MENU.map(([key, name]) => key.padEnd(15) + name),
+  '?              show / hide this',
+].join('\n')
+
+let keysTimer
+function showKeys(ms) {
+  keysBox.classList.add('on')
+  clearTimeout(keysTimer)
+  if (ms) keysTimer = setTimeout(() => keysBox.classList.remove('on'), ms)
+}
+showKeys(6000)
+
+let sentTimer
+function note(text, warn) {
+  sent.textContent = text
+  sent.className = warn ? 'on warn' : 'on'
+  clearTimeout(sentTimer)
+  sentTimer = setTimeout(() => { sent.className = '' }, warn ? 4000 : 1200)
+}
+
+async function press(action, label) {
+  try {
+    const res = await fetch('/input', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action }),
+    })
+    const body = await res.json()
+    if (!res.ok) return note(body.error || 'hub refused ' + action, true)
+    // Nobody waiting means the app is closed, asleep in the background, or
+    // an older build without keyboard support.
+    note(body.listening ? label : label + ' — sent, but the glasses app is not listening', !body.listening)
+  } catch {
+    return note('hub unreachable', true)
+  }
+  // The new frame lands when the glasses repaint; look for it sooner than the
+  // once-a-second poll would.
+  for (const ms of [250, 600, 1100]) setTimeout(tick, ms)
+}
+
+window.addEventListener('keydown', event => {
+  if (event.metaKey || event.ctrlKey || event.altKey) return
+  if (event.key === '?') {
+    keysBox.classList.contains('on') ? keysBox.classList.remove('on') : showKeys(0)
+    return
+  }
+  const hit = KEYS[event.key]
+  if (!hit) return
+  event.preventDefault()
+  // Holding an arrow scrolls like a flick; taps do not repeat.
+  if (event.repeat && hit[0] !== 'up' && hit[0] !== 'down') return
+  press(hit[0], hit[1])
+})
 </script>

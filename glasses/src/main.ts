@@ -19,7 +19,8 @@ import {
 } from '@evenrealities/even_hub_sdk'
 
 import { config } from './config'
-import { COMPACT_PANEL_H, COMPACT_W, COMPACT_X, COMPACT_Y, renderCompactDisplay } from './compactdisplay'
+import { dashboardFrame, TILES, TILE_H, TILE_W, hashTile, listenFrame, splitTiles, textFrame } from './fullpanel'
+import { listenBoard } from './listenboard'
 import {
   activateCoachMode,
   beginStep,
@@ -65,6 +66,7 @@ import {
   type View,
 } from './render'
 import { newGame, nudge, serve, tick as pongTick } from './pong'
+import { startRemoteInput } from './remoteinput'
 import type { AssistantProvider } from './types'
 
 /**
@@ -89,8 +91,10 @@ import type { AssistantProvider } from './types'
 
 const CONTAINER_ID = 1
 const CONTAINER_NAME = 'board'
-const IMAGE_CONTAINER_IDS = [2, 3] as const
-const IMAGE_CONTAINER_NAMES = ['compact-top', 'compact-bottom'] as const
+// Four 288x144 tiles covering the whole 576x288 panel (v0.103.0 claim).
+// Ordinary screens draw where the old centred bands sat; Listen uses all four.
+const IMAGE_CONTAINER_IDS = [2, 3, 4, 5] as const
+const IMAGE_CONTAINER_NAMES = ['tile-tl', 'tile-tr', 'tile-bl', 'tile-br'] as const
 const CAPTURE_TASK_ID = 'captured-notes'
 
 const MENU = {
@@ -224,8 +228,122 @@ const SLEEP_CONTENT = ' '
 const BRIGHT = 4
 const DIM = 0
 let compactFailures = 0
+/** Hash of what each tile currently shows; null means "unknown, send it". */
+let tileHashes: Array<number | null> = IMAGE_CONTAINER_IDS.map(() => null)
+/** The event-capture text layer only needs blanking once, not every paint. */
+let textLayerBlank = false
+let painting = false
+let repaintQueued = false
+let consumeWakeInputUntil = 0
 
+function dashboardSection(): string {
+  switch (state.view.kind) {
+    case 'plan': return 'LIFE'
+    case 'index': return 'LISTS'
+    case 'board': return 'BOARD'
+    case 'task': return 'TASK'
+    case 'chores': return 'CHORES'
+    case 'notes': return 'NOTES'
+    case 'capture': return 'CAPTURE'
+    case 'note':
+    case 'transcript': return 'NOTE'
+    case 'checklist': return 'CHECKLIST'
+    case 'picker': return 'NEW LIST'
+    case 'inbox': return 'SHARED'
+    case 'cue': return 'LISTEN'
+    case 'assistant': return 'CHAT'
+    case 'pong': return 'PONG'
+    case 'fonttest': return 'DISPLAY'
+  }
+}
+
+/** Move the clock out of the compact content; the right rail owns it now. */
+function dashboardContent(content: string): string {
+  const lines = content.split('\n')
+  if (/\d{1,2}:\d{2}[ap]\s+v\d/i.test(lines[0] ?? '')) lines.shift()
+  return lines.join('\n')
+}
+
+function timerClock(totalSeconds: number): string {
+  const seconds = Math.max(0, Math.floor(totalSeconds))
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  const tail = String(seconds % 60).padStart(2, '0')
+  return hours > 0 ? `${hours}:${String(minutes).padStart(2, '0')}:${tail}` : `${minutes}:${tail}`
+}
+
+function dashboardTimers(now = Date.now()): Array<{ label: string; value: string; sortAt: number }> {
+  const timers: Array<{ label: string; value: string; sortAt: number }> = []
+  for (const run of state.snapshot?.checklists?.active ?? []) {
+    if (run.complete || run.space !== state.space) continue
+    for (const item of run.items) {
+      if (item.done) continue
+      if (item.stepKind === 'wait' && item.endsAt !== null) {
+        const remaining = Math.ceil((item.endsAt - now) / 1000)
+        timers.push({
+          label: `${run.name} - ${item.label}`,
+          value: remaining >= 0 ? `${timerClock(remaining)} left` : `${timerClock(-remaining)} overdue`,
+          sortAt: item.endsAt,
+        })
+      } else if (item.running && item.startedAt !== null) {
+        timers.push({
+          label: `${run.name} - ${item.label}`,
+          value: `${timerClock((now - item.startedAt) / 1000)} running`,
+          sortAt: item.startedAt,
+        })
+      }
+    }
+  }
+  return timers.sort((a, b) => a.sortAt - b.sortAt)
+}
+
+function dashboardRail() {
+  const now = new Date()
+  const hour24 = now.getHours()
+  const hour = hour24 % 12 || 12
+  const time = `${hour}:${String(now.getMinutes()).padStart(2, '0')} ${hour24 < 12 ? 'AM' : 'PM'}`
+  const weekday = now.toLocaleDateString('en-US', { weekday: 'long' }).toUpperCase()
+  const calendar = now.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).toUpperCase()
+  const connection = state.fromCache ? 'CACHED' : state.error ? 'OFFLINE' : 'SYNCED'
+  const status = state.coachSession?.active
+    ? `MIC ACTIVE - ${state.coachSession.modeName}`
+    : state.assistantRecording
+      ? 'MIC ACTIVE - Assistant message'
+      : state.space === 'life' ? 'Personal dashboard' : 'Operations dashboard'
+  return {
+    time,
+    weekday,
+    date: calendar,
+    section: dashboardSection(),
+    connection,
+    status,
+    version: `v${__APP_VERSION__}`,
+    timers: dashboardTimers(now.getTime()),
+  }
+}
+
+/**
+ * One paint at a time. Four tile sends can take most of a second, and the 1 s
+ * Listen loop would otherwise start a second paint in the middle of the first.
+ * A paint asked for while one runs is folded into one more pass at the end.
+ */
 async function paint(): Promise<void> {
+  if (painting) {
+    repaintQueued = true
+    return
+  }
+  painting = true
+  try {
+    do {
+      repaintQueued = false
+      await paintNow()
+    } while (repaintQueued)
+  } finally {
+    painting = false
+  }
+}
+
+async function paintNow(): Promise<void> {
   try {
     // Rendered once, used twice: the glasses and the mirror must never be
     // able to show different frames.
@@ -240,36 +358,64 @@ async function paint(): Promise<void> {
     // A failed image transfer falls through to native text for this frame, so
     // compact rendering can never turn a working screen into a blank one.
     if (compactFailures < 3) {
-      const panels = renderCompactDisplay(content)
-      let compactOk = true
-      for (let index = 0; index < panels.length; index += 1) {
-        const imageResult = await bridge.updateImageRawData(
+      const board = asleep ? null : listenBoard(state)
+      const frame = asleep
+        ? textFrame(content)
+        : board
+          ? listenFrame(board)
+          : dashboardFrame(dashboardContent(content), dashboardRail())
+      const tiles = splitTiles(frame)
+      const updates = tiles.flatMap((tile, index) => {
+        // Only tiles whose pixels changed are sent: each send is ~100 ms of
+        // fixed cost, so an unchanged tile is pure waste.
+        const hash = hashTile(tile)
+        return tileHashes[index] === hash ? [] : [{ index, tile, hash }]
+      })
+
+      // The SDK has no multi-image transaction. Starting every changed tile
+      // together gives the phone/firmware all four writes at once instead of
+      // making the user watch this loop await each quadrant in turn. The
+      // outer paint lock still prevents frames from overlapping.
+      const results = await Promise.allSettled(
+        updates.map(({ index, tile }) => bridge.updateImageRawData(
           new ImageRawDataUpdate({
             containerID: IMAGE_CONTAINER_IDS[index],
             containerName: IMAGE_CONTAINER_NAMES[index],
-            imageData: panels[index],
+            imageData: tile,
           }),
-        )
-        if (!ImageRawDataUpdateResult.isSuccess(imageResult)) {
-          compactOk = false
-          console.warn('[paint] compact image failed:', imageResult)
-          break
+        )),
+      )
+      let compactOk = true
+      results.forEach((result, resultIndex) => {
+        const { index, hash } = updates[resultIndex]
+        if (result.status === 'fulfilled' && ImageRawDataUpdateResult.isSuccess(result.value)) {
+          tileHashes[index] = hash
+          return
         }
-      }
+        compactOk = false
+        tileHashes[index] = null
+        const reason = result.status === 'fulfilled' ? result.value : result.reason
+        console.warn('[paint] tile image failed:', IMAGE_CONTAINER_NAMES[index], reason)
+      })
       if (compactOk) {
         compactFailures = 0
-        await bridge.textContainerUpgrade(
-          new TextContainerUpgrade({
-            containerID: CONTAINER_ID,
-            containerName: CONTAINER_NAME,
-            content: SLEEP_CONTENT,
-            textColor: DIM,
-          }),
-        )
+        if (!textLayerBlank) {
+          await bridge.textContainerUpgrade(
+            new TextContainerUpgrade({
+              containerID: CONTAINER_ID,
+              containerName: CONTAINER_NAME,
+              content: SLEEP_CONTENT,
+              textColor: DIM,
+            }),
+          )
+          textLayerBlank = true
+        }
         return
       }
       compactFailures += 1
     }
+
+    textLayerBlank = false
 
     await bridge.textContainerUpgrade(
       new TextContainerUpgrade({
@@ -2048,7 +2194,7 @@ async function onMenu(itemID: number): Promise<void> {
 // ---- boot ------------------------------------------------------------------
 
 const page = new CreateStartUpPageContainer({
-  containerTotalNum: 3,
+  containerTotalNum: 5,
   textObject: [
     new TextContainerProperty({
       xPosition: 0,
@@ -2065,16 +2211,16 @@ const page = new CreateStartUpPageContainer({
       content: SLEEP_CONTENT,
       textColor: DIM,
       isEventCapture: 1,
-      zOrderIndex: 3,
+      zOrderIndex: 5,
     }),
   ],
   imageObject: [
     ...IMAGE_CONTAINER_IDS.map((containerID, index) =>
       new ImageContainerProperty({
-        xPosition: COMPACT_X,
-        yPosition: COMPACT_Y + index * COMPACT_PANEL_H,
-        width: COMPACT_W,
-        height: COMPACT_PANEL_H,
+        xPosition: TILES[index].x,
+        yPosition: TILES[index].y,
+        width: TILE_W,
+        height: TILE_H,
         containerID,
         containerName: IMAGE_CONTAINER_NAMES[index],
         zOrderIndex: index + 1,
@@ -2139,7 +2285,7 @@ function normaliseEventType(raw: unknown): OsEventTypeList | undefined {
   return undefined
 }
 
-bridge.onEvenHubEvent((event: EvenHubEvent) => {
+function onHubEvent(event: EvenHubEvent): void {
   state.events += 1
 
   // Any event at all means the glasses are showing us, whatever we last
@@ -2181,7 +2327,7 @@ bridge.onEvenHubEvent((event: EvenHubEvent) => {
   // is spent doing so, which is what makes sleep safe to reach for: nothing
   // you press to wake up can act on the screen you cannot see. Lifecycle
   // events below are not input and fall through on their own.
-  if (asleep && event.menuItemClickEvent?.itemID === undefined) {
+  if (event.menuItemClickEvent?.itemID === undefined) {
     const sys = event.sysEvent?.eventType
     const lifecycle =
       sys === OsEventTypeList.FOREGROUND_ENTER_EVENT ||
@@ -2189,9 +2335,17 @@ bridge.onEvenHubEvent((event: EvenHubEvent) => {
       sys === OsEventTypeList.SYSTEM_EXIT_EVENT ||
       sys === OsEventTypeList.ABNORMAL_EXIT_EVENT ||
       sys === OsEventTypeList.IMU_DATA_REPORT
-    if (!lifecycle) {
+    if (asleep && !lifecycle) {
       state.lastEvent = 'wake'
       void wakeDisplay()
+      return
+    }
+    // On hardware, waking can arrive as FOREGROUND_ENTER followed by the tap
+    // that caused it. The foreground event already repaints the screen; spend
+    // its paired tap here so waking never also activates the home row.
+    if (!lifecycle && Date.now() < consumeWakeInputUntil) {
+      consumeWakeInputUntil = 0
+      state.lastEvent = 'wake-tap'
       return
     }
   }
@@ -2216,6 +2370,7 @@ bridge.onEvenHubEvent((event: EvenHubEvent) => {
     state.foreground = true
     // Putting them back on is the end of any nap. The OS has just handed the
     // screen back; leaving it dark would read as a dead app.
+    if (asleep) consumeWakeInputUntil = Date.now() + 1_500
     asleep = false
     state.lastEvent = 'fg-in'
     void refresh()
@@ -2290,7 +2445,11 @@ bridge.onEvenHubEvent((event: EvenHubEvent) => {
       void paint()
       break
   }
-})
+}
+
+bridge.onEvenHubEvent(onHubEvent)
+// Keys pressed on the hub's /mirror page arrive as the same events.
+startRemoteInput(onHubEvent)
 
 bridge.onLaunchSource(source => console.log('[boot] launched from', source))
 
@@ -2319,6 +2478,20 @@ if (state.space === 'life') {
  */
 setInterval(() => void refresh(), config.pollMs)
 setInterval(() => void refreshCoachCue(true), config.cueMs)
+
+// The dashboard clock and timers are computed locally from authoritative end
+// timestamps. Repaint once per second while a timer is live; tile hashing means
+// only the bottom-right timer tile crosses to the glasses. With no timer, only
+// the top-right clock tile changes, once per minute.
+let dashboardMinute = -1
+setInterval(() => {
+  if (!state.foreground || asleep || listenBoard(state)) return
+  const minute = Math.floor(Date.now() / 60_000)
+  const timersLive = dashboardTimers().length > 0
+  if (!timersLive && minute === dashboardMinute) return
+  dashboardMinute = minute
+  void paint()
+}, 1_000)
 
 /**
  * Repaint the Coach screen while a session is live.

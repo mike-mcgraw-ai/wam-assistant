@@ -1,6 +1,6 @@
 # WAM Assistant
 
-> Historical milestone `v0.12.0`, based on face build `0.102.0`. Originally completed 2026-09-27; sanitized and published 2026-09-29. See [MILESTONE.md](MILESTONE.md) for this checkpoint.
+> Historical milestone `v0.13.0`, based on face build `0.108.0`. Originally completed 2026-09-28; sanitized and published 2026-09-29. See [MILESTONE.md](MILESTONE.md) for this checkpoint.
 
 A portable, privacy-first conversation assistant with an Even G2 smart-glasses
 client. WAM keeps the thread of a real conversation visible without demanding

@@ -127,7 +127,7 @@ const COACH_CUE_PROMPT = `You are writing a tiny heads-up cue for smart glasses.
 Return ONLY a JSON object, no prose:
 {
   "title": "30 characters max",
-  "lines": ["up to 3 lines, 44 characters max each"],
+  "lines": ["up to 3 lines, 90 characters max each"],
   "kind": "answer" | "followup" | "factcheck" | "advice" | "thought" | "recap",
   "priority": 0 | 1 | 2 | 3 | 4,
   "quiet": false,
@@ -135,6 +135,10 @@ Return ONLY a JSON object, no prose:
     "thread": "the main thread worth returning to",
     "now": "what the conversation is on right now",
     "hold": "a parked tangent, connection, open question, or next action"
+  },
+  "board": {
+    "topics": ["every distinct topic so far, oldest first, 44 characters max each"],
+    "points": ["up to 4 condensed points from the last minute or two, 120 characters max each, newest last"]
   }
 }
 
@@ -155,6 +159,23 @@ compass, not a second transcript:
   question, promise, or next action
 Keep each value concrete and short. Preserve the previous thread until the
 transcript clearly resolves or replaces it. Never invent a connection.
+
+Always return board too, even when the cue is quiet. It fills two panels the
+user glances at while talking:
+- topics is the running list of what the conversation has covered. Start from
+  the previous board's topics. Append a topic only when the talk clearly moves
+  to something new; if the latest topic just got sharper, rename it in place.
+  Short noun phrases ("Car needs new tires", "Tax extension call"). At most 8;
+  drop the oldest.
+- points is the recent conversation condensed: what was actually said, asked,
+  decided or promised, with the names, numbers and times that were said. Plain
+  words, no filler, no commentary, no guesses. Cover roughly the last minute
+  or two, newest point last. Rewrite freely as the conversation moves.
+
+The cue (title/lines) is the one place for help: answer a question that was
+asked, flag a claim that looks wrong (kind "factcheck", say what is correct and
+how sure you are), or offer one concrete follow-up question when the talk
+stalls (kind "followup"). If nothing is worth interrupting for, stay quiet.
 
 The transcript comes from fixed-duration audio chunks and may contain broken
 sentences, wrong speaker labels, repeated reactions, child/pet directions,
@@ -196,7 +217,23 @@ function normalizeRunningNote(raw, constraints = {}) {
   return lines.length > 0 ? { title: 'Conversation compass', lines } : null
 }
 
+function normalizeBoard(raw, constraints = {}) {
+  if (!raw || typeof raw !== 'object') return null
+  const list = (value, max, chars) => (Array.isArray(value) ? value : [])
+    .map(item => trimText(item, chars))
+    .filter(Boolean)
+    .slice(-max)
+  const topics = list(raw.topics, Number(constraints.boardTopics) || 8, Number(constraints.boardTopicChars) || 44)
+  const points = list(raw.points, Number(constraints.boardPoints) || 4, Number(constraints.boardPointChars) || 120)
+  return topics.length || points.length ? { topics, points } : null
+}
+
 function normalizeCoachCue(parsed, constraints = {}) {
+  const cue = normalizeCueOnly(parsed, constraints)
+  return { ...cue, board: normalizeBoard(parsed.board, constraints) }
+}
+
+function normalizeCueOnly(parsed, constraints = {}) {
   if (!parsed || typeof parsed !== 'object') throw new Error('expected a JSON object')
   const allowed = new Set(Array.isArray(constraints.allowedKinds) ? constraints.allowedKinds : [])
   const fallbackKind = allowed.has('thought') ? 'thought' : [...allowed][0] || 'thought'
@@ -272,6 +309,9 @@ ${JSON.stringify(input.session ?? {}, null, 2)}
 
 Previous running note:
 ${JSON.stringify(input.previousRunningNote ?? null, null, 2)}
+
+Previous board:
+${JSON.stringify(input.previousBoard ?? null, null, 2)}
 
 Recent transcript:
 ${transcript}

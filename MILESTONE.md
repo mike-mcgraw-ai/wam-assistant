@@ -1,8 +1,8 @@
-# Fast-glance readability
+# The full listening board
 
-Public version: `v0.12.0`  
-Face build: `0.102.0`  
-Originally completed: `2026-09-27`  
+Public version: `v0.13.0`  
+Face build: `0.108.0`  
+Originally completed: `2026-09-28`  
 Sanitized and published: `2026-09-29`
 
-Measured typography, compact layouts, simulator tooling, and display QA.
+Transcript, topics, points, summaries, and cues occupy four coordinated panels.

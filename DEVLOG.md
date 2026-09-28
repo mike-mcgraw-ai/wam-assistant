@@ -16,3 +16,4 @@ These are the real completion dates of private device builds. The sanitized port
 | v0.10.0 | 2026-09-21 | 0.89.0 | **Useful without a model:** Deterministic local distillation keeps captured notes readable when the AI worker is unavailable. |
 | v0.11.0 | 2026-09-26 | 0.95.0 | **Review before committing:** Voice notes and assistant turns can be checked or discarded before saving or sending. |
 | v0.12.0 | 2026-09-27 | 0.102.0 | **Fast-glance readability:** Measured typography, compact layouts, simulator tooling, and display QA. |
+| v0.13.0 | 2026-09-28 | 0.108.0 | **The full listening board:** Transcript, topics, points, summaries, and cues occupy four coordinated panels. |

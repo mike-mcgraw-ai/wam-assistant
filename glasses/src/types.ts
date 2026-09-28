@@ -363,6 +363,13 @@ export interface CoachSessionSummary {
   segmentCount: number
   recentSegments: CoachSegment[]
   runningNote: CoachRunningNote | null
+  /** Listen board topics and condensed points; absent from older hubs. */
+  board?: {
+    topics: string[]
+    points: string[]
+    updatedAt: number | null
+    segmentCount: number
+  } | null
   aiState?: {
     status: 'listening' | 'thinking' | 'quiet' | 'cue' | 'error'
     segmentCount: number

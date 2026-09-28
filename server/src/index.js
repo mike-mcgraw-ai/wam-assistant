@@ -20,6 +20,7 @@ import { Coach } from './coach.js'
 import { transcribePcm, transcriberInfo } from './stt.js'
 import { AssistantChat } from './assistant.js'
 import { coalesceTranscriptSegments, isNonSpeechText, parseTaskCommand, transcriptText } from './transcript.js'
+import { handleRemoteInput } from './remoteinput.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -37,6 +38,9 @@ const DOWNLOADS_DIR = process.env.DOWNLOADS_DIR || join(HERE, '..', 'downloads')
 const PHONE_PACKAGE_PATH = process.env.PHONE_PACKAGE_PATH || join(DOWNLOADS_DIR, 'wam-latest.ehpk')
 const AI_CUE_INTERVAL_MS = Math.max(30_000, Number(process.env.AI_CUE_INTERVAL_MS || 2 * 60_000))
 const AI_CUE_LULL_MS = Math.max(3_000, Number(process.env.AI_CUE_LULL_MS || 8_000))
+// Longest the Listen board waits for fresh topics/summary while people keep
+// talking. The lull timer alone never fires during steady speech (v0.103.0).
+const AI_NOTE_MAX_WAIT_MS = Math.max(8_000, Number(process.env.AI_NOTE_MAX_WAIT_MS || 15_000))
 const AI_CUE_NOTIFY = process.env.AI_CUE_NOTIFY === '1'
 // Life is the active product scope. Ops remains fully implemented and can be
 // re-enabled explicitly with AI_CUE_SPACES=ops (or ops,life).
@@ -422,6 +426,28 @@ function modelRunningNote(modelResult, fallback = null) {
   }
 }
 
+/**
+ * The Listen board's topics and condensed points (v0.103.0), passed through
+ * from the newest model result. Older worker results have no board: null.
+ */
+function modelBoard(modelResult) {
+  const raw = modelResult?.board
+  if (!raw || typeof raw !== 'object') return null
+  const clean = (list, max, chars) => (Array.isArray(list) ? list : [])
+    .map(line => String(line || '').replace(/\s+/g, ' ').trim().slice(0, chars))
+    .filter(Boolean)
+    .slice(-max)
+  const topics = clean(raw.topics, 8, 60)
+  const points = clean(raw.points, 5, 140)
+  if (topics.length === 0 && points.length === 0) return null
+  return {
+    topics,
+    points,
+    updatedAt: modelResult.jobUpdatedAt || Date.now(),
+    segmentCount: Number(modelResult.sourceSegmentCount) || 0,
+  }
+}
+
 function coachSnapshotWithModel(space, now = Date.now()) {
   const snapshot = coach.snapshot(space)
   const modelCue = latestCoachModelCue(space, snapshot, now)
@@ -429,6 +455,7 @@ function coachSnapshotWithModel(space, now = Date.now()) {
     snapshot.session = {
       ...snapshot.session,
       runningNote: modelRunningNote(modelCue, snapshot.session.runningNote),
+      board: modelBoard(modelCue),
       aiState: coachAiState(snapshot.session),
     }
   }
@@ -502,14 +529,29 @@ const upgradedListenNotes = upgradeListenNoteSummaries()
 if (upgradedListenNotes) console.log(`[coach] upgraded ${upgradedListenNotes} Listen note summar${upgradedListenNotes === 1 ? 'y' : 'ies'}`)
 
 const coachCueTimers = new Map()
+/** When each session last asked the model for a fresh read. */
+const coachQueuedAt = new Map()
 
 function scheduleCoachCue(session) {
   if (!session?.active || session.context?.taskId === '__assistant__') return
   const prior = coachCueTimers.get(session.id)
   if (prior) clearTimeout(prior)
   const expectedCount = session.segmentCount
+
+  // Steady speech: every new segment resets the lull timer below, so without
+  // this the board would not update until someone paused.
+  const now = Date.now()
+  const last = coachQueuedAt.get(session.id)
+  if (last === undefined) {
+    coachQueuedAt.set(session.id, now)
+  } else if (now - last >= AI_NOTE_MAX_WAIT_MS) {
+    coachQueuedAt.set(session.id, now)
+    queueCoachCue(session.space, { reason: 'speech-steady' })
+  }
+
   const timer = setTimeout(() => {
     coachCueTimers.delete(session.id)
+    coachQueuedAt.set(session.id, Date.now())
     const current = coach.currentSession(session.space)
     if (!current || current.id !== session.id || current.segments.length !== expectedCount) return
     queueCoachCue(session.space, { reason: 'speech-lull' })
@@ -522,6 +564,7 @@ function createCoachCueJob(session, {
   priority = 'normal',
   finalNote = null,
   previousRunningNote = null,
+  previousBoard = null,
 } = {}) {
   if (!session) return null
   const safeSpace = cueSpace(session.space)
@@ -546,12 +589,18 @@ function createCoachCueJob(session, {
       },
       recentSegments,
       previousRunningNote,
+      previousBoard,
       ...(finalNote ? { finalNote } : {}),
       constraints: {
         titleChars: 30,
-        lineChars: 44,
+        // Cues have a whole 288x144 tile on the Listen board now (v0.103.0).
+        lineChars: 90,
         maxLines: 3,
         noteLineChars: 42,
+        boardTopics: 8,
+        boardTopicChars: 44,
+        boardPoints: 4,
+        boardPointChars: 120,
         allowedKinds: ['answer', 'followup', 'factcheck', 'advice', 'thought', 'recap'],
       },
     },
@@ -576,6 +625,7 @@ function queueCoachCue(space, { reason = 'poll', priority = 'normal' } = {}) {
     reason,
     priority,
     previousRunningNote: modelRunningNote(modelCue, session.runningNote),
+    previousBoard: modelBoard(modelCue),
   })
 }
 
@@ -1080,6 +1130,9 @@ const server = http.createServer(async (req, res) => {
     }
     return json(res, 200, { text: probeText })
   }
+
+  // Keys pressed on /mirror, long-polled by the app on the glasses.
+  if (await handleRemoteInput(req, res, url, { json, readBody })) return
 
   /**
    * Mirror of whatever is on the glasses.

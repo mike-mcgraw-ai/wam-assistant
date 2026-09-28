@@ -13,15 +13,15 @@ export const COMPACT_ROWS = 12
 export const COMPACT_X = Math.floor((576 - COMPACT_W) / 2)
 export const COMPACT_Y = Math.floor((288 - COMPACT_PANEL_H * 2) / 2)
 
-const FONT_PX = 11
-const LINE_PX = 18
+export const FONT_PX = 11
+export const LINE_PX = 18
 const LEFT_PX = 5
 const TOP_PX = 3
 const PANEL_ROWS = COMPACT_ROWS / 2
-const LETTER_TRACK_PX = 1.4
-const SPACE_TRACK_PX = 1.1
-const INK = 180
-const EDGE_THRESHOLD = 88
+export const LETTER_TRACK_PX = 1.4
+export const SPACE_TRACK_PX = 1.1
+export const INK = 180
+export const EDGE_THRESHOLD = 88
 
 /**
  * Render one WAM text frame as hard-edged greyscale bytes.
