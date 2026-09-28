@@ -1,7 +1,7 @@
 {
   "name": "wam-assistant-portfolio",
   "private": true,
-  "version": "0.13.0",
+  "version": "0.14.0",
   "scripts": {
     "build": "npm --prefix glasses run build",
     "test": "npm --prefix server test && npm --prefix glasses run typecheck",

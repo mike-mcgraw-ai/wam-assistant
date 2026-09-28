@@ -234,7 +234,6 @@ let tileHashes: Array<number | null> = IMAGE_CONTAINER_IDS.map(() => null)
 let textLayerBlank = false
 let painting = false
 let repaintQueued = false
-let consumeWakeInputUntil = 0
 
 function dashboardSection(): string {
   switch (state.view.kind) {
@@ -2323,11 +2322,12 @@ function onHubEvent(event: EvenHubEvent): void {
   lastInputAt = Date.now()
 
   // ---- wake ------------------------------------------------------------
-  // Before anything is dispatched. Any input at all brings the screen back and
-  // is spent doing so, which is what makes sleep safe to reach for: nothing
-  // you press to wake up can act on the screen you cannot see. Lifecycle
-  // events below are not input and fall through on their own.
-  if (event.menuItemClickEvent?.itemID === undefined) {
+  // Before anything is dispatched. A sleeping WAM accepts exactly one input:
+  // double-click. Single clicks and scrolls are too easy to trigger by bumping
+  // the glasses, and a contextual-menu selection should not bypass the lock.
+  // The wake double-click is spent here and never reaches back(). Lifecycle
+  // events still fall through so foreground/background state stays accurate.
+  if (asleep) {
     const sys = event.sysEvent?.eventType
     const lifecycle =
       sys === OsEventTypeList.FOREGROUND_ENTER_EVENT ||
@@ -2335,17 +2335,15 @@ function onHubEvent(event: EvenHubEvent): void {
       sys === OsEventTypeList.SYSTEM_EXIT_EVENT ||
       sys === OsEventTypeList.ABNORMAL_EXIT_EVENT ||
       sys === OsEventTypeList.IMU_DATA_REPORT
-    if (asleep && !lifecycle) {
-      state.lastEvent = 'wake'
-      void wakeDisplay()
-      return
-    }
-    // On hardware, waking can arrive as FOREGROUND_ENTER followed by the tap
-    // that caused it. The foreground event already repaints the screen; spend
-    // its paired tap here so waking never also activates the home row.
-    if (!lifecycle && Date.now() < consumeWakeInputUntil) {
-      consumeWakeInputUntil = 0
-      state.lastEvent = 'wake-tap'
+    if (!lifecycle) {
+      const source = event.textEvent ?? event.listEvent ?? event.sysEvent
+      const type = normaliseEventType(source?.eventType)
+      if (type === OsEventTypeList.DOUBLE_CLICK_EVENT) {
+        state.lastEvent = 'wake-double'
+        void wakeDisplay()
+      } else {
+        state.lastEvent = 'sleep-ignore'
+      }
       return
     }
   }
@@ -2368,10 +2366,8 @@ function onHubEvent(event: EvenHubEvent): void {
     // interval — the first thing you see should not be the last thing from
     // before you looked away.
     state.foreground = true
-    // Putting them back on is the end of any nap. The OS has just handed the
-    // screen back; leaving it dark would read as a dead app.
-    if (asleep) consumeWakeInputUntil = Date.now() + 1_500
-    asleep = false
+    // Preserve WAM's own blank-screen state. The OS can foreground the app
+    // after a bump; only the explicit double-click above is allowed to wake it.
     state.lastEvent = 'fg-in'
     void refresh()
       .then(() => refreshCoachSession())
