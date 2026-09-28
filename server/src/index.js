@@ -1,6 +1,6 @@
 import http from 'node:http'
 import crypto from 'node:crypto'
-import { createReadStream, readFileSync, statSync } from 'node:fs'
+import { appendFileSync, createReadStream, readFileSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -154,6 +154,8 @@ function applyTriageResult(result) {
 }
 
 const WEB_DIR = join(HERE, 'web')
+/** Glasses paint diagnostics, next to hub.log (gitignored). */
+const PAINT_LOG = join(HERE, '..', '..', 'paint.log')
 
 /**
  * Turn checklist stats into planner input, folding in whatever is already
@@ -1141,6 +1143,16 @@ const server = http.createServer(async (req, res) => {
    * app — so the app posts each frame here and this hands it back. One string,
    * no second renderer to drift out of sync with the first.
    */
+  // Diagnostic: one line per glasses paint that sent tiles (v0.113.0).
+  if (req.method === 'POST' && url.pathname === '/paintlog') {
+    const raw = await readBody(req)
+    try {
+      const entry = JSON.parse(raw)
+      appendFileSync(PAINT_LOG, `${new Date().toISOString()} ${JSON.stringify(entry)}\n`)
+    } catch {}
+    return json(res, 200, { ok: true })
+  }
+
   if (url.pathname === '/screen') {
     if (req.method === 'POST') {
       const raw = await readBody(req)

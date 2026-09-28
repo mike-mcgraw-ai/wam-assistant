@@ -1,8 +1,8 @@
-# Intentional hardware controls
+# Preserve speech on exit
 
-Public version: `v0.14.0`  
-Face build: `0.109.0`  
+Public version: `v0.15.0`  
+Face build: `0.115.0`  
 Originally completed: `2026-09-28`  
 Sanitized and published: `2026-09-29`
 
-An explicit double-click wakes the display without accidental actions.
+Leaving Listen flushes and saves useful words without keeping empty recordings.

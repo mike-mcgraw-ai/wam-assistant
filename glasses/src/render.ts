@@ -970,6 +970,9 @@ function planTip(state: UiState, rows: PlanRow[], cursor: number): string {
   const r = row.row
   if (r.kind === 'gap') return '~ Waiting - nothing to start'
   if (r.kind === 'done') return `[x] Done ${ago(r.at)} ago - click to undo`
+  if (state.armedTaskId === `step:${r.choreId}:${r.stepId}`) {
+    return isRunning(state, r) ? 'Click again to finish' : 'Click again to start'
+  }
   if (isRunning(state, r)) return '[*] Going - click to finish'
   if (!r.open) return '( ) Later - earlier step first'
   return '[>] Ready - click to start'
@@ -1041,7 +1044,13 @@ function renderPlan(state: UiState, cursor: number): string {
       // agendaRow already enforces the measured pixel width. A second
       // character-count cap chopped the final `r` from "Take out of dryer"
       // even though the row still had physical room on the display.
-      lines.push(clipToWidth(`${point}${agendaRow(row.row, isRunning(state, row.row))}`))
+      const selected = i === bodyCursor && cursor > 0
+      const r = row.row
+      if (selected && r.kind === 'do' && state.armedTaskId === `step:${r.choreId}:${r.stepId}`) {
+        lines.push(clipToWidth(`>[?] ${isRunning(state, r) ? 'Finish' : 'Start'} ${r.step}?`))
+      } else {
+        lines.push(clipToWidth(`${point}${agendaRow(row.row, isRunning(state, row.row))}`))
+      }
     }
   }
 

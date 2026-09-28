@@ -95,6 +95,9 @@ const CONTAINER_NAME = 'board'
 // Ordinary screens draw where the old centred bands sat; Listen uses all four.
 const IMAGE_CONTAINER_IDS = [2, 3, 4, 5] as const
 const IMAGE_CONTAINER_NAMES = ['tile-tl', 'tile-tr', 'tile-bl', 'tile-br'] as const
+/** Dashboard content first; Listen's fast-changing transcript first. */
+const DASHBOARD_TILE_SEND_ORDER = [0, 2, 1, 3]
+const LISTEN_TILE_SEND_ORDER = [3, 0, 2, 1]
 const CAPTURE_TASK_ID = 'captured-notes'
 
 const MENU = {
@@ -203,6 +206,19 @@ const ASSISTANT_PROVIDERS: AssistantProvider[] = ['chatgpt', 'claude']
  * never delay what reaches the glasses. The mirror is a nicety; the display is
  * the product.
  */
+/**
+ * Which tiles each paint sent, and when each finished (ms from the first
+ * send). Written to paint.log by the hub. Diagnostic for the tile-by-tile
+ * rollout: tells "we sent four" apart from "we sent two, the glasses drew four".
+ */
+function paintLog(entry: Record<string, unknown>): void {
+  void fetch(`${config.serverUrl}/paintlog`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...entry, version: __APP_VERSION__ }),
+  }).catch(() => {})
+}
+
 function mirror(content: string): void {
   void fetch(`${config.serverUrl}/screen`, {
     method: 'POST',
@@ -235,27 +251,6 @@ let textLayerBlank = false
 let painting = false
 let repaintQueued = false
 
-function dashboardSection(): string {
-  switch (state.view.kind) {
-    case 'plan': return 'LIFE'
-    case 'index': return 'LISTS'
-    case 'board': return 'BOARD'
-    case 'task': return 'TASK'
-    case 'chores': return 'CHORES'
-    case 'notes': return 'NOTES'
-    case 'capture': return 'CAPTURE'
-    case 'note':
-    case 'transcript': return 'NOTE'
-    case 'checklist': return 'CHECKLIST'
-    case 'picker': return 'NEW LIST'
-    case 'inbox': return 'SHARED'
-    case 'cue': return 'LISTEN'
-    case 'assistant': return 'CHAT'
-    case 'pong': return 'PONG'
-    case 'fonttest': return 'DISPLAY'
-  }
-}
-
 /** Move the clock out of the compact content; the right rail owns it now. */
 function dashboardContent(content: string): string {
   const lines = content.split('\n')
@@ -280,13 +275,13 @@ function dashboardTimers(now = Date.now()): Array<{ label: string; value: string
       if (item.stepKind === 'wait' && item.endsAt !== null) {
         const remaining = Math.ceil((item.endsAt - now) / 1000)
         timers.push({
-          label: `${run.name} - ${item.label}`,
+          label: item.label,
           value: remaining >= 0 ? `${timerClock(remaining)} left` : `${timerClock(-remaining)} overdue`,
           sortAt: item.endsAt,
         })
       } else if (item.running && item.startedAt !== null) {
         timers.push({
-          label: `${run.name} - ${item.label}`,
+          label: item.label,
           value: `${timerClock((now - item.startedAt) / 1000)} running`,
           sortAt: item.startedAt,
         })
@@ -313,7 +308,6 @@ function dashboardRail() {
     time,
     weekday,
     date: calendar,
-    section: dashboardSection(),
     connection,
     status,
     version: `v${__APP_VERSION__}`,
@@ -375,15 +369,34 @@ async function paintNow(): Promise<void> {
       // together gives the phone/firmware all four writes at once instead of
       // making the user watch this loop await each quadrant in turn. The
       // outer paint lock still prevents frames from overlapping.
+      // Raw speech belongs to the bottom-right Listen tile, so it wins every
+      // multi-tile race. Ordinary dashboard screens still send left content
+      // before the slower-changing rail.
+      const sendOrder = board ? LISTEN_TILE_SEND_ORDER : DASHBOARD_TILE_SEND_ORDER
+      updates.sort((a, b) => sendOrder.indexOf(a.index) - sendOrder.indexOf(b.index))
+      const sendStart = performance.now()
+      const doneAt: number[] = []
       const results = await Promise.allSettled(
-        updates.map(({ index, tile }) => bridge.updateImageRawData(
+        updates.map(({ index, tile }, order) => bridge.updateImageRawData(
           new ImageRawDataUpdate({
             containerID: IMAGE_CONTAINER_IDS[index],
             containerName: IMAGE_CONTAINER_NAMES[index],
             imageData: tile,
           }),
-        )),
+        ).finally(() => { doneAt[order] = Math.round(performance.now() - sendStart) })),
       )
+      if (updates.length > 0) {
+        paintLog({
+          view: state.view.kind,
+          asleep,
+          sent: updates.map(({ index }) => IMAGE_CONTAINER_NAMES[index]),
+          doneMs: doneAt,
+          failed: results.flatMap((result, resultIndex) =>
+            result.status === 'fulfilled' && ImageRawDataUpdateResult.isSuccess(result.value)
+              ? []
+              : [IMAGE_CONTAINER_NAMES[updates[resultIndex].index]]),
+        })
+      }
       let compactOk = true
       results.forEach((result, resultIndex) => {
         const { index, hash } = updates[resultIndex]
@@ -1000,6 +1013,45 @@ async function saveReviewedListeningSession(): Promise<void> {
     localCoachCue(summary.title, summary.lines)
     await paint()
   }
+}
+
+/** Leave Listen safely: retain real speech, but do not create an empty note. */
+async function preserveListeningAndLeave(): Promise<void> {
+  const sessionId = state.coachSession?.id
+  if (!sessionId) {
+    dismissCue()
+    await paint()
+    return
+  }
+
+  await stopAudioCapture()
+  await waitForTranscriptionsToDrain()
+  await refreshCoachSession()
+
+  const session = state.coachSession?.id === sessionId ? state.coachSession : null
+  const hasWords = Boolean(session?.recentSegments.some(segment => segment.text.trim()))
+  if (hasWords) {
+    const stopped = await endCoachSession(sessionId)
+    if (!stopped.ok) {
+      state.error = stopped.error
+      await paint()
+      return
+    }
+    state.coachSession = stopped.session
+  } else {
+    const discarded = await discardCoachSession(sessionId)
+    if (!discarded.ok) {
+      state.error = discarded.error
+      await paint()
+      return
+    }
+    state.coachSession = null
+  }
+
+  state.listenReviewing = false
+  state.error = null
+  dismissCue()
+  await paint()
 }
 
 async function discardListeningSession(): Promise<void> {
@@ -1865,7 +1917,17 @@ async function activate(): Promise<void> {
       return
     }
 
+    // Arm, then confirm: the same gate as the required-today rows above.
+    // First click asks "[?] Start ...?" / "[?] Finish ...?", the second acts,
+    // and scrolling away cancels (the cursor move clears armedTaskId).
     if (row?.kind === 'agenda' && row.row.kind === 'do') {
+      const key = `step:${row.row.choreId}:${row.row.stepId}`
+      if (state.armedTaskId !== key) {
+        state.armedTaskId = key
+        await paint()
+        return
+      }
+      state.armedTaskId = null
       await stepFromPlan(row.row.choreId, row.row.stepId)
       return
     }
@@ -2014,6 +2076,10 @@ async function back(): Promise<void> {
   }
 
   if (state.view.kind === 'cue') {
+    if (!state.listenReviewing && state.coachSession?.active) {
+      await preserveListeningAndLeave()
+      return
+    }
     if (state.listenReviewing && state.coachSession?.active) {
       await discardListeningSession()
       return

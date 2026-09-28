@@ -80,6 +80,24 @@ function noteField(lines: string[], name: string): string | null {
   return value || null
 }
 
+const TOPIC_GLUE = new Set([
+  'about', 'after', 'again', 'also', 'and', 'are', 'at', 'because', 'been', 'before', 'but', 'can',
+  'did', 'do', 'does', 'doing', 'for', 'found', 'from', 'got', 'had', 'has', 'have', 'her', 'here',
+  'him', 'his', 'how', 'into', 'its', 'just', 'like', 'look', 'me', 'my', 'not', 'now', 'of', 'on',
+  'or', 'our', 'said', 'she', 'so', 'some', 'something', 'that', 'the', 'their', 'them', 'there',
+  'they', 'this', 'to', 'us', 'was', 'we', 'were', 'what', 'when', 'where', 'which', 'with', 'you',
+  'your',
+])
+
+/** A topic is a durable subject label, not the last tiny thing STT heard. */
+function meaningfulTopic(raw: string | null): string | null {
+  const text = String(raw || '').replace(/\s+/g, ' ').replace(/[.!?]+$/, '').trim()
+  const tokens = text.toLowerCase().match(/[a-z0-9']+/g) ?? []
+  if (tokens.length < 2) return null
+  const content = tokens.filter(token => token.length > 1 && !TOPIC_GLUE.has(token))
+  return content.length >= 2 ? text : null
+}
+
 function recordTopic(sessionId: string, topic: string | null): string[] {
   const log = topicLog.get(sessionId) ?? []
   if (topic) {
@@ -225,24 +243,6 @@ function cleanBlocks(segments: CoachSegment[]): { speaker: 'me' | 'other'; text:
     .filter(block => block.text.length > 0)
 }
 
-/** Sentence-sized exact-text fallbacks while the first AI board is pending. */
-function liveThoughts(blocks: { speaker: 'me' | 'other'; text: string }[]): string[] {
-  const thoughts: string[] = []
-  for (const block of blocks) {
-    const units = block.text.match(/[^.!?]+(?:[.!?]+|$)/g) ?? [block.text]
-    for (const unit of units) {
-      const text = unit.replace(/\s+/g, ' ').trim()
-      if (text && /[a-z0-9]/i.test(text)) thoughts.push(text)
-    }
-  }
-  return thoughts
-}
-
-function shortThought(text: string, words = 12): string {
-  const parts = text.replace(/[.!?]+$/, '').split(/\s+/).filter(Boolean)
-  return parts.length <= words ? parts.join(' ') : `${parts.slice(0, words).join(' ')}...`
-}
-
 // ---- the board ---------------------------------------------------------------
 
 function shortTime(now = new Date()): string {
@@ -293,43 +293,22 @@ export function listenBoard(state: UiState): ListenBoard | null {
   const board = session.board ?? null
   const note = session.runningNote?.lines ?? []
   const transcript = cleanBlocks(segments)
-  const thoughts = liveThoughts(transcript)
-  const latestThought = thoughts[thoughts.length - 1] ?? null
-  const boardBehind = Boolean(board && (board.segmentCount ?? 0) < session.segmentCount)
 
-  // Topics: the model keeps the list (oldest first). Older hubs only send the
-  // current thread, so remember those here as a fallback. Before the model's
-  // first result (and while it is behind live speech), show the current exact
-  // thought immediately instead of making this tile wait on a random lull.
-  let log = board?.topics?.length
-    ? board.topics
-    : recordTopic(session.id, noteField(note, 'Thread') ?? null)
-  if (!board?.topics?.length && thoughts.length > 0) {
-    for (const thought of thoughts.slice(-6)) {
-      const liveTopic = shortThought(thought)
-      if (!log.some(topic => sameTopic(topic, liveTopic))) log = [...log, liveTopic]
-    }
-  } else if (latestThought && boardBehind) {
-    const liveTopic = shortThought(latestThought)
-    if (!log.some(topic => sameTopic(topic, liveTopic))) log = [...log, liveTopic]
-  }
+  // Raw STT changes the transcript tile only. Topics wait for an AI board and
+  // reject incidental fragments so this panel stays stable and glanceable.
+  const modelTopics = (board?.topics ?? [])
+    .map(topic => meaningfulTopic(topic))
+    .filter((topic): topic is string => Boolean(topic))
+  const log = modelTopics.length > 0
+    ? modelTopics
+    : recordTopic(session.id, meaningfulTopic(noteField(note, 'Thread')))
   const topics = log.slice().reverse().map((text, index) => ({ text, current: index === 0 }))
 
-  // Summary: the model's condensed points; the running note on older hubs.
+  // Summary also waits for the model. Mirroring each raw sentence here made
+  // both left tiles churn and mistook transport chunks for complete thoughts.
   let summary = board?.points?.length
     ? board.points
     : note.filter(line => !/^Thread\s*:/i.test(line)).map(line => line.replace(/\s+/g, ' ').trim()).filter(Boolean)
-  let summaryIsLiveText = false
-  if (!board?.points?.length && thoughts.length > 0) {
-    for (const thought of thoughts.slice(-4)) {
-      if (!summary.some(point => sameTopic(point, thought))) summary.push(thought)
-    }
-    summaryIsLiveText = true
-  } else if (boardBehind && latestThought) {
-    const latest = shortThought(latestThought, 20)
-    const covered = summary.some(point => sameTopic(point, latest))
-    if (!covered) summary = [...summary, `Now: ${latest}`]
-  }
   const summaryPending = summary.length === 0
   if (summaryPending) {
     summary = [aiStatus === 'error' ? 'Summary unavailable. Still recording.' : 'Starts about 15 s into the talk.']
@@ -361,7 +340,7 @@ export function listenBoard(state: UiState): ListenBoard | null {
     topics,
     summaryBlock: {
       title: 'SUMMARY',
-      note: aiNote || (summaryIsLiveText ? 'live text' : age(board?.updatedAt ?? session.runningNote?.updatedAt, now)),
+      note: aiNote || age(board?.updatedAt ?? session.runningNote?.updatedAt, now),
     },
     summary,
     summaryPending,

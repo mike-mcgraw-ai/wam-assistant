@@ -38,7 +38,6 @@ export interface DashboardRail {
   time: string
   weekday: string
   date: string
-  section: string
   connection: string
   status: string
   version: string
@@ -58,6 +57,9 @@ const PENDING_INK = 110
 /** Content rows under the title band: 14 + 7 x 18 = 140 of 144. */
 const BLOCK_ROWS = 7
 const FIRST_BASELINE_PX = TITLE_BAND_PX + 12
+/** Fixed two-column timer grid, relative to the bottom-right tile. */
+const TIMER_VALUE_X = 154
+const TIMER_COLUMN_GAP_PX = 14
 
 function blit(target: number[], source: number[], width: number, height: number, x0: number, y0: number): void {
   for (let y = 0; y < height; y += 1) {
@@ -98,16 +100,33 @@ export function dashboardFrame(content: string, rail: DashboardRail): number[] {
   ctx.font = CONTENT_FONT
   drawLine(ctx, rail.weekday, rightX, 48, COLUMN_W)
   drawLine(ctx, rail.date, rightX, 66, COLUMN_W)
-  drawLine(ctx, `${rail.section}  ${rail.connection}`, rightX, 91, COLUMN_W)
+  // No screen name here: it changed on every navigation, which dragged this
+  // tile into every repaint and turned a two-tile left-side change into a
+  // visible four-tile rollout. The left side already says where you are.
+  drawLine(ctx, rail.connection, rightX, 91, COLUMN_W)
   drawLine(ctx, rail.status, rightX, 109, COLUMN_W)
   drawLine(ctx, rail.version, rightX, 127, COLUMN_W)
 
-  const shownTimers = rail.timers.slice(0, 3)
-  const timerRows = shownTimers.length > 0
-    ? shownTimers.flatMap(timer => [clipPx(ctx, timer.label, COLUMN_W), clipPx(ctx, `> ${timer.value}`, COLUMN_W)])
-    : ['No timers running.']
-  const timerNote = rail.timers.length > 3 ? `3/${rail.timers.length} active` : rail.timers.length ? `${rail.timers.length} active` : ''
-  drawBlock(ctx, 3, 'TIMERS', timerNote, timerRows)
+  const shownTimers = rail.timers.slice(0, BLOCK_ROWS)
+  const timerNote = rail.timers.length > BLOCK_ROWS
+    ? `${BLOCK_ROWS}/${rail.timers.length} active`
+    : rail.timers.length ? `${rail.timers.length} active` : ''
+  drawBlock(ctx, 3, 'TIMERS', timerNote, shownTimers.length > 0 ? [] : ['No timers running.'])
+  if (shownTimers.length > 0) {
+    const { x, y } = TILES[3]
+    const labelX = x + PAD_PX
+    const valueX = x + TIMER_VALUE_X
+    const labelWidth = TIMER_VALUE_X - PAD_PX - TIMER_COLUMN_GAP_PX
+    const valueWidth = TILE_W - TIMER_VALUE_X - PAD_PX
+    ctx.font = CONTENT_FONT
+    shownTimers.forEach((timer, index) => {
+      const label = clipPx(ctx, timer.label, labelWidth)
+      const value = clipPx(ctx, timer.value, valueWidth)
+      const baseline = y + FIRST_BASELINE_PX + index * LINE_PX
+      drawLine(ctx, label, labelX, baseline, labelWidth)
+      drawLine(ctx, value, valueX, baseline, valueWidth)
+    })
+  }
 
   const rgba = ctx.getImageData(0, 0, PANEL_W, PANEL_H).data
   const frame = new Array<number>(PANEL_W * PANEL_H)
