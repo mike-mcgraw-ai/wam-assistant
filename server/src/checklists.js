@@ -2,6 +2,20 @@ import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync } fr
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
+function normalizeMatchText(value) {
+  return String(value ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function containsPhrase(text, phrase) {
+  const clean = normalizeMatchText(phrase)
+  if (!clean) return false
+  return ` ${text} `.includes(` ${clean} `)
+}
+
 /**
  * Checklist runs.
  *
@@ -23,6 +37,7 @@ export class Checklists {
     this.timezone = config.timezone || 'America/New_York'
     this.resetHour = Number.isFinite(config.resetHour) ? config.resetHour : 5
     this.summaryHour = Number.isFinite(config.summaryHour) ? config.summaryHour : 6
+    this.dayStartHour = Number.isFinite(config.dayStartHour) ? config.dayStartHour : this.resetHour
 
     this.runsPath = runsPath
     this.logPath = logPath
@@ -38,6 +53,8 @@ export class Checklists {
     this.runs = new Map()
     /** @type {Map<string, any[]>} checklistId -> durable notes */
     this.notes_ = new Map()
+    /** @type {Map<string, any>} `${space}:${day}` -> voice-built daily plan */
+    this.dayStarts = new Map()
     this.lastRolledDay = null
     this.#load()
   }
@@ -76,6 +93,9 @@ export class Checklists {
       for (const [id, notes] of Object.entries(raw.notes || {})) {
         if (this.templates.has(id) && Array.isArray(notes)) this.notes_.set(id, notes)
       }
+      for (const [key, value] of Object.entries(raw.dayStarts || {})) {
+        if (value && typeof value === 'object') this.dayStarts.set(key, value)
+      }
       this.lastRolledDay = raw.lastRolledDay ?? null
       console.log(`[checklists] restored ${this.runs.size} runs`)
     } catch (err) {
@@ -92,7 +112,12 @@ export class Checklists {
       const runs = [...this.runs.values()].filter(r => !r.finishedAt || r.finishedAt > cutoff)
       writeFileSync(
         this.runsPath,
-        JSON.stringify({ runs, notes: Object.fromEntries(this.notes_), lastRolledDay: this.lastRolledDay }, null, 2),
+        JSON.stringify({
+          runs,
+          notes: Object.fromEntries(this.notes_),
+          dayStarts: Object.fromEntries(this.dayStarts),
+          lastRolledDay: this.lastRolledDay,
+        }, null, 2),
       )
     } catch (err) {
       console.warn(`[checklists] could not write runs: ${err.message}`)
@@ -161,6 +186,58 @@ export class Checklists {
     const run = this.#newRun(template, this.dayKey(now), now)
     this.#persist()
     return { ok: true, run }
+  }
+
+  dayStatus(space = 'life', now = Date.now()) {
+    const day = this.dayKey(now)
+    const key = `${space}:${day}`
+    const saved = this.dayStarts.get(key)
+    return {
+      day,
+      startHour: this.dayStartHour,
+      started: Boolean(saved),
+      startedAt: saved?.startedAt ?? null,
+      checklistIds: Array.isArray(saved?.checklistIds) ? saved.checklistIds : [],
+      transcript: saved?.transcript ?? '',
+    }
+  }
+
+  /** Match one complete spoken walk-through to preset on-demand lists. */
+  startDay(text, space = 'life', now = Date.now()) {
+    const transcript = String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, 4_000)
+    if (!transcript) return { ok: false, error: 'nothing heard' }
+
+    const haystack = normalizeMatchText(transcript)
+    const matches = [...this.templates.values()]
+      .filter(template => template.kind === 'ondemand' && (template.space ?? 'ops') === space)
+      .filter(template => {
+        const phrases = [template.name, template.id, ...(Array.isArray(template.aliases) ? template.aliases : [])]
+        return phrases.some(phrase => containsPhrase(haystack, phrase))
+      })
+
+    if (matches.length === 0) {
+      return { ok: false, error: 'No preset chores matched. Say laundry, dishes, vacuum, or another saved list.' }
+    }
+
+    const checklistIds = []
+    for (const template of matches) {
+      const started = this.start(template.id, now)
+      if (started.ok) checklistIds.push(template.id)
+    }
+
+    const day = this.dayKey(now)
+    const key = `${space}:${day}`
+    const saved = {
+      day,
+      space,
+      startedAt: now,
+      checklistIds,
+      transcript,
+    }
+    this.dayStarts.set(key, saved)
+    this.#log({ type: 'day_start', ...saved })
+    this.#persist()
+    return { ok: true, ...saved, matched: matches.map(template => ({ id: template.id, name: template.name })) }
   }
 
   /** The template step definition for an item, or undefined. */

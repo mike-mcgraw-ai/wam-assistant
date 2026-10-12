@@ -19,8 +19,7 @@ import {
 } from '@evenrealities/even_hub_sdk'
 
 import { config } from './config'
-import { PANEL_ROWS, dashboardFrame, TILES, TILE_H, TILE_W, hashTile, listenFrame, splitTiles, textFrame } from './fullpanel'
-import { measure } from './metrics'
+import { TILES, TILE_H, TILE_W, hashTile, listenFrame, splitTiles, textFrame } from './fullpanel'
 import { listenBoard } from './listenboard'
 import {
   activateCoachMode,
@@ -33,6 +32,7 @@ import {
   deleteNote,
   discardCoachSession,
   fetchAssistantChat,
+  queueAssistantNote,
   fetchNoteTranscript,
   endCoachSession,
   fetchSessionSummary,
@@ -46,7 +46,7 @@ import {
   finishChecklist,
   startCoachSession,
 } from './api'
-import { loadSnapshot, saveSnapshot } from './storage'
+import { loadPlan, loadSnapshot, savePlan, saveSnapshot } from './storage'
 import {
   findRun,
   findNoteRow,
@@ -64,6 +64,7 @@ import {
   otherSpace,
   render,
   startable,
+  clockLine,
   type UiState,
   type View,
 } from './render'
@@ -104,6 +105,7 @@ const IMAGE_CONTAINER_NAMES = ['tile-tl', 'tile-tr', 'tile-bl', 'tile-br'] as co
 const DASHBOARD_TILE_SEND_ORDER = [0, 2, 1, 3]
 const LISTEN_TILE_SEND_ORDER = [3, 0, 2, 1]
 const CAPTURE_TASK_ID = 'captured-notes'
+const NATIVE_TEXT_ROWS = 10
 
 const MENU = {
   SWITCH: 1,
@@ -158,7 +160,8 @@ const state: UiState = {
   lastOkAt: null,
   fromCache: cached !== null,
   alertsOnly: false,
-  plan: null,
+  // Last plan from this phone, so the first frame is the list (v0.124.0).
+  plan: loadPlan(lastSpace()),
   planLoading: false,
   planError: null,
   cue: null,
@@ -257,11 +260,9 @@ const shownText = new Map<number, string>()
 let painting = false
 let repaintQueued = false
 
-/** Move the clock out of the compact content; the right rail owns it now. */
-function dashboardContent(content: string): string {
-  const lines = content.split('\n')
-  if (/\d{1,2}:\d{2}[ap]\s+v\d/i.test(lines[0] ?? '')) lines.shift()
-  return lines.join('\n')
+/** True when a rendered screen already opens with the date / time / version line. */
+function startsWithClock(content: string): boolean {
+  return /\d{1,2}:\d{2}[ap]\s+v\d/i.test(content.split('\n')[0] ?? '')
 }
 
 function timerClock(totalSeconds: number): string {
@@ -297,43 +298,6 @@ function dashboardTimers(now = Date.now()): Array<{ label: string; value: string
   return timers.sort((a, b) => a.sortAt - b.sortAt)
 }
 
-function dashboardRail() {
-  const now = new Date()
-  const hour24 = now.getHours()
-  const hour = hour24 % 12 || 12
-  const time = `${hour}:${String(now.getMinutes()).padStart(2, '0')} ${hour24 < 12 ? 'AM' : 'PM'}`
-  const weekday = now.toLocaleDateString('en-US', { weekday: 'long' }).toUpperCase()
-  const calendar = now.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).toUpperCase()
-  const connection = state.fromCache ? 'CACHED' : state.error ? 'OFFLINE' : 'SYNCED'
-  const status = state.coachSession?.active
-    ? `MIC ACTIVE - ${state.coachSession.modeName}`
-    : state.assistantRecording
-      ? 'MIC ACTIVE - Assistant message'
-      : state.space === 'life' ? 'Personal dashboard' : 'Operations dashboard'
-  return {
-    time,
-    weekday,
-    date: calendar,
-    connection,
-    status,
-    version: `v${__APP_VERSION__}`,
-    timers: dashboardTimers(now.getTime()),
-  }
-}
-
-/** Firmware-font pixels a native text line may use in the left column. */
-const LEFT_TEXT_PX = TILE_W - 12
-/** Firmware-font pixels for a timer row over the bottom-right tile. */
-const TIMER_TEXT_PX = TILE_W - 12
-/** Native text rows over one 144 px tile: 5 x 27 = 135. */
-const TIMER_ROWS = 5
-
-function clipNative(text: string, width: number): string {
-  if (measure(text) <= width) return text
-  let cut = text.length
-  while (cut > 0 && measure(`${text.slice(0, cut).trimEnd()}..`) > width) cut -= 1
-  return `${text.slice(0, cut).trimEnd()}..`
-}
 
 /**
  * Write a native text container only when its content changed.
@@ -354,66 +318,86 @@ async function setText(containerID: number, containerName: string, content: stri
   return true
 }
 
+
 /**
- * Render for the panel's row budget: PANEL_ROWS rows, plus the clock line on
- * screens that start with one (dashboardContent drops it; the rail has the
- * time). A screen without a clock line is rendered again with one row less,
- * rather than losing its last row off the bottom.
+ * Every screen except live Listen is native text (v0.129.0). Native text is
+ * one update the firmware draws in one go; image tiles cost ~400 ms each and
+ * arrive one after another. Listen keeps its four-tile board.
  */
-function renderForPanel(): string {
+function usesFastTextScreen(): boolean {
+  return !listenBoard(state)
+}
+
+/**
+ * Render for the native 10-line budget, always topped by the date / time /
+ * version line. Screens that draw it themselves keep theirs; for the rest it
+ * is added here and the screen gets one row less, so nothing falls off.
+ */
+function renderForNativeText(): string {
   const saved = config.maxLines
   try {
-    config.maxLines = PANEL_ROWS + 1
-    const withClock = render(state)
-    if (dashboardContent(withClock) !== withClock) return withClock
-    config.maxLines = PANEL_ROWS
-    return render(state)
+    config.maxLines = Math.min(saved, NATIVE_TEXT_ROWS)
+    const content = render(state)
+    if (startsWithClock(content)) return content
+    config.maxLines = Math.min(saved, NATIVE_TEXT_ROWS) - 1
+    return `${clockLine(state)}\n${render(state)}`
   } finally {
     config.maxLines = saved
   }
 }
 
-/**
- * Split the cursor (and on the running order, the hint line) out of the list.
- *
- * Every screen marks its selected row with `>` in column 0. That character is
- * blanked in the picture and drawn instead by the native text layer on the
- * same line, so moving the cursor changes text only. The running order's last
- * line is its hint ("Ready - click to start"), which also follows the cursor,
- * so it moves to the text layer's bottom line.
- */
-function cursorLayer(content: string): { rows: string[]; overlay: string } {
-  const rows = content.split('\n').slice(0, PANEL_ROWS)
-  const overlay = Array.from({ length: PANEL_ROWS }, () => ' ')
-  let used = false
-
-  if (state.view.kind === 'plan' && rows.length > 1) {
-    overlay[PANEL_ROWS - 1] = clipNative(rows.pop()!.trim(), LEFT_TEXT_PX)
-    used = true
-  }
-  // Screens with a real cursor. Chat and Listen use `>` for "you said".
-  if ('cursor' in state.view) {
-    const row = rows.findIndex(line => line.startsWith('>'))
-    if (row >= 0) {
-      rows[row] = ` ${rows[row].slice(1)}`
-      overlay[row] = '>'
-      used = true
+async function clearImageTilesForTextScreen(): Promise<{ sent: string[]; doneMs: number[]; failed: string[] }> {
+  const tiles = splitTiles(textFrame(SLEEP_CONTENT))
+  const updates = tiles.flatMap((tile, index) => {
+    const hash = hashTile(tile)
+    return tileHashes[index] === hash ? [] : [{ index, tile, hash }]
+  })
+  const sendStart = performance.now()
+  const doneAt: number[] = []
+  const results = await Promise.allSettled(
+    updates.map(({ index, tile }, order) => bridge.updateImageRawData(
+      new ImageRawDataUpdate({
+        containerID: IMAGE_CONTAINER_IDS[index],
+        containerName: IMAGE_CONTAINER_NAMES[index],
+        imageData: tile,
+      }),
+    ).finally(() => { doneAt[order] = Math.round(performance.now() - sendStart) })),
+  )
+  const failed: string[] = []
+  results.forEach((result, resultIndex) => {
+    const { index, hash } = updates[resultIndex]
+    if (result.status === 'fulfilled' && ImageRawDataUpdateResult.isSuccess(result.value)) {
+      tileHashes[index] = hash
+    } else {
+      tileHashes[index] = null
+      failed.push(IMAGE_CONTAINER_NAMES[index])
     }
-  }
-  if (!used) return { rows, overlay: SLEEP_CONTENT }
-  let last = overlay.length - 1
-  while (last > 0 && overlay[last] === ' ') last -= 1
-  return { rows, overlay: overlay.slice(0, last + 1).join('\n') }
+  })
+  return { sent: updates.map(({ index }) => IMAGE_CONTAINER_NAMES[index]), doneMs: doneAt, failed }
 }
 
-/** Live timers as native text: counter first, so the numbers line up. */
-function timersLayer(timers: Array<{ label: string; value: string }>): string {
-  if (timers.length === 0) return SLEEP_CONTENT
-  const shown = timers.slice(0, TIMER_ROWS)
-  const rows = shown.map(timer => clipNative(`${timer.value}  ${timer.label}`, TIMER_TEXT_PX))
-  if (timers.length > TIMER_ROWS) rows[TIMER_ROWS - 1] = clipNative(`+${timers.length - TIMER_ROWS + 1} more timers`, TIMER_TEXT_PX)
-  return rows.join('\n')
+async function paintFastTextScreen(content: string): Promise<void> {
+  const textStart = performance.now()
+  const timersPromise = setText(TIMERS_ID, TIMERS_NAME, SLEEP_CONTENT)
+  const mainTextSent = await setText(CONTAINER_ID, CONTAINER_NAME, content)
+  const timerTextSent = await timersPromise
+  const textMs = Math.round(performance.now() - textStart)
+  const images = await clearImageTilesForTextScreen()
+  if (mainTextSent || timerTextSent || images.sent.length > 0) {
+    paintLog({
+      view: state.view.kind,
+      fastText: true,
+      asleep,
+      text: Number(mainTextSent) + Number(timerTextSent),
+      textMs,
+      sent: images.sent,
+      doneMs: images.doneMs,
+      failed: images.failed,
+    })
+  }
 }
+
+
 
 /**
  * One paint at a time. Four tile sends can take most of a second, and the 1 s
@@ -440,10 +424,17 @@ async function paintNow(): Promise<void> {
   try {
     // Rendered once, used twice: the glasses and the mirror must never be
     // able to show different frames.
-    const content = asleep ? SLEEP_CONTENT : renderForPanel()
+    const fastText = !asleep && usesFastTextScreen()
+    const content = asleep ? SLEEP_CONTENT : renderForNativeText()
     // The mirror shows what the glasses show, sleep included — an iPad still
     // lit while the glasses are dark is two devices disagreeing about state.
     mirror(content)
+
+    if (fastText) {
+      await paintFastTextScreen(content)
+      compactFailures = 0
+      return
+    }
 
     // The SDK's native text renderer has one fixed size. Draw the same frame
     // into a smaller centred image so it occupies less of the visual field,
@@ -457,14 +448,9 @@ async function paintNow(): Promise<void> {
       let frame: number[]
       if (asleep) {
         frame = textFrame(content)
-      } else if (board) {
-        frame = listenFrame(board)
       } else {
-        const rail = dashboardRail()
-        const layer = cursorLayer(dashboardContent(content))
-        frame = dashboardFrame(layer.rows, rail)
-        overlay = layer.overlay
-        timersText = timersLayer(rail.timers)
+        // Only live Listen reaches the image path now.
+        frame = board ? listenFrame(board) : textFrame(SLEEP_CONTENT)
       }
 
       // Text first: the cursor and hint are what a scroll changes, and a
@@ -568,6 +554,51 @@ function clearArmedConfirms(): void {
   if (state.view.kind === 'cue') state.view.startArmed = false
 }
 
+/**
+ * Arm-then-confirm, tuned for a ring that gets bumped (v0.120.0).
+ *
+ * Counting taps was not enough: two bumps in a row armed and confirmed, and
+ * the next bumps carried on into whatever row the cursor landed on. So:
+ * - a second tap sooner than CONFIRM_MIN_MS is a bounce, not a decision; it
+ *   is ignored and the row stays armed;
+ * - an arm older than CONFIRM_MAX_MS expires (the row goes back to normal by
+ *   itself), so a stray tap later only re-arms;
+ * - after any confirmed action, every click is ignored for AFTER_ACTION_MS.
+ */
+const CONFIRM_MIN_MS = 700
+const CONFIRM_MAX_MS = 6_000
+const AFTER_ACTION_MS = 2_000
+let armedAt = 0
+let armExpiry: number | undefined
+let actionLockUntil = 0
+
+type Gate = 'armed' | 'confirmed' | 'ignored'
+
+function confirmGate(key: string): Gate {
+  const now = Date.now()
+  if (now < actionLockUntil) return 'ignored'
+  if (state.armedTaskId === key) {
+    const age = now - armedAt
+    if (age < CONFIRM_MIN_MS) return 'ignored'
+    if (age <= CONFIRM_MAX_MS) {
+      window.clearTimeout(armExpiry)
+      state.armedTaskId = null
+      actionLockUntil = now + AFTER_ACTION_MS
+      return 'confirmed'
+    }
+  }
+  state.armedTaskId = key
+  armedAt = now
+  window.clearTimeout(armExpiry)
+  const stamp = now
+  armExpiry = window.setTimeout(() => {
+    if (state.armedTaskId !== key || armedAt !== stamp) return
+    state.armedTaskId = null
+    void paint()
+  }, CONFIRM_MAX_MS)
+  return 'armed'
+}
+
 async function sleepDisplay(): Promise<void> {
   if (asleep) return
   asleep = true
@@ -619,6 +650,7 @@ async function refresh(): Promise<void> {
       if (plan.ok) {
         state.plan = plan.plan
         state.planError = null
+        savePlan(state.space, plan.plan)
       } else if (state.view.kind === 'plan') {
         state.planError = plan.error
       }
@@ -1027,6 +1059,67 @@ async function beginListening(): Promise<void> {
   await paint()
 }
 
+async function startDayCapture(): Promise<void> {
+  await refreshCoachSession()
+  if (state.coachSession?.active) {
+    state.error = 'Stop the current recording first'
+    await paint()
+    return
+  }
+  const started = await startCoachSession(
+    'life',
+    { taskId: '__day_start__', label: 'Start Day' },
+    'conversation',
+  )
+  if (!started.ok) {
+    state.error = started.error
+    await paint()
+    return
+  }
+  state.coachSession = started.session
+  state.view = { kind: 'daystart', phase: 'recording', scroll: 0 }
+  state.error = null
+  await startAudioCapture(started.session.id)
+  await paint()
+}
+
+async function reviewDayCapture(): Promise<void> {
+  if (!state.coachSession?.id) return
+  await stopAudioCapture()
+  await waitForTranscriptionsToDrain()
+  await refreshCoachSession()
+  if (state.view.kind === 'daystart') state.view.phase = 'reviewing'
+  await paint()
+}
+
+async function finishDayCapture(): Promise<void> {
+  const sessionId = state.coachSession?.id
+  if (!sessionId) {
+    await startDayCapture()
+    return
+  }
+  await stopAudioCapture()
+  await waitForTranscriptionsToDrain()
+  const stopped = await endCoachSession(sessionId)
+  state.coachSession = null
+  if (!stopped.ok) {
+    state.view = { kind: 'daystart', phase: 'failed', message: stopped.error }
+    await paint()
+    return
+  }
+  if (stopped.note?.kind !== 'day-start' || !stopped.note.result.ok) {
+    state.view = {
+      kind: 'daystart',
+      phase: 'failed',
+      message: stopped.note?.result.error || 'No preset chores matched.',
+    }
+    await paint()
+    return
+  }
+  await refresh()
+  await openPlan()
+}
+
 async function refreshAssistant(provider: AssistantProvider): Promise<void> {
   const result = await fetchAssistantChat(state.space, provider)
   if (result.ok) {
@@ -1371,6 +1464,7 @@ function rowCount(): number {
       ).length
     case 'assistant':
       return state.view.phase === 'providers' ? 2 : 0
+    case 'daystart':
     case 'timerReset':
     case 'cue':
     case 'transcript':
@@ -1386,6 +1480,7 @@ function clampCursor(): void {
     view.kind === 'pong' ||
     view.kind === 'fonttest' ||
     view.kind === 'timerReset' ||
+    view.kind === 'daystart' ||
     view.kind === 'cue' ||
     view.kind === 'transcript' ||
     (view.kind === 'assistant' && view.phase === 'chat')
@@ -1425,6 +1520,12 @@ function move(delta: number): void {
 
   if (view.kind === 'timerReset') return
 
+  if (view.kind === 'daystart') {
+    const max = transcriptScrollMax(state)
+    view.scroll = Math.max(0, Math.min(max, (view.scroll ?? 0) - delta))
+    return
+  }
+
   if (view.kind === 'cue') {
     view.startArmed = false
     if (!state.coachSession && state.coachModes.length > 0) {
@@ -1457,7 +1558,7 @@ function move(delta: number): void {
   if (view.kind === 'assistant') {
     if (view.phase === 'providers') {
       view.cursor = Math.max(0, Math.min(1, view.cursor + delta))
-    } else if (!state.assistantRecording) {
+    } else {
       const max = assistantScrollMax(state)
       view.scroll = Math.max(0, Math.min(max, (view.scroll ?? 0) - delta))
     }
@@ -1653,6 +1754,10 @@ async function openPlan(): Promise<void> {
     state.plan = result.plan
     state.planError = null
     state.error = null
+    savePlan(state.space, result.plan)
+    if (state.view.kind === 'plan' && state.space === 'life' && result.plan.day?.started !== true) {
+      state.view.cursor = 1
+    }
   } else {
     state.planError = result.error
     state.error = result.error
@@ -1746,6 +1851,8 @@ function startPong(): void {
 
 async function activate(): Promise<void> {
   const view = state.view
+  // A burst of ring bumps must not run on into the next row or screen.
+  if (Date.now() < actionLockUntil) return
 
   if (view.kind !== 'index') state.lastEvent = `clk:${view.kind}`
 
@@ -1761,6 +1868,13 @@ async function activate(): Promise<void> {
       return
     }
     await confirmResetTimers()
+    return
+  }
+
+  if (view.kind === 'daystart') {
+    if (view.phase === 'recording') await reviewDayCapture()
+    else if (view.phase === 'reviewing') await finishDayCapture()
+    else await startDayCapture()
     return
   }
 
@@ -1839,7 +1953,8 @@ async function activate(): Promise<void> {
       await talkAbout(null)
       return
     }
-    await openNotes()
+    if (row?.kind === 'notes') await openNotes()
+    else await openAssistant()
     return
   }
 
@@ -1888,7 +2003,35 @@ async function activate(): Promise<void> {
       return
     }
 
-    const key = `${row.subject.kind}:${row.subject.id}:${row.note.id}`
+    if (action === 'queue-chatgpt' || action === 'queue-claude') {
+      const provider: AssistantProvider = action === 'queue-claude' ? 'claude' : 'chatgpt'
+      const key = `${row.subject.kind}:${row.subject.id}:${row.note.id}:${action}`
+      if (state.armedNoteId !== key) {
+        state.armedNoteId = key
+        await paint()
+        return
+      }
+      const queued = await queueAssistantNote(
+        state.space,
+        provider,
+        row.subject.kind,
+        row.subject.id,
+        row.note.id,
+      )
+      if (!queued.ok) {
+        state.error = queued.error
+        state.armedNoteId = null
+        await paint()
+        return
+      }
+      state.assistantThreads[provider] = queued.chat
+      state.error = null
+      state.armedNoteId = `queued:${key}`
+      await paint()
+      return
+    }
+
+    const key = `${row.subject.kind}:${row.subject.id}:${row.note.id}:delete`
     if (state.armedNoteId !== key) {
       state.armedNoteId = key
       await paint()
@@ -1922,6 +2065,14 @@ async function activate(): Promise<void> {
 
     // A step running implausibly long resets instead of completing — recording
     // five hours for loading a dishwasher would corrupt the median for good.
+    // Every action on this screen is gated (v0.120.0): one bump used to start
+    // a timer, the next finished it.
+    const gate = confirmGate(`item:${run.runId}:${item.id}`)
+    if (gate !== 'confirmed') {
+      if (gate === 'armed') await paint()
+      return
+    }
+
     if (item.suspect) {
       const result = await resetStep(run.runId, item.id)
       if (result.ok && state.snapshot) state.snapshot.checklists = result.checklists
@@ -1982,13 +2133,11 @@ async function activate(): Promise<void> {
 
     // Arm, then confirm. Ticking off "call dentist" you have not made is not
     // something you can undo from your face.
-    if (state.armedTaskId !== view.taskId) {
-      state.armedTaskId = view.taskId
-      await paint()
+    const gate = confirmGate(view.taskId)
+    if (gate !== 'confirmed') {
+      if (gate === 'armed') await paint()
       return
     }
-
-    state.armedTaskId = null
     const ok = await completeTask(view.taskId)
     if (!ok) {
       state.error = 'could not save'
@@ -2008,12 +2157,11 @@ async function activate(): Promise<void> {
       // Arm, then confirm. Resetting is not destructive — the finished run
       // stays in history and keeps feeding the medians — but starting a fresh
       // laundry by accident is noise you would have to undo step by step.
-      if (state.armedTaskId !== row.run.runId) {
-        state.armedTaskId = row.run.runId
-        await paint()
+      const gate = confirmGate(row.run.runId)
+      if (gate !== 'confirmed') {
+        if (gate === 'armed') await paint()
         return
       }
-      state.armedTaskId = null
       // A run only leaves `active` once finished, so a reset is finish-then-
       // start; starting alone would hand back the same completed run.
       await finishChecklist(row.run.runId)
@@ -2039,6 +2187,9 @@ async function activate(): Promise<void> {
   }
 
   if (view.kind === 'plan') {
+    // While the remembered plan is on screen and the live one is loading, the
+    // rows may be stale: never act on one.
+    if (state.planLoading) return
     const row = planRows(state)[view.cursor]
 
     // The LIFE line. Two things live behind it — talk, or read back what you
@@ -2051,6 +2202,11 @@ async function activate(): Promise<void> {
       return
     }
 
+    if (row?.kind === 'start-day') {
+      await startDayCapture()
+      return
+    }
+
     // A required-today step, ticked from the page you were already on.
     //
     // Arm, then confirm. One click used to finish it, and the row vanished
@@ -2060,16 +2216,21 @@ async function activate(): Promise<void> {
     if (row?.kind === 'daily') {
       const key = `${row.runId}:${row.item.id}`
       if (row.item.done) {
+        // Undo is gated as well: a bump on a done row used to un-tick it.
+        const undo = confirmGate(`undo:${key}`)
+        if (undo !== 'confirmed') {
+          if (undo === 'armed') await paint()
+          return
+        }
         state.stickyDone.delete(key)
         await toggle(row.runId, row.item.id)
         return
       }
-      if (state.armedTaskId !== key) {
-        state.armedTaskId = key
-        await paint()
+      const gate = confirmGate(key)
+      if (gate !== 'confirmed') {
+        if (gate === 'armed') await paint()
         return
       }
-      state.armedTaskId = null
       // Held on screen, ticked, until you leave the page.
       state.stickyDone.add(key)
       await toggle(row.runId, row.item.id)
@@ -2093,12 +2254,11 @@ async function activate(): Promise<void> {
     // and scrolling away cancels (the cursor move clears armedTaskId).
     if (row?.kind === 'agenda' && row.row.kind === 'do') {
       const key = `step:${row.row.choreId}:${row.row.stepId}`
-      if (state.armedTaskId !== key) {
-        state.armedTaskId = key
-        await paint()
+      const gate = confirmGate(key)
+      if (gate !== 'confirmed') {
+        if (gate === 'armed') await paint()
         return
       }
-      state.armedTaskId = null
       await stepFromPlan(row.row.choreId, row.row.stepId)
       return
     }
@@ -2106,6 +2266,11 @@ async function activate(): Promise<void> {
     // Clicking something already done puts it back. The undo for a misclick,
     // and the only one available from the glasses.
     if (row?.kind === 'agenda' && row.row.kind === 'done') {
+      const undo = confirmGate(`undo:${row.row.runId}:${row.row.stepId}`)
+      if (undo !== 'confirmed') {
+        if (undo === 'armed') await paint()
+        return
+      }
       const undone = await checkItem(row.row.runId, row.row.stepId, false)
       if (undone.ok && state.snapshot) state.snapshot.checklists = undone.checklists
       else if (!undone.ok) state.error = undone.error
@@ -2202,6 +2367,17 @@ async function activate(): Promise<void> {
 
 async function back(): Promise<void> {
   state.armedNoteId = null
+  if (state.view.kind === 'daystart') {
+    if (state.view.phase === 'recording') {
+      await reviewDayCapture()
+      await finishDayCapture()
+    } else if (state.view.phase === 'reviewing') {
+      await finishDayCapture()
+    } else {
+      await openPlan()
+    }
+    return
+  }
   if (state.view.kind === 'timerReset') {
     if (state.space === 'life') await openPlan()
     else {
@@ -2378,6 +2554,7 @@ async function onMenu(itemID: number): Promise<void> {
         state.view.kind !== 'pong' &&
         state.view.kind !== 'fonttest' &&
         state.view.kind !== 'timerReset' &&
+        state.view.kind !== 'daystart' &&
         state.view.kind !== 'cue' &&
         state.view.kind !== 'transcript' &&
         state.view.kind !== 'assistant'
@@ -2749,10 +2926,9 @@ if (state.space === 'life') {
 setInterval(() => void refresh(), config.pollMs)
 setInterval(() => void refreshCoachCue(true), config.cueMs)
 
-// The dashboard clock and timers are computed locally from authoritative end
-// timestamps. Repaint once per second while a timer is live; tile hashing means
-// only the bottom-right timer tile crosses to the glasses. With no timer, only
-// the top-right clock tile changes, once per minute.
+// Keep the date/time line current (once a minute) and live countdowns ticking
+// (once a second while a timer runs). Both are native text: an unchanged
+// screen sends nothing, a changed one is a single small text update.
 let dashboardMinute = -1
 setInterval(() => {
   if (!state.foreground || asleep || listenBoard(state)) return
@@ -2772,8 +2948,9 @@ setInterval(() => {
  */
 setInterval(() => {
   const liveListen = state.view.kind === 'cue'
+  const liveDayStart = state.view.kind === 'daystart' && state.view.phase === 'recording'
   const liveAssistant = state.view.kind === 'assistant' && state.view.phase === 'chat' && state.assistantRecording
-  if ((!liveListen && !liveAssistant) || !state.coachSession?.active || !state.foreground || asleep) return
+  if ((!liveListen && !liveDayStart && !liveAssistant) || !state.coachSession?.active || !state.foreground || asleep) return
   // Refetch, not just repaint. The counters are local so they moved, but the
   // transcript lines live on the hub and nothing was asking for them — so the
   // screen said "Nothing heard yet" no matter what the hub had transcribed.

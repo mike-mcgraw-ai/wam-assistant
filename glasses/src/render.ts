@@ -57,6 +57,7 @@ export type View =
   | { kind: 'checklist'; runId: string; cursor: number }
   | { kind: 'picker'; cursor: number }
   | { kind: 'plan'; cursor: number }
+  | { kind: 'daystart'; phase: 'recording' | 'reviewing' | 'failed'; scroll?: number; message?: string }
   | { kind: 'chores'; cursor: number }
   | { kind: 'notes'; cursor: number }
   | { kind: 'capture'; cursor: number }
@@ -236,6 +237,7 @@ const CAPTURE_TASK_ID = 'captured-notes'
 
 export type PlanRow =
   | { kind: 'listen' }
+  | { kind: 'start-day' }
   | { kind: 'daily'; runId: string; listName: string; item: ChecklistItem }
   | { kind: 'task'; task: TaskRow }
   | { kind: 'chores' }
@@ -253,18 +255,19 @@ export function planRows(state: UiState): PlanRow[] {
   const plan = state.plan
   if (!plan) return []
 
+  // Before the morning walk-through, Home is intentionally just the Life
+  // doorway and one Start Day action. Preset lists exist, but none of them is
+  // today's work until Mike names it.
+  if (state.space === 'life' && plan.day?.started !== true) {
+    return [{ kind: 'listen' }, { kind: 'start-day' }]
+  }
+
   // The hub files a Listen capture with no obvious home onto a task called
   // "Captured notes", which is a sensible place to keep them and a useless row
   // to carry on the running order: it is not a thing to do, it never
   // completes, and its whole contents are one click away behind the LIFE line
   // now. It stays in `plan.tasks` so the Notes screen can still read it.
-  const tasks: PlanRow[] = (plan.tasks ?? [])
-    .filter(task => task.taskId !== CAPTURE_TASK_ID)
-    .map(task => ({ kind: 'task', task }))
   const agenda: PlanRow[] = plan.agenda.map(row => ({ kind: 'agenda', row }))
-  // The old blank separator, now carrying a name and a destination. A row
-  // that only created space was the cheapest thing on the page to improve.
-  const gap: PlanRow[] = agenda.length ? [{ kind: 'chores' }] : []
 
   // The LIFE line, made selectable. Scrolling up off the first task lands on
   // it, and a click opens the voice-note path — general capture, no subject,
@@ -294,7 +297,7 @@ export function planRows(state: UiState): PlanRow[] {
     }
   }
 
-  return [{ kind: 'listen' }, ...required, ...tasks, ...gap, ...agenda]
+  return [{ kind: 'listen' }, ...required, ...agenda]
 }
 
 /** Rows the cursor is allowed to stop on. */
@@ -348,10 +351,10 @@ export function choreRows(state: UiState): ChoreRow[] {
  * extra click on capture, which is the right trade for never losing the way
  * back to your own notes.
  */
-export type CaptureRow = { kind: 'listen' } | { kind: 'notes' }
+export type CaptureRow = { kind: 'listen' } | { kind: 'notes' } | { kind: 'chat' }
 
 export function captureRows(): CaptureRow[] {
-  return [{ kind: 'listen' }, { kind: 'notes' }]
+  return [{ kind: 'listen' }, { kind: 'notes' }, { kind: 'chat' }]
 }
 
 function renderCapture(state: UiState, cursor: number): string {
@@ -364,14 +367,20 @@ function renderCapture(state: UiState, cursor: number): string {
     const point = i === cursor ? '>' : ' '
     if (row.kind === 'listen') {
       lines.push(clipToWidth(`${point}Listen        ${live ? 'recording now' : 'arm mic'}`))
-    } else {
+    } else if (row.kind === 'notes') {
       lines.push(clipToWidth(`${point}Notes         ${notes === 0 ? 'nothing saved' : `${notes} saved`}`))
+    } else {
+      const ready = state.snapshot?.assistant?.chatgpt || state.snapshot?.assistant?.claude
+      lines.push(clipToWidth(`${point}Chat          ${ready ? 'choose AI' : 'Mac setup needed'}`))
     }
   })
 
-  lines.push('', rows[cursor]?.kind === 'listen'
+  const selected = rows[cursor]?.kind
+  lines.push('', selected === 'listen'
     ? live ? 'click to stop recording' : 'click to arm mic'
-    : 'click to read them back')
+    : selected === 'notes'
+      ? 'click to read them back'
+      : 'click to choose ChatGPT or Claude')
   return assemble(lines, config.maxChars, config.maxLines)
 }
 
@@ -497,12 +506,13 @@ function renderNotes(state: UiState, cursor: number): string {
   return assemble(lines, config.maxChars, config.maxLines)
 }
 
-export type NoteDetailAction = 'transcript' | 'delete'
+export type NoteDetailAction = 'transcript' | 'queue-chatgpt' | 'queue-claude' | 'delete'
 
 export function noteDetailActions(_state: UiState, row: NoteRow | undefined): NoteDetailAction[] {
   if (!row) return []
   const actions: NoteDetailAction[] = []
   if (row.note.id.endsWith(':note')) actions.push('transcript')
+  actions.push('queue-chatgpt', 'queue-claude')
   if (row.note.at !== 0) actions.push('delete')
   return actions
 }
@@ -527,7 +537,24 @@ function renderNoteDetail(
   actions.forEach((action, index) => {
     const point = index === cursor ? '>' : ' '
     if (action === 'transcript') lines.push(`${point}[=] Full transcript`)
-    else lines.push(state.armedNoteId === key ? `${point}[!] Click again: delete` : `${point}[x] Delete note`)
+    else if (action === 'queue-chatgpt') {
+      const actionKey = `${key}:${action}`
+      lines.push(
+        state.armedNoteId === `queued:${actionKey}` ? `${point}[G] ChatGPT queued`
+          : state.armedNoteId === actionKey ? `${point}[!] Click again: queue GPT`
+            : `${point}[G] Queue ChatGPT`,
+      )
+    } else if (action === 'queue-claude') {
+      const actionKey = `${key}:${action}`
+      lines.push(
+        state.armedNoteId === `queued:${actionKey}` ? `${point}[C] Claude queued`
+          : state.armedNoteId === actionKey ? `${point}[!] Click again: queue Claude`
+            : `${point}[C] Queue Claude`,
+      )
+    } else {
+      const actionKey = `${key}:${action}`
+      lines.push(state.armedNoteId === actionKey ? `${point}[!] Click again: delete` : `${point}[x] Delete note`)
+    }
   })
   return assemble(lines, config.maxChars, config.maxLines)
 }
@@ -846,6 +873,15 @@ export function findRun(state: UiState, runId: string): ChecklistRun | undefined
   return state.snapshot?.checklists?.active.find(r => r.runId === runId)
 }
 
+/** What the confirming tap will do to a checklist step (v0.120.0 gate). */
+function armedVerb(item: ChecklistItem): string {
+  if (item.suspect) return 'Reset'
+  if (item.done) return 'Undo'
+  if (item.stepKind === 'check') return 'Tick'
+  if (item.running || (item.stepKind === 'wait' && item.endsAt !== null)) return 'Finish'
+  return 'Start'
+}
+
 function renderChecklist(state: UiState, runId: string, cursor: number): string {
   const run = findRun(state, runId)
   if (!run) return 'WAM\n\nList closed.\n\ndbl-tap to go back'
@@ -868,6 +904,8 @@ function renderChecklist(state: UiState, runId: string, cursor: number): string 
     if (i === run.items.length) {
       const live = state.coachSession?.active
       lines.push(clip(`${i === cursor ? '>' : ' '}${live ? '[*] Stop listening' : '[~] Note on this list'}`, LINE_CHARS))
+    } else if (i === cursor && state.armedTaskId === `item:${run.runId}:${run.items[i].id}`) {
+      lines.push(clipToWidth(`>[?] ${armedVerb(run.items[i])} ${run.items[i].label}?`))
     } else lines.push(checklistItemRow(run.items[i], i === cursor))
   }
 
@@ -880,7 +918,10 @@ function renderChecklist(state: UiState, runId: string, cursor: number): string 
     lines.push(state.coachSession?.active ? 'recording - click to stop' : 'click arms voice note')
     return assemble(lines, config.maxChars, config.maxLines)
   }
-  const tip = item?.suspect
+  const armed = item && state.armedTaskId === `item:${run.runId}:${item.id}`
+  const tip = armed
+    ? `click again to ${armedVerb(item).toLowerCase()}`
+    : item?.suspect
     ? 'running too long - click to reset'
     : item?.done
       ? `done ${clockShort(item.at)} - click to undo`
@@ -993,15 +1034,10 @@ function renderInbox(state: UiState, group: string, cursor: number): string {
  * and what a click will do to it.
  */
 function planTip(state: UiState, rows: PlanRow[], cursor: number): string {
-  const ruleAt = rows.findIndex(r => r.kind === 'chores')
   const row = rows[cursor]
-  if (!row) return 'Chores'
-
-  // Above the line the rule is just a heading for what is below it — the
-  // big-ticket rows say what they are, and a tip about them on a divider that
-  // does not belong to them reads as noise.
-  if (ruleAt !== -1 && cursor < ruleAt) return 'Chores'
+  if (!row) return 'Life'
   if (row.kind === 'chores') return 'Chores - click to open'
+  if (row.kind === 'start-day') return 'click to walk the house and name today'
   if (row.kind === 'task') {
     return state.armedTaskId === row.task.taskId
       ? '! Task - click again to finish'
@@ -1013,6 +1049,7 @@ function planTip(state: UiState, rows: PlanRow[], cursor: number): string {
   }
 
   if (row.kind === 'daily') {
+    if (row.item.done && state.armedTaskId === `undo:${row.runId}:${row.item.id}`) return 'Click again to undo'
     if (row.item.done) return `${row.listName} - done ${clockShort(row.item.at)} - click to undo`
     if (state.armedTaskId === `${row.runId}:${row.item.id}`) return 'Click again to mark it done'
     return `${row.listName} - required today`
@@ -1020,6 +1057,7 @@ function planTip(state: UiState, rows: PlanRow[], cursor: number): string {
 
   const r = row.row
   if (r.kind === 'gap') return '~ Waiting - nothing to start'
+  if (r.kind === 'done' && state.armedTaskId === `undo:${r.runId}:${r.stepId}`) return 'Click again to undo'
   if (r.kind === 'done') return `[x] Done ${ago(r.at)} ago - click to undo`
   if (state.armedTaskId === `step:${r.choreId}:${r.stepId}`) {
     return isRunning(state, r) ? 'Click again to finish' : 'Click again to start'
@@ -1033,12 +1071,39 @@ function renderPlan(state: UiState, cursor: number): string {
   const plan = state.plan
   if (!plan) {
     const detail = state.planLoading ? 'Working it out...' : `No plan - ${state.planError || 'waiting for hub'}`
-    return assemble(['WAM', '', ...wrap(detail, LINE_CHARS), '', 'dbl-tap to go back'], config.maxChars, config.maxLines)
+    return assemble([clockLine(state), spaceLine(state), '', ...wrap(detail, LINE_CHARS)], config.maxChars, config.maxLines)
   }
 
   const rows = planRows(state)
   if (rows.length <= 1) {
-    return 'WAM\n\nNothing with known step times.\n\nAdd estimates in the config.'
+    return assemble(
+      [clockLine(state), spaceLine(state), '', 'Nothing with known step times.', 'Add estimates in the config.'],
+      config.maxChars,
+      config.maxLines,
+    )
+  }
+
+  // This is the shell of the morning brief, intentionally visible before any
+  // integrations exist. Labels stay beside the emoji because the glasses font
+  // may drop an unsupported symbol; the placeholders preserve the space real
+  // notification counts, weather, and financial values will need later.
+  if (state.space === 'life' && plan.day?.started !== true) {
+    const startSelected = cursor === 1
+    return assemble(
+      [
+        clockLine(state),
+        spaceLine(state, cursor === 0),
+        'Good morning, Mike.',
+        '📱 Texts XX   ✉ Emails XX',
+        '🔗 LinkedIn XX   ☀ Weather XX°',
+        '💵 Accounts $XX,XXX',
+        '📈 Tracker $XXX,XXX',
+        `${startSelected ? '>' : ' '}+   Start Day`,
+        planTip(state, rows, cursor),
+      ],
+      config.maxChars,
+      config.maxLines,
+    )
   }
 
   // The rule carries the tip, but it scrolls off once you page past it. On
@@ -1080,10 +1145,14 @@ function renderPlan(state: UiState, cursor: number): string {
     const point = i === bodyCursor && cursor > 0 ? '>' : ' '
     if (row.kind === 'chores') {
       lines.push(ruleCentred('Chores', i === bodyCursor && cursor > 0))
+    } else if (row.kind === 'start-day') {
+      lines.push(clip(`${point}+   Start Day`, LINE_CHARS))
     } else if (row.kind === 'daily') {
       const selected = i === bodyCursor && cursor > 0
       if (selected && state.armedTaskId === `${row.runId}:${row.item.id}`) {
         lines.push(clip('>[?] Mark done?', LINE_CHARS))
+      } else if (selected && state.armedTaskId === `undo:${row.runId}:${row.item.id}`) {
+        lines.push(clipToWidth(`>[?] Undo ${row.item.label}?`))
       } else {
         // The same row the list itself draws, so a step looks the same wherever
         // you meet it — no duration column, because there is no duration.
@@ -1100,6 +1169,8 @@ function renderPlan(state: UiState, cursor: number): string {
       const r = row.row
       if (selected && r.kind === 'do' && state.armedTaskId === `step:${r.choreId}:${r.stepId}`) {
         lines.push(clipToWidth(`>[?] ${isRunning(state, r) ? 'Finish' : 'Start'} ${r.step}?`))
+      } else if (selected && r.kind === 'done' && state.armedTaskId === `undo:${r.runId}:${r.stepId}`) {
+        lines.push(clipToWidth(`>[?] Undo ${r.step}?`))
       } else {
         lines.push(clipToWidth(`${point}${agendaRow(row.row, isRunning(state, row.row))}`))
       }
@@ -1109,6 +1180,36 @@ function renderPlan(state: UiState, cursor: number): string {
   lines.push(planTip(state, rows, cursor))
 
   return assemble(lines, config.maxChars, config.maxLines)
+}
+
+function renderDayStart(
+  state: UiState,
+  phase: 'recording' | 'reviewing' | 'failed',
+  scrollBack = 0,
+  message = '',
+): string {
+  const heard = (state.coachSession?.recentSegments ?? [])
+    .flatMap(segment => wrap(`> ${segment.text}`, LINE_CHARS))
+  const footer = phase === 'recording'
+    ? 'click to stop and review'
+    : phase === 'reviewing'
+      ? 'click to build today'
+      : 'click to try Start Day again'
+  const room = Math.max(1, config.maxLines - 3)
+  const maxScroll = Math.max(0, heard.length - room)
+  const back = Math.max(0, Math.min(maxScroll, scrollBack))
+  const end = heard.length - back
+  const shown = heard.slice(Math.max(0, end - room), end)
+  return assemble(
+    [
+      clockLine(state),
+      `START DAY  ${phase === 'recording' ? 'REC' : phase === 'reviewing' ? 'REVIEW' : 'TRY AGAIN'}`,
+      ...(phase === 'failed' ? wrap(message || 'No saved chore names matched.', LINE_CHARS) : shown.length ? shown : ['Walk the house. Name every chore for today.']),
+      footer,
+    ],
+    config.maxChars,
+    config.maxLines,
+  )
 }
 
 /**
@@ -1336,6 +1437,7 @@ function listenModeLabel(mode: CoachMode): string {
   if (mode.id === 'conversation') return 'Conversate'
   if (mode.id === 'listening') return 'Listen'
   if (mode.id === 'meeting') return 'Meeting'
+  if (mode.id === 'notes') return 'Solo Notes'
   return mode.name
 }
 
@@ -1449,14 +1551,25 @@ const ASSISTANT_PROVIDERS: Array<{ id: AssistantProvider; label: string }> = [
   { id: 'chatgpt', label: 'ChatGPT' },
   { id: 'claude', label: 'Claude' },
 ]
+const ASSISTANT_NATIVE_ROWS = 10
 
-function assistantMessageLines(chat: AssistantChat | null): string[] {
+function assistantLinePrefix(provider: AssistantProvider, role: AssistantChat['messages'][number]['role']): string {
+  if (role === 'user') return 'Me: '
+  if (role === 'system') return '! '
+  return provider === 'claude' ? 'Claude: ' : 'GPT: '
+}
+
+function assistantPassageLines(provider: AssistantProvider, role: AssistantChat['messages'][number]['role'], text: string): string[] {
+  const prefix = assistantLinePrefix(provider, role)
+  const body = role === 'user' ? assistantRequestText(text) : assistantClean(text)
+  const lines = wrap(body, Math.max(8, LINE_CHARS - prefix.length))
+  return lines.map((line, index) => `${index === 0 ? prefix : ' '.repeat(prefix.length)}${line}`)
+}
+
+function assistantMessageLines(chat: AssistantChat | null, provider: AssistantProvider): string[] {
   const lines: string[] = []
   for (const message of chat?.messages ?? []) {
-    const prefix = message.role === 'user' ? '> ' : message.role === 'system' ? '! ' : '- '
-    const clean = message.text.replace(/\s+/g, ' ').trim()
-    const wrapped = wrap(clean, Math.max(8, LINE_CHARS - prefix.length))
-    wrapped.forEach((line, index) => lines.push(`${index === 0 ? prefix : '  '}${line}`))
+    lines.push(...assistantPassageLines(provider, message.role, message.text))
   }
   return lines
 }
@@ -1477,10 +1590,6 @@ function assistantRequestText(text: string): string {
   return cleaned || 'new voice request'
 }
 
-function assistantSnippet(text: string, prefix = ''): string {
-  return clipToWidth(`${prefix}${assistantClean(text)}`)
-}
-
 function assistantLabel(provider: AssistantProvider): string {
   return provider === 'claude' ? 'Claude' : 'ChatGPT'
 }
@@ -1496,34 +1605,16 @@ function latestAssistantMessage(chat: AssistantChat | null): AssistantChat['mess
   return messages.length > 0 ? messages[messages.length - 1] : null
 }
 
-function latestUserMessage(chat: AssistantChat | null): AssistantChat['messages'][number] | null {
-  const messages = chat?.messages ?? []
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    if (messages[i].role === 'user') return messages[i]
-  }
-  return null
-}
-
-function latestReplyMessage(chat: AssistantChat | null): AssistantChat['messages'][number] | null {
-  const messages = chat?.messages ?? []
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    if (messages[i].role === 'assistant') return messages[i]
-  }
-  return null
-}
-
 function assistantStatusBadge(state: UiState, provider: AssistantProvider, chat: AssistantChat | null): string {
-  if (chat?.busy) return chat.pending?.status === 'queued' ? 'QUEUED' : 'WORKING'
+  if (chat?.busy) {
+    const status = chat.pending?.status === 'queued' ? 'QUEUED' : 'WORKING'
+    const queued = chat.queued ?? 0
+    return queued > 0 ? `${status} +${queued}` : status
+  }
   const ready = assistantIsReady(state, provider, chat)
   if (ready === true) return 'READY'
   if (ready === false) return 'SETUP'
   return 'CHECKING'
-}
-
-function assistantGoalLine(state: UiState, provider: AssistantProvider, chat: AssistantChat | null): string {
-  if (assistantIsReady(state, provider, chat) === false) return '  Goal: connect Mac setup'
-  const latest = latestUserMessage(chat)
-  return clipToWidth(`  Goal: ${latest ? assistantRequestText(latest.text) : 'waiting for your ask'}`)
 }
 
 function assistantNowText(state: UiState, provider: AssistantProvider, chat: AssistantChat | null): string {
@@ -1546,22 +1637,21 @@ function assistantNowText(state: UiState, provider: AssistantProvider, chat: Ass
   return 'ready for next turn'
 }
 
-function assistantNowLine(state: UiState, provider: AssistantProvider, chat: AssistantChat | null): string {
-  return clipToWidth(`  Now: ${assistantNowText(state, provider, chat)}`)
-}
-
 function assistantProviderRows(
   state: UiState,
   provider: { id: AssistantProvider; label: string },
   selected: boolean,
-): string[] {
+): string {
   const chat = state.assistantThreads[provider.id] ?? null
   const point = selected ? '>' : ' '
-  return [
-    clipToWidth(`${point}${provider.label}  ${assistantStatusBadge(state, provider.id, chat)}`),
-    assistantGoalLine(state, provider.id, chat),
-    assistantNowLine(state, provider.id, chat),
-  ]
+  const status = assistantStatusBadge(state, provider.id, chat)
+  const label =
+    status.startsWith('READY') ? 'ready'
+      : status === 'SETUP' ? 'setup needed'
+        : status.startsWith('QUEUED') ? status.toLowerCase()
+          : status.startsWith('WORKING') ? status.toLowerCase()
+            : 'checking'
+  return clipToWidth(`${point}${provider.label}  ${label}`)
 }
 
 function assistantTranscriptGoal(state: UiState): string {
@@ -1569,41 +1659,54 @@ function assistantTranscriptGoal(state: UiState): string {
   return assistantRequestText(text)
 }
 
-function assistantActiveGoalLine(state: UiState, provider: AssistantProvider): string {
-  if (state.assistantRecording || state.assistantReviewing || state.assistantSending) {
-    return clipToWidth(`Goal: ${assistantTranscriptGoal(state)}`)
+function assistantFooter(state: UiState): string | null {
+  if (state.assistantRecording) return 'click stops recording'
+  if (state.assistantReviewing) return 'click sends - back discards'
+  if (state.assistantSending) return 'voice is being queued'
+  return null
+}
+
+function assistantContentRoom(state: UiState): number {
+  const rows = Math.min(config.maxLines, ASSISTANT_NATIVE_ROWS)
+  return Math.max(1, rows - 1 - (assistantFooter(state) ? 1 : 0))
+}
+
+function assistantLiveTranscriptLines(state: UiState): string[] {
+  const segments = state.coachSession?.recentSegments ?? []
+  if (segments.length > 0) return transcriptLines(segments)
+  if (state.assistantReviewing) return ['No transcript yet.']
+  if (state.assistantRecording) return ['Recording...']
+  return []
+}
+
+function assistantActiveContentLines(state: UiState, provider: AssistantProvider): string[] {
+  if (state.assistantRecording || state.assistantReviewing) return assistantLiveTranscriptLines(state)
+
+  if (state.assistantSending) {
+    const transcript = transcriptLines(state.coachSession?.recentSegments ?? [])
+    return transcript.length > 0 ? transcript : assistantPassageLines(provider, 'user', assistantTranscriptGoal(state))
   }
-  return assistantGoalLine(state, provider, state.assistantChat).trimStart()
-}
 
-function assistantActiveNowLine(state: UiState, provider: AssistantProvider): string {
-  if (state.assistantRecording) return 'Now: capturing your ask'
-  if (state.assistantReviewing) return 'Now: checking transcript'
-  if (state.assistantSending) return `Now: queuing ${assistantLabel(provider)}`
-  return assistantNowLine(state, provider, state.assistantChat).trimStart()
-}
-
-function assistantContentRoom(): number {
-  return Math.max(1, config.maxLines - 4)
+  const lines = assistantMessageLines(state.assistantChat, provider)
+  if (lines.length > 0) return lines
+  return [state.assistantChat?.busy ? assistantNowText(state, provider, state.assistantChat) : 'Ready for your next message.']
 }
 
 export function assistantScrollMax(state: UiState): number {
-  if (state.view.kind !== 'assistant' || state.view.phase !== 'chat' || state.assistantRecording) return 0
-  const room = assistantContentRoom()
-  if (state.assistantReviewing) {
-    return Math.max(0, transcriptLines(state.coachSession?.recentSegments ?? []).length - room)
-  }
-  return Math.max(0, assistantMessageLines(state.assistantChat).length - room)
+  if (state.view.kind !== 'assistant' || state.view.phase !== 'chat') return 0
+  const room = assistantContentRoom(state)
+  return Math.max(0, assistantActiveContentLines(state, state.view.provider).length - room)
 }
 
 function renderAssistant(state: UiState): string {
   const view = state.view
   if (view.kind !== 'assistant') return ''
   if (view.phase === 'providers') {
-    const lines = [clockLine(state), ruleCentred('Chat', false)]
+    const lines = [clockLine(state), ruleCentred('Chat', false), '']
     ASSISTANT_PROVIDERS.forEach((provider, index) => {
-      lines.push(...assistantProviderRows(state, provider, view.cursor === index))
+      lines.push(assistantProviderRows(state, provider, view.cursor === index))
     })
+    lines.push('', 'click to choose')
     return assemble(lines, config.maxChars, config.maxLines)
   }
 
@@ -1617,45 +1720,19 @@ function renderAssistant(state: UiState): string {
         : state.assistantChat?.busy
           ? assistantStatusBadge(state, view.provider, state.assistantChat)
           : assistantStatusBadge(state, view.provider, state.assistantChat)
-  const footer = state.assistantRecording
-    ? 'click stops to review'
-    : state.assistantReviewing
-      ? 'click sends - back discards'
-      : state.assistantSending
-        ? 'voice is being queued'
-        : state.assistantChat?.busy
-          ? 'screen refreshes while open'
-          : 'ready - click to talk'
-  const room = assistantContentRoom()
-  let content: string[]
-
-  if (state.assistantRecording || state.assistantReviewing) {
-    const segments = state.coachSession?.recentSegments ?? []
-    content = segments.length > 0
-      ? transcriptLines(segments)
-      : state.assistantReviewing
-        ? ['No transcript yet.', 'Back discards.']
-        : ['Recording...', 'Speak, then click to review.']
-  } else if (state.assistantSending) {
-    content = ['Transcribing voice...', 'Then the Mac runner takes it.']
-  } else if (state.assistantChat?.busy) {
-    const prior = latestReplyMessage(state.assistantChat)
-    content = prior ? [assistantSnippet(prior.text, 'Prev: ')] : []
-  } else {
-    content = assistantMessageLines(state.assistantChat)
-    if (content.length === 0) content = ['Ready for your next message.']
-  }
+  const footer = assistantFooter(state)
+  const room = assistantContentRoom(state)
+  const content = assistantActiveContentLines(state, view.provider)
 
   const scroll = Math.max(0, Math.min(assistantScrollMax(state), view.scroll ?? 0))
   const end = content.length - scroll
   const window = content.slice(Math.max(0, end - room), end)
+  const scrollMark = scroll > 0 ? ` ^${scroll}` : ''
   return assemble(
     [
-      clipToWidth(`${label}  ${status}`),
-      assistantActiveGoalLine(state, view.provider),
-      assistantActiveNowLine(state, view.provider),
+      clipToWidth(`${label} ${status}${scrollMark}`),
       ...window,
-      clipToWidth(footer),
+      ...(footer ? [clipToWidth(footer)] : []),
     ],
     config.maxChars,
     config.maxLines,
@@ -1721,6 +1798,8 @@ function renderView(state: UiState): string {
       return renderPicker(state, state.view.cursor)
     case 'plan':
       return renderPlan(state, state.view.cursor)
+    case 'daystart':
+      return renderDayStart(state, state.view.phase, state.view.scroll ?? 0, state.view.message)
     case 'cue':
       return renderCue(state, state.view.scroll ?? 0)
     case 'assistant':

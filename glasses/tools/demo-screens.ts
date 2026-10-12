@@ -148,6 +148,11 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
       ...block,
       agenda: agenda(block),
       reach: plannable.map((c: any) => ({ choreId: c.id, name: c.name, ...reach(c, 60) })),
+      tasks: [],
+      day: {
+        day: '2026-10-11', startHour: 5, started: true, startedAt: now - 15 * M,
+        checklistIds: ['laundry', 'dishes', 'vacuum'], transcript: 'Laundry, dishes, and vacuum today.',
+      },
     },
   }
 
@@ -227,8 +232,13 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
     nextAfterMs: 120_000,
   }
 
-  const coachModes: CoachMode[] = ['Conversation', 'Listening', 'Meeting'].map(name => ({
-    id: name.toLowerCase(),
+  const coachModes: CoachMode[] = [
+    { id: 'conversation', name: 'Conversation' },
+    { id: 'listening', name: 'Listening' },
+    { id: 'meeting', name: 'Meeting' },
+    { id: 'notes', name: 'Solo Notes' },
+  ].map(({ id, name }) => ({
+    id,
     name,
     category: '',
     keepPrivate: false,
@@ -252,13 +262,38 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
   add('Ops index', render(withPlan))
   add('Ops index — AI widget', render({ ...withPlan, cue: demoCue }))
   add('Coach — manual', render({ ...withPlan, cue: demoCue, view: { kind: 'cue' } }))
-  add('Listen — three choices', render({
+  add('Capture — Listen, Notes, and Chat', render({
+    ...withPlan,
+    snapshot: { ...snapshot, assistant: { chatgpt: true, claude: true } },
+    space: 'life',
+    view: { kind: 'capture', cursor: 2 },
+  }))
+  add('Listen — four modes', render({
     ...withPlan,
     space: 'life',
     cue: null,
     coachModes,
     coachModeId: 'conversation',
     view: { kind: 'cue', modeCursor: 1 },
+  }))
+  add('Life home — before Start Day', render({
+    ...withPlan,
+    space: 'life',
+    view: { kind: 'plan', cursor: 1 },
+    plan: {
+      ...withPlan.plan,
+      timeline: [], agenda: [], progress: [], reach: [], busyMs: 0,
+      day: {
+        day: '2026-10-11', startHour: 5, started: false, startedAt: null,
+        checklistIds: [], transcript: '',
+      },
+    },
+  }))
+  add('Start Day — recording the house walk', render({
+    ...withPlan,
+    space: 'life',
+    view: { kind: 'daystart', phase: 'recording', scroll: 0 },
+    coachSession: { ...listenSession, space: 'life', title: 'Start Day' },
   }))
   add('Chat — provider picker', render({
     ...withPlan,
@@ -270,7 +305,8 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
         provider: 'chatgpt',
         ready: true,
         busy: true,
-        pending: { status: 'claimed', claimedBy: 'mikes-mac', attempts: 1, createdAt: now - 30_000, updatedAt: now - 5_000 },
+        queued: 2,
+        pending: { id: 'demo-chat-job', status: 'claimed', claimedBy: 'mikes-mac:chatgpt', attempts: 1, createdAt: now - 30_000, updatedAt: now - 5_000 },
         updatedAt: now,
         messages: [
           { id: 'u1', role: 'user', text: 'Okay ChatGPT, make the chat screen show the goal and current subtask, thank you.', at: now - 35_000 },
@@ -309,6 +345,24 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
     assistantRecording: true,
     coachSession: listenSession,
   }))
+  add('ChatGPT — recording, scrolled back', render({
+    ...withPlan,
+    space: 'life',
+    view: { kind: 'assistant', phase: 'chat', provider: 'chatgpt', scroll: 3 },
+    assistantRecording: true,
+    coachSession: {
+      ...listenSession,
+      recentSegments: [
+        ...listenSession.recentSegments,
+        {
+          id: 'seg-3',
+          speaker: 'me',
+          text: 'The chat recording screen needs to give nearly the whole display to the spoken transcript and keep scroll position stable while new words arrive.',
+          at: now - 6_000,
+        },
+      ],
+    },
+  }))
   add('Coach — conversation compass', render({ ...withPlan, cue: null, coachSession: listenSession, view: { kind: 'cue' } }))
   add('Coach — listening question', render({ ...withPlan, cue: questionCue, coachSession: listenSession, view: { kind: 'cue' } }))
   add('Life index', render({ ...withPlan, space: 'life', view: { kind: 'index', cursor: 0 } }))
@@ -335,8 +389,15 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
   add('Note — delete armed', render({
     ...withPlan,
     space: 'life',
-    view: { kind: 'note', subjectKind: 'chore', subjectId: 'vacuum', noteId: 's-demo-vacuum:note', cursor: 1 },
-    armedNoteId: 'chore:vacuum:s-demo-vacuum:note',
+    view: { kind: 'note', subjectKind: 'chore', subjectId: 'vacuum', noteId: 's-demo-vacuum:note', cursor: 3 },
+    armedNoteId: 'chore:vacuum:s-demo-vacuum:note:delete',
+    noteTranscript: vacuumTranscript,
+  }))
+  add('Note — queued for Claude', render({
+    ...withPlan,
+    space: 'life',
+    view: { kind: 'note', subjectKind: 'chore', subjectId: 'vacuum', noteId: 's-demo-vacuum:note', cursor: 2 },
+    armedNoteId: 'queued:chore:vacuum:s-demo-vacuum:note:queue-claude',
     noteTranscript: vacuumTranscript,
   }))
   add('Note — full transcript', render({

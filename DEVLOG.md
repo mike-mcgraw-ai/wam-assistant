@@ -1,6 +1,6 @@
 # Development Milestones
 
-These are the real completion dates of private device builds. The sanitized portfolio history was published together on 2026-09-29, not presented as though these public releases existed on their completion dates.
+These are the real completion dates of private device builds. The sanitized portfolio history was published on or after 2026-09-29, not presented as though these public releases existed on their completion dates.
 
 | Portfolio | Completed | Face build | Capability and lesson |
 |---|---:|---:|---|
@@ -20,3 +20,4 @@ These are the real completion dates of private device builds. The sanitized port
 | v0.14.0 | 2026-09-28 | 0.109.0 | **Intentional hardware controls:** An explicit double-click wakes the display without accidental actions. |
 | v0.15.0 | 2026-09-28 | 0.115.0 | **Preserve speech on exit:** Leaving Listen flushes and saves useful words without keeping empty recordings. |
 | v0.16.0 | 2026-09-28 | 0.117.0 | **Hardware-safe live updates:** Transcript priority and native text updates reduce slow sequential image redraws. |
+| v0.17.0 | 2026-10-11 | 0.132.0 | **Proving the assistant path, and writing down why it broke:** An end-to-end check for a real assistant turn, reporting each job transition and its timing; a subprocess wrapper that caps the tool's own timeout below its own so failures explain themselves; and the engineering record extended with the delivery, tooling and interaction mistakes behind each fix. |

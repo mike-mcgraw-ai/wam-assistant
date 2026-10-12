@@ -1,6 +1,6 @@
 {
   "name": "wam-assistant-glasses",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "qr": "evenhub qr --url \"http://${LAN_IP:-127.0.0.1}:5173\"",
+    "qr:textprobe": "npx --yes @evenrealities/evenhub-cli qr --url \"http://${LAN_IP:-127.0.0.1}:5173/textprobe.html\"",
     "screens": "vite --open /screens.html",
     "sim": "evenhub-simulator --automation-port 9898 http://127.0.0.1:5173",
     "shot": "node tools/shot.mjs",

@@ -273,6 +273,107 @@ root so the same extract command works for both. Changing the shape of a
 delivery is a change to the user's workflow, and it will silently produce
 stale builds.
 
+### Delivery and tooling
+
+**A guard that can only see half the file is not a guard.** The ship script
+refused to pack unless the changelog documented the version being built, and
+checked for duplicate version numbers at the same time. Its pattern required a
+`v` prefix on the heading. Entries written without it were invisible to *both*
+checks — so six consecutive builds failed the gate and never packed, and four
+version collisions sailed past the collision detector that existed to catch
+them. A validator has to accept every form the team actually writes, or it
+silently inspects a subset and reports on the whole.
+
+**A build step that can fail must not leave something that looks like
+success.** Those six failed packs were worse than visible errors, because the
+packer writes a fixed filename into a fixed directory: a failed run left the
+*previous* package sitting there, same name, same place, indistinguishable
+from fresh. Every upload for two weeks installed a stale build while the
+version number in the source said otherwise. The fix is three lines — after
+packing, assert the artifact is newer than the command that built it, and
+refuse if it is not. The general rule: if your output path is stable, staleness
+is indistinguishable from success unless you check.
+
+**Don't make the user your regression test.** Two layout bugs each cost two
+round trips of "try this / still wrong" because diagnosis happened by reading
+code. Standing up a renderer that printed every screen to the terminal in
+milliseconds turned those into seconds, and caught a third before it shipped.
+If a human is in your verification loop, the loop is too slow — and they will
+run out of patience before you run out of bugs.
+
+**The fast check and the shipped artifact must be the same thing.** When
+rendering moved from the firmware's text container to bitmaps drawn on a
+canvas, the fast terminal preview went on rendering the *text that feeds* the
+bitmap. It still caught content and alignment bugs, so it looked like it was
+working — while being structurally incapable of seeing what actually shipped.
+Whenever a render path changes, ask what the quick loop is still verifying, and
+write the answer down where the next person will read it.
+
+**A measurement rig is trustworthy for exactly what it was calibrated on.**
+The simulator and the hardware agreed on relative glyph widths and disagreed on
+absolute size: a line the simulator fitted wrapped on real glasses. Relative
+widths were what column alignment needed, so the rig stayed useful — for that.
+The total line budget had to come from the hardware. Record which half of a
+tool's output you have actually validated; the other half will be trusted by
+default otherwise.
+
+### Shelling out to other tools
+
+**A worker that kills its own child learns nothing.** Background jobs failed
+with `timed out after 300s` and no cause, for weeks. The subprocess had its own
+300-second timeout *and* a retry budget defaulting to ten — both invisible from
+the outside. A stalled call therefore could never finish inside our 300-second
+window, and we SIGKILLed the one process that knew why. Cap a tool's own
+patience *below* yours, so it fails first and explains itself. Send SIGTERM
+before SIGKILL so a merely slow process can flush. And distinguish your own
+kill from a real failure: exit 143 is a question about your budget, not about
+the tool.
+
+**Read stdout on failure, not just stderr.** The same tool printed in-run
+failures — authentication, configuration, refusals — to *stdout*, and the
+wrapper discarded stdout whenever the exit code was non-zero. Every
+explanation for a fortnight of failures went straight into the bin, leaving
+`exited 1:` with nothing after the colon. Capture both streams always; prefer
+stderr and fall back to stdout.
+
+**Platform permission failures impersonate every other kind of failure.** A
+background service could not read files in a protected user folder that an
+interactive shell read fine. The symptom — `operation not permitted` on a file
+plainly present and executable — is indistinguishable from a wrong path, a
+missing execute bit, or a missing interpreter, and it burned an hour across two
+sessions. Run the identical command interactively: if it works there and not
+under the service manager, it is the sandbox, and no amount of fixing the code
+will help.
+
+**A scanner that prints what it finds has leaked it.** A secrets scan echoed a
+live credential into a terminal, a log file, and a chat transcript in a single
+run — doing more damage than the thing it was looking for. Report the location;
+mask the value.
+
+**A verification that calls a pass a failure is worse than no verification.** A
+check compared a model's reply to an expected marker with strict equality. The
+model answered with underscores where the prompt used spaces, so a completely
+healthy run reported as broken. Compare on the part that carries the meaning,
+and be stricter about false alarms in diagnostics than anywhere else — a tool
+nobody trusts gets ignored exactly when it is right.
+
+### Interaction
+
+**A row that vanishes the instant you act on it takes its own evidence with
+it.** Ticking an item removed it immediately, which is defensible — the screen
+is what is left to do — but it left no sign anything had happened and no way to
+undo a misclick, under a finger that was still moving. Ticked rows now stay for
+the rest of the visit and disappear next time you arrive. Immediate is not the
+same as responsive.
+
+**Do not time what nobody will come back to stop.** Every step was two clicks,
+one to start a timer and one to finish, because measuring how long things take
+is the point of the system. That is wrong for a morning routine: nobody reopens
+a checklist to stop the clock on the shower, and a step left running all day is
+worse data than no duration at all. A third step kind — one click, done, record
+when — fixed it. "Don't measure this" and "don't confirm this" are different
+requests and were conflated for a build cycle.
+
 **Design to the smallest true constraint, not the safest one.** An early
 overcorrection capped every line at the width of a line of solid capitals. The
 user's response is worth quoting: *"we can't assume I am going to want to use

@@ -342,6 +342,39 @@ export async function sendAssistantSession(
   }
 }
 
+export async function queueAssistantNote(
+  space: string,
+  provider: AssistantProvider,
+  kind: 'task' | 'chore',
+  subjectId: string,
+  noteId: string,
+): Promise<AssistantChatResponse> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), config.timeoutMs)
+  try {
+    const res = await fetch(`${config.serverUrl}/assistant/queue-note`, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ space, provider, kind, subjectId, noteId }),
+      signal: controller.signal,
+    })
+    const payload = await res.json().catch(() => null)
+    if (!res.ok) return { ok: false, error: payload?.error ?? `server ${res.status}` }
+    if (!payload?.chat) return { ok: false, error: 'bad payload' }
+    return payload as AssistantChatResponse
+  } catch (err: unknown) {
+    const message =
+      err instanceof DOMException && err.name === 'AbortError'
+        ? 'timeout'
+        : err instanceof Error
+          ? err.message
+          : 'network error'
+    return { ok: false, error: message.slice(0, 40) }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export async function activateCoachMode(
   space: string,
   modeId: string,

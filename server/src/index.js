@@ -97,6 +97,10 @@ const coach = new Coach({
   logPath: join(DATA_DIR, 'coach.jsonl'),
 })
 
+// Apply replies that landed just before a restart and resume any persisted
+// per-provider backlog without waiting for the glasses to open Chat.
+assistant.syncAll(jobs)
+
 const restoredCoachSessions = ['ops', 'life']
   .map(space => coach.currentSession(space)?.id)
   .filter(Boolean)
@@ -340,12 +344,25 @@ function withDoneInline(rows, done) {
 }
 
 function buildPlan(minutes, requestedIds, space) {
-  const all = choresForPlan(requestedIds, space)
+  const day = space ? checklists.dayStatus(space) : null
+  let selectedIds = requestedIds
+  if (space === 'life' && requestedIds.length === 0) {
+    const activeIds = checklists.snapshot().active
+      .filter(run => run.kind === 'ondemand' && run.space === 'life' && !run.complete)
+      .map(run => run.checklistId)
+    selectedIds = [...new Set([...(day?.checklistIds ?? []), ...activeIds])]
+    // An empty array means "all" to choresForPlan. Before Start Day it must
+    // mean the opposite: no chores have been chosen yet.
+    if (selectedIds.length === 0) selectedIds = ['__no_daily_chores_selected__']
+  }
+
+  const all = choresForPlan(selectedIds, space)
   const chores = all.filter(c => c.schedulable)
   const unestimated = all.filter(c => !c.schedulable)
   const plan = planBlock(chores, minutes)
   return {
     ...plan,
+    day,
     // Tasks lead the screen, but as their own section above the list rather
     // than as rows in it. Scheduling by efficiency would bury every one of
     // them behind a dishwasher; folding them into the total corrupts it.
@@ -359,6 +376,39 @@ function buildPlan(minutes, requestedIds, space) {
 
 function cueSpace(value) {
   return value === 'life' ? 'life' : 'ops'
+}
+
+function queuedNote(kind, subjectId, noteId) {
+  if (kind === 'task') {
+    const note = tasks.notes(subjectId).find(row => row.id === noteId)
+    const task = tasks.taskDefs().find(row => row.id === subjectId)
+    return note ? { note, label: task?.label || 'Captured note' } : null
+  }
+  if (kind === 'chore') {
+    const note = checklists.notes(subjectId).find(row => row.id === noteId)
+    const checklist = checklists.templates.get(subjectId)
+    return note ? { note, label: checklist?.name || 'Chore note' } : null
+  }
+  return null
+}
+
+function queuedNoteText(found) {
+  const parts = [
+    'Work this item from my WAM Notes queue as my next message.',
+    `Subject: ${found.label}`,
+    '',
+    found.note.text,
+  ]
+  if (found.note.id.endsWith(':note')) {
+    const sessionId = found.note.id.slice(0, -':note'.length)
+    const session = coach.session(sessionId)
+    const transcript = transcriptText(session?.segments ?? [], 2_800)
+    if (transcript && !found.note.text.includes(transcript)) {
+      parts.push('', 'Original spoken context:', transcript)
+    }
+  }
+  parts.push('', 'If this is actionable, do the requested work. If it is reference only, return the useful conclusion and next concrete step without inventing one.')
+  return parts.join('\n').slice(0, 4_000)
 }
 
 function latestCoachModelCueForSession(space, sessionId, now = Date.now(), freshOnly = true) {
@@ -441,10 +491,16 @@ function modelBoard(modelResult) {
     .slice(-max)
   const topics = clean(raw.topics, 8, 60)
   const points = clean(raw.points, 5, 140)
-  if (topics.length === 0 && points.length === 0) return null
+  const overallTopic = String(raw.overallTopic || '').replace(/\s+/g, ' ').trim().slice(0, 80)
+  const sections = clean(raw.sections, 7, 60)
+  const currentSummary = clean(raw.currentSummary, 6, 160)
+  if (topics.length === 0 && points.length === 0 && !overallTopic && sections.length === 0 && currentSummary.length === 0) return null
   return {
     topics,
     points,
+    overallTopic,
+    sections,
+    currentSummary,
     updatedAt: modelResult.jobUpdatedAt || Date.now(),
     segmentCount: Number(modelResult.sourceSegmentCount) || 0,
   }
@@ -483,6 +539,14 @@ function publicCoachModelCue(modelCue) {
 }
 
 function modelNoteSummary(modelResult) {
+  const board = modelBoard(modelResult)
+  if (board?.overallTopic) {
+    const sections = board.sections.length > 1 ? `Roadmap: ${board.sections.join(' > ')}` : ''
+    return [board.overallTopic, sections, ...board.currentSummary]
+      .filter(Boolean)
+      .join('\n')
+      .slice(0, 400)
+  }
   const recapLines = modelResult?.kind === 'recap' && Array.isArray(modelResult.lines)
     ? modelResult.lines.map(line => String(line || '').trim()).filter(Boolean).slice(0, 3)
     : []
@@ -603,6 +667,11 @@ function createCoachCueJob(session, {
         boardTopicChars: 44,
         boardPoints: 4,
         boardPointChars: 120,
+        overallTopicChars: 60,
+        boardSections: 7,
+        boardSectionChars: 44,
+        currentSummaryPoints: 6,
+        currentSummaryChars: 120,
         allowedKinds: ['answer', 'followup', 'factcheck', 'advice', 'thought', 'recap'],
       },
     },
@@ -769,7 +838,8 @@ function ensureCaptureTask(space, at = Date.now()) {
 }
 
 function consolidatedSessionNote(session) {
-  return transcriptText(session?.segments, 400)
+  const max = session?.context?.taskId === '__day_start__' ? 4_000 : 400
+  return transcriptText(session?.segments, max)
 }
 
 function routeCoachSession(session, at = Date.now()) {
@@ -777,6 +847,10 @@ function routeCoachSession(session, at = Date.now()) {
   if (!rawText) return { kind: 'empty', result: { ok: true } }
   const noteId = `${session.id}:note`
   const space = cueSpace(session.space)
+
+  if (session.context?.taskId === '__day_start__') {
+    return { kind: 'day-start', result: checklists.startDay(rawText, space, at) }
+  }
 
   // Classification happens once, after the complete recording exists. A
   // fixed-duration STT chunk is not an utterance and must never create state.
@@ -1420,7 +1494,7 @@ const server = http.createServer(async (req, res) => {
       at: body.at,
     })
     if (result.ok && !result.duplicate) {
-      if (result.session.context?.taskId !== '__assistant__') {
+      if (!['__assistant__', '__day_start__'].includes(result.session.context?.taskId)) {
         scheduleCoachCue(result.session)
       }
     }
@@ -1538,7 +1612,11 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ---- assistant chat --------------------------------------------------
-  if (url.pathname === '/assistant/chat' || url.pathname === '/assistant/chat/from-session') {
+  if (
+    url.pathname === '/assistant/chat' ||
+    url.pathname === '/assistant/chat/from-session' ||
+    url.pathname === '/assistant/queue-note'
+  ) {
     if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
     const querySpace = cueSpace(url.searchParams.get('space'))
     const queryProvider = url.searchParams.get('provider') === 'claude' ? 'claude' : 'chatgpt'
@@ -1572,6 +1650,32 @@ const server = http.createServer(async (req, res) => {
         provider: body.provider,
         text,
         clientId: body.clientId || `session:${session.id}`,
+      }, jobs)
+      return json(res, result.ok ? 202 : result.code || 400, result)
+    }
+
+    if (req.method === 'POST' && url.pathname === '/assistant/queue-note') {
+      const kind = body.kind === 'chore' ? 'chore' : body.kind === 'task' ? 'task' : null
+      const subjectId = String(body.subjectId || '')
+      const noteId = String(body.noteId || '')
+      if (!kind || !subjectId || !noteId) {
+        return json(res, 400, { ok: false, error: 'kind, subjectId and noteId required' })
+      }
+      const found = queuedNote(kind, subjectId, noteId)
+      if (!found) return json(res, 404, { ok: false, error: 'unknown note' })
+      const provider = body.provider === 'claude' ? 'claude' : 'chatgpt'
+      const result = assistant.queueTurn({
+        space: body.space,
+        provider,
+        text: queuedNoteText(found),
+        clientId: `note:${kind}:${subjectId}:${noteId}:${provider}`,
+        source: {
+          kind: 'note',
+          clientId: `note:${kind}:${subjectId}:${noteId}:${provider}`,
+          noteId,
+          subjectId,
+          label: found.label,
+        },
       }, jobs)
       return json(res, result.ok ? 202 : result.code || 400, result)
     }
@@ -1627,12 +1731,16 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && url.pathname === '/jobs') {
       const capability = url.searchParams.get('capability')
-      const available = capability === 'coach.cue'
+      const provider = url.searchParams.get('provider')
+      let available = capability === 'coach.cue'
         ? jobs.availableCoachCues([
             coach.currentSession('ops')?.id,
             coach.currentSession('life')?.id,
           ])
         : jobs.available(capability)
+      if (capability === 'assistant.chat' && (provider === 'chatgpt' || provider === 'claude')) {
+        available = available.filter(job => job.input?.provider === provider)
+      }
       return json(res, 200, { jobs: available, summary: jobs.summary() })
     }
 
@@ -1660,13 +1768,13 @@ const server = http.createServer(async (req, res) => {
 
       const agent = String(body.agent || '').slice(0, 40)
       let result
+      const job = jobs.get(id)
 
       if (action === 'claim') {
         result = jobs.claim(id, agent, body.leaseSeconds)
       } else if (action === 'heartbeat') {
         result = jobs.heartbeat(id, agent, body.leaseSeconds)
       } else if (action === 'result') {
-        const job = jobs.get(id)
         result = jobs.finish(id, agent, body.result)
         // Triage results are applied here rather than by the agent: the agent
         // should not need to know what an inbox is.
@@ -1682,6 +1790,8 @@ const server = http.createServer(async (req, res) => {
       } else {
         result = jobs.fail(id, agent, body.error, body.retry !== false)
       }
+
+      if (result.ok && job?.capability === 'assistant.chat') assistant.syncAll(jobs)
 
       return json(res, result.ok ? 200 : result.code || 400, result)
     }

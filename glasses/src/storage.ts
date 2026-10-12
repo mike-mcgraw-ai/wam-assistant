@@ -1,4 +1,4 @@
-import type { Snapshot } from './types'
+import type { BlockPlan, Snapshot } from './types'
 
 /**
  * Last-known snapshot, cached so a cold start has something to draw
@@ -44,6 +44,42 @@ export function loadSnapshot(): Snapshot | null {
     if (Date.now() - generated > MAX_CACHE_AGE_MS) return null
 
     return snapshot
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Last running order, per space (v0.124.0).
+ *
+ * The snapshot cache never covered the plan, so every launch drew a
+ * "Working it out..." placeholder across all four image tiles and then rebuilt
+ * them with the real list a second later: the screen visibly built itself
+ * twice, ~0.4 s per tile. With the last plan cached, the first frame is the
+ * list, and the live fetch only resends rows that actually changed.
+ *
+ * Twelve hours: an older plan would mostly be wrong rows, which costs the same
+ * rebuild as no cache at all.
+ */
+const PLAN_KEY = 'opsboard.lastPlan'
+const MAX_PLAN_AGE_MS = 12 * 60 * 60 * 1000
+
+export function savePlan(space: string, plan: BlockPlan): void {
+  try {
+    localStorage.setItem(`${PLAN_KEY}.${space}`, JSON.stringify({ at: Date.now(), plan }))
+  } catch {
+    // The app works without the cache.
+  }
+}
+
+export function loadPlan(space: string): BlockPlan | null {
+  try {
+    const raw = localStorage.getItem(`${PLAN_KEY}.${space}`)
+    if (!raw) return null
+    const saved = JSON.parse(raw) as { at?: number; plan?: BlockPlan }
+    if (!saved?.plan || typeof saved.at !== 'number') return null
+    if (Date.now() - saved.at > MAX_PLAN_AGE_MS) return null
+    return saved.plan
   } catch {
     return null
   }

@@ -34,14 +34,13 @@ export const TILES = [
   { x: TILE_W, y: TILE_H },
 ] as const
 
-export interface DashboardRail {
-  time: string
-  weekday: string
-  date: string
-  connection: string
-  status: string
-  version: string
-  timers: Array<{ label: string; value: string }>
+export interface AssistantPanelBlock {
+  title: string
+  note?: string
+  rows: string[]
+  dim?: boolean
+  keepNewest?: boolean
+  prewrapped?: boolean
 }
 
 const PAD_PX = 6
@@ -57,30 +56,6 @@ const PENDING_INK = 110
 /** Content rows under the title band: 14 + 7 x 18 = 140 of 144. */
 const BLOCK_ROWS = 7
 const FIRST_BASELINE_PX = TITLE_BAND_PX + 12
-/** Fixed two-column timer grid, relative to the bottom-right tile. */
-
-/**
- * The left column of ordinary screens (v0.117.0).
- *
- * The list is a picture, but the `>` cursor and the running-order hint live in
- * the native text layer on top of it, so a scroll is one small text update and
- * no image transfer (an image tile costs ~400 ms on Mike's phone and the
- * firmware draws tiles one after another). For the cursor to sit on its row,
- * picture rows use the native text line height.
- */
-/** Native firmware text line height (@evenrealities/pretext: 27 px). */
-export const TEXT_PITCH_PX = 27
-/** Rows the column holds: 10 x 27 = 270 of 288. */
-export const PANEL_ROWS = 10
-/**
- * Baseline of picture row 0. Tuned so the small picture text sits level with
- * the native `>` on the same line; the one number to nudge if the cursor
- * reads high or low on the glasses.
- */
-export const ROW_BASELINE_PX = 21
-/** Picture text starts here, clear of the native `>` (drawn at the text padding). */
-export const CURSOR_COL_PX = 17
-
 function blit(target: number[], source: number[], width: number, height: number, x0: number, y0: number): void {
   for (let y = 0; y < height; y += 1) {
     const from = y * width
@@ -95,63 +70,6 @@ export function textFrame(content: string): number[] {
   const [top, bottom] = renderCompactDisplay(content)
   blit(frame, top, COMPACT_W, COMPACT_PANEL_H, COMPACT_X, COMPACT_Y)
   blit(frame, bottom, COMPACT_W, COMPACT_PANEL_H, COMPACT_X, COMPACT_Y + COMPACT_PANEL_H)
-  return frame
-}
-
-/**
- * Normal WAM screens use the old compact two-band display on the left and an
- * independently changing dashboard rail on the right. A list scroll therefore
- * changes only the left tiles; the clock changes only the top-right tile.
- */
-export function dashboardFrame(rows: string[], rail: DashboardRail): number[] {
-  const canvas = document.createElement('canvas')
-  canvas.width = PANEL_W
-  canvas.height = PANEL_H
-  const ctx = canvas.getContext('2d')
-  if (!ctx) throw new Error('dashboard panel has no 2d canvas')
-  ctx.imageSmoothingEnabled = false
-  ctx.fillStyle = '#000'
-  ctx.fillRect(0, 0, PANEL_W, PANEL_H)
-  ctx.fillStyle = '#fff'
-  ctx.textBaseline = 'alphabetic'
-  const rightX = TILES[1].x + PAD_PX
-  ctx.font = `18px sans-serif`
-  drawLine(ctx, rail.time, rightX, 24, COLUMN_W)
-  ctx.font = CONTENT_FONT
-  drawLine(ctx, rail.weekday, rightX, 48, COLUMN_W)
-  drawLine(ctx, rail.date, rightX, 66, COLUMN_W)
-  // No screen name here: it changed on every navigation, which dragged this
-  // tile into every repaint and turned a two-tile left-side change into a
-  // visible four-tile rollout. The left side already says where you are.
-  drawLine(ctx, rail.connection, rightX, 91, COLUMN_W)
-  drawLine(ctx, rail.status, rightX, 109, COLUMN_W)
-  drawLine(ctx, rail.version, rightX, 127, COLUMN_W)
-  // Bottom-right is left dark: timers are native text there (main.ts), so a
-  // ticking second never costs an image transfer.
-
-  // The list: no cursor in it (main.ts moves `>` into the text layer), rows
-  // on the native line height.
-  // Long rows give up tracking first (drawLine), then are cut at the column
-  // edge; nothing may spill into the rail, or it would redraw with the list.
-  const listWidth = TILE_W - CURSOR_COL_PX - 4
-  ctx.save()
-  ctx.beginPath()
-  ctx.rect(0, 0, TILE_W - 3, PANEL_H)
-  ctx.clip()
-  rows.slice(0, PANEL_ROWS).forEach((text, row) =>
-    drawLine(ctx, text, CURSOR_COL_PX, ROW_BASELINE_PX + row * TEXT_PITCH_PX, listWidth),
-  )
-  ctx.restore()
-
-  const rgba = ctx.getImageData(0, 0, PANEL_W, PANEL_H).data
-  const frame = new Array<number>(PANEL_W * PANEL_H)
-  for (let source = 0, target = 0; source < rgba.length; source += 4, target += 1) {
-    frame[target] = rgba[source] >= EDGE_THRESHOLD ? INK : 0
-  }
-  // Give the clock a visual hierarchy without spending a row on a container
-  // header: time is bright; date, context and build identity sit back.
-  dim(frame, TILES[1].x, TILES[1].y + 28, TILE_W, 48, TITLE_INK)
-  dim(frame, TILES[1].x, TILES[1].y + 112, TILE_W, 32, TITLE_INK)
   return frame
 }
 
@@ -326,8 +244,11 @@ export function listenFrame(board: ListenBoard): number[] {
     if (topicRows.length >= BLOCK_ROWS) break
     if (topic.current) {
       const wrapped = wrapPx(ctx, `> ${topic.text}`, COLUMN_W, '  ')
-      if (wrapped.length > 2) wrapped[1] = clipPx(ctx, `${wrapped[1]} ${wrapped.slice(2).join(' ')}`, COLUMN_W)
-      topicRows.push(...wrapped.slice(0, 2))
+      const lineLimit = board.topicLineLimit ?? 2
+      if (wrapped.length > lineLimit) {
+        wrapped[lineLimit - 1] = clipPx(ctx, `${wrapped[lineLimit - 1]} ${wrapped.slice(lineLimit).join(' ')}`, COLUMN_W)
+      }
+      topicRows.push(...wrapped.slice(0, lineLimit))
     } else {
       topicRows.push(clipPx(ctx, `  ${topic.text}`, COLUMN_W))
     }
@@ -379,6 +300,52 @@ export function listenFrame(board: ListenBoard): number[] {
   if (board.summaryPending) dim(frame, ...body(2), PENDING_INK)
 
   // Static dotted dividers: they never change, so they never cost a send.
+  for (let y = 2; y < PANEL_H - 2; y += 3) frame[y * PANEL_W + TILE_W] = DIVIDER_INK
+  for (let x = PAD_PX; x < PANEL_W - PAD_PX; x += 3) {
+    if (x !== TILE_W) frame[TILE_H * PANEL_W + x] = DIVIDER_INK
+  }
+  return frame
+}
+
+export function assistantFrame(blocks: AssistantPanelBlock[]): number[] {
+  const canvas = document.createElement('canvas')
+  canvas.width = PANEL_W
+  canvas.height = PANEL_H
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('assistant panel has no 2d canvas')
+  ctx.imageSmoothingEnabled = false
+  ctx.fillStyle = '#000'
+  ctx.fillRect(0, 0, PANEL_W, PANEL_H)
+  ctx.fillStyle = '#fff'
+  ctx.textBaseline = 'alphabetic'
+
+  blocks.slice(0, 4).forEach((block, tile) => {
+    ctx.font = CONTENT_FONT
+    const rows = block.rows.length > 0 ? block.rows : ['']
+    const blockRows = block.prewrapped
+      ? rows.slice(0, BLOCK_ROWS).map(row => clipPx(ctx, row, COLUMN_W))
+      : paragraphs(ctx, rows, BLOCK_ROWS, '', block.keepNewest === true)
+    drawBlock(
+      ctx,
+      tile,
+      block.title,
+      block.note ?? '',
+      blockRows,
+    )
+  })
+
+  const rgba = ctx.getImageData(0, 0, PANEL_W, PANEL_H).data
+  const frame = new Array<number>(PANEL_W * PANEL_H)
+  for (let source = 0, target = 0; source < rgba.length; source += 4, target += 1) {
+    frame[target] = rgba[source] >= EDGE_THRESHOLD ? INK : 0
+  }
+
+  for (const { x, y } of TILES) dim(frame, x, y, TILE_W, TITLE_BAND_PX, TITLE_INK)
+  blocks.slice(0, 4).forEach((block, tile) => {
+    if (!block.dim) return
+    const { x, y } = TILES[tile]
+    dim(frame, x, y + TITLE_BAND_PX, TILE_W, TILE_H - TITLE_BAND_PX, PENDING_INK)
+  })
   for (let y = 2; y < PANEL_H - 2; y += 3) frame[y * PANEL_W + TILE_W] = DIVIDER_INK
   for (let x = PAD_PX; x < PANEL_W - PAD_PX; x += 3) {
     if (x !== TILE_W) frame[TILE_H * PANEL_W + x] = DIVIDER_INK

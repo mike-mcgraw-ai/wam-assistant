@@ -132,3 +132,56 @@ test('checkbox-only legacy timings do not feed the read model or stats', () => {
   assert.equal(checklists.stats('morning').steps[0].samples, 0)
   assert.equal(checklists.stats('morning').plan[0].hasDuration, false)
 })
+
+test('Start Day matches spoken aliases and starts only those preset chores', () => {
+  const checklists = new Checklists(
+    {
+      resetHour: 5,
+      dayStartHour: 6,
+      checklists: [
+        { id: 'laundry', name: 'Laundry', aliases: ['wash clothes'], space: 'life', kind: 'ondemand', items: [] },
+        { id: 'dishes', name: 'Dishes', aliases: ['dishwasher'], space: 'life', kind: 'ondemand', items: [] },
+        { id: 'vacuum', name: 'Vacuum', aliases: ['floors'], space: 'life', kind: 'ondemand', items: [] },
+      ],
+    },
+    { runsPath: null, logPath: null, summaryPath: null },
+  )
+
+  const result = checklists.startDay(
+    'Today I need to wash clothes, load the dishwasher, and clean the floors.',
+    'life',
+    Date.UTC(2026, 9, 11, 14),
+  )
+
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.checklistIds, ['laundry', 'dishes', 'vacuum'])
+  assert.deepEqual(
+    checklists.snapshot(Date.UTC(2026, 9, 11, 14)).active.map(run => run.checklistId).sort(),
+    ['dishes', 'laundry', 'vacuum'],
+  )
+  assert.deepEqual(checklists.dayStatus('life', Date.UTC(2026, 9, 11, 14)), {
+    day: result.day,
+    startHour: 6,
+    started: true,
+    startedAt: Date.UTC(2026, 9, 11, 14),
+    checklistIds: ['laundry', 'dishes', 'vacuum'],
+    transcript: 'Today I need to wash clothes, load the dishwasher, and clean the floors.',
+  })
+})
+
+test('Start Day remains unstarted when speech matches no preset chore', () => {
+  const checklists = new Checklists(
+    {
+      checklists: [
+        { id: 'laundry', name: 'Laundry', aliases: ['wash clothes'], space: 'life', kind: 'ondemand', items: [] },
+      ],
+    },
+    { runsPath: null, logPath: null, summaryPath: null },
+  )
+
+  const result = checklists.startDay('I should answer some email.', 'life', 1_000)
+
+  assert.equal(result.ok, false)
+  assert.equal(checklists.dayStatus('life', 1_000).started, false)
+  assert.deepEqual(checklists.snapshot(1_000).active, [])
+})

@@ -60,6 +60,7 @@ export interface AssistantMessage {
 }
 
 export interface AssistantPendingJob {
+  id?: string
   status: 'queued' | 'claimed' | 'blocked' | 'done' | 'failed'
   claimedBy: string | null
   attempts: number
@@ -71,6 +72,8 @@ export interface AssistantChat {
   provider: AssistantProvider
   ready: boolean
   busy: boolean
+  queued?: number
+  activeSource?: { kind: string; clientId?: string; noteId?: string; subjectId?: string; label?: string } | null
   pending: AssistantPendingJob | null
   messages: AssistantMessage[]
   updatedAt: number
@@ -294,6 +297,14 @@ export interface BlockPlan {
   reach: PlanReach[]
   agenda: (AgendaRow | DoneRow)[]
   tasks: TaskRow[]
+  day?: {
+    day: string
+    startHour: number
+    started: boolean
+    startedAt: number | null
+    checklistIds: string[]
+    transcript: string
+  } | null
 }
 
 export interface CoachCue {
@@ -360,6 +371,7 @@ export interface CoachSessionSummary {
   updatedAt: number
   endedAt: number | null
   active: boolean
+  context?: { taskId?: string; choreId?: string; label: string } | null
   segmentCount: number
   recentSegments: CoachSegment[]
   runningNote: CoachRunningNote | null
@@ -367,6 +379,9 @@ export interface CoachSessionSummary {
   board?: {
     topics: string[]
     points: string[]
+    overallTopic?: string
+    sections?: string[]
+    currentSummary?: string[]
     updatedAt: number | null
     segmentCount: number
   } | null
@@ -393,7 +408,20 @@ export type CoachSessionResponse =
   | { ok: false; error: string }
 
 export type CoachSessionWriteResponse =
-  | { ok: true; session: CoachSessionSummary; existing?: boolean }
+  | {
+      ok: true
+      session: CoachSessionSummary
+      existing?: boolean
+      note?: {
+        kind: string
+        result: {
+          ok: boolean
+          error?: string
+          checklistIds?: string[]
+          matched?: Array<{ id: string; name: string }>
+        }
+      } | null
+    }
   | { ok: false; error: string }
 
 export type CoachSessionDiscardResponse =

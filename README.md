@@ -1,6 +1,6 @@
 # WAM Assistant
 
-> Historical milestone `v0.16.0`, based on face build `0.117.0`. Originally completed 2026-09-28; sanitized and published 2026-09-29. See [MILESTONE.md](MILESTONE.md) for this checkpoint.
+> Historical milestone `v0.17.0`, based on face build `0.132.0`. Originally completed 2026-10-11; sanitized and published 2026-10-13. See [MILESTONE.md](MILESTONE.md) for this checkpoint.
 
 A portable, privacy-first conversation assistant with an Even G2 smart-glasses
 client. WAM keeps the thread of a real conversation visible without demanding
@@ -14,7 +14,7 @@ recordings, tasks, credentials, private server addresses, packaged apps, or the
 private repository's Git objects.
 
 WAM progressed through more than 100 documented on-device iterations. This
-public history distills that work into 16 runnable milestones so the important
+public history distills that work into 17 runnable milestones so the important
 product and engineering turns remain reviewable without presenting every
 diagnostic or one-line hardware build as a separate release.
 
@@ -29,6 +29,13 @@ diagnostic or one-line hardware build as a separate release.
 - Four-panel redraw experiments balancing latency, flicker, and readability
 - Idempotent capture, local persistence, retry-safe jobs, and privacy boundaries
 - Simulator tooling, screen checks, tests, and guarded device releases
+
+The engineering record is in `docs/HUD-LESSONS.md`. Its later sections are
+written as incidents rather than advice — a release guard that could only see
+half its input file and so let six stale builds ship; a wrapper that discarded
+the one output stream carrying its subprocess's error messages; a background
+service defeated by a platform permission that an interactive shell did not
+hit. Each is the cheap version of a lesson that was not cheap to learn.
 
 ## Architecture
 
@@ -68,7 +75,14 @@ the returned transcript board and cues.
 - `glasses/`: Even G2 app, renderers, input handling, and simulator tools
 - `server/`: local hub, transcript processing, notes, lists, and tests
 - `agents/`: local model runner for AI cues and assistant turns
-- `DEVLOG.md`: capability milestones and the design lessons behind them
+- `DEVLOG.md`: capability milestones
+- `docs/HUD-LESSONS.md`: field notes — the display and font constraints, the
+  list model, and a long section on the process and tooling mistakes that cost
+  real time, with the incident behind each one
+- `docs/SCREEN-RESEARCH.md`: how much of the panel the app actually uses, and
+  the bandwidth ceiling that decides whether using more is affordable
+- `docs/SIM-LOOP.md`: the four test loops, fastest to slowest, and what each
+  one can and cannot prove
 - `BUILD_HISTORY.md`: the complete documented device-build ledger
 - `SANITIZATION.md`: source commit and export boundary for this snapshot
 

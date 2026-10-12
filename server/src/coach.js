@@ -75,6 +75,28 @@ const DEFAULT_MODES = [
     lullSeconds: 90,
     files: [],
   },
+  {
+    id: 'notes',
+    name: 'Solo Notes',
+    category: 'Personal',
+    keepPrivate: false,
+    behavior:
+      'The user is thinking out loud alone, often about code, plans, or things they want to build. Do not coach, answer, interrupt, or ask follow-up questions. Quietly turn the monologue into a durable working note: preserve one stable overall subject, maintain a chronological roadmap when the user changes sections, and keep a fuller summary of the current section. Reconstruct thoughts across speech-to-text chunks and omit filler without dropping decisions, requirements, constraints, examples, or next steps.',
+    cueTypes: {
+      answers: false,
+      followups: false,
+      explanations: false,
+      factChecks: false,
+      advice: false,
+      thoughts: false,
+    },
+    speakUp: 'low',
+    promptLulls: false,
+    periodicRecap: false,
+    recapMinutes: 2,
+    lullSeconds: 90,
+    files: [],
+  },
 ]
 
 function nowMs(value = Date.now()) {

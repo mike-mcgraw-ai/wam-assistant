@@ -35,7 +35,6 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 const HUB = (process.env.HUB_URL || 'http://localhost:8787').replace(/\/+$/, '')
 const TOKEN = process.env.AGENT_TOKEN || ''
-const NAME = process.env.AGENT_NAME || hostname()
 const CMD = process.env.AGENT_CMD || 'claude -p'
 const CHATGPT_CMD = process.env.CHATGPT_CMD || `codex exec --ephemeral --sandbox workspace-write -C ${ROOT} -`
 const CLAUDE_CMD = process.env.CLAUDE_CMD || 'claude -p'
@@ -46,6 +45,11 @@ const DRY = process.argv.includes('--dry')
 const ONLY_CAPABILITY = process.argv
   .find(arg => arg.startsWith('--capability='))
   ?.slice('--capability='.length)
+const ONLY_PROVIDER = process.argv
+  .find(arg => arg.startsWith('--provider='))
+  ?.slice('--provider='.length)
+const PROVIDER_FILTER = ONLY_PROVIDER === 'claude' || ONLY_PROVIDER === 'chatgpt' ? ONLY_PROVIDER : null
+const NAME = process.env.AGENT_NAME || `${hostname()}${PROVIDER_FILTER ? `:${PROVIDER_FILTER}` : ''}`
 
 const headers = { 'Content-Type': 'application/json' }
 if (TOKEN) headers.Authorization = `Bearer ${TOKEN}`
@@ -63,14 +67,44 @@ const api = async (path, options = {}) => {
  */
 function think(prompt, timeoutMs = 180_000, command = CMD) {
   return new Promise((resolve, reject) => {
-    const [bin, ...args] = command.split(/\s+/)
-    const child = spawn(bin, args, { cwd: ROOT, stdio: ['pipe', 'pipe', 'pipe'] })
+    // An array command survives arguments that whitespace-splitting cannot
+    // express — `--tools ""` among them, where the empty string is the whole
+    // point. A string still splits, so every existing caller is unchanged.
+    const [bin, ...args] = Array.isArray(command) ? command : command.split(/\s+/)
+
+    /*
+     * Make the CLI give up before we do.
+     *
+     * Three `assistant.chat` jobs failed with "timed out after 300s" and no
+     * reason, because the worker SIGKILLs at its own budget and a killed
+     * process explains nothing. Claude Code's own non-streaming attempt also
+     * times out at 300s and then retries up to CLAUDE_CODE_MAX_RETRIES, which
+     * defaults to ten — so a stalled API call could never finish inside our
+     * window, and we only ever saw the corpse.
+     *
+     * Capped below our budget, the CLI fails first and prints why, which the
+     * close handler below now captures. Overridable, because a slow model on
+     * a long turn is a different problem from a stall.
+     */
+    const budget = Math.max(15_000, timeoutMs - 20_000)
+    const env = {
+      ...process.env,
+      API_TIMEOUT_MS: process.env.API_TIMEOUT_MS || String(budget),
+      CLAUDE_CODE_MAX_RETRIES: process.env.CLAUDE_CODE_MAX_RETRIES || '2',
+    }
+
+    const child = spawn(bin, args, { cwd: ROOT, stdio: ['pipe', 'pipe', 'pipe'], env })
 
     let out = ''
     let err = ''
+    let killedByUs = false
     const timer = setTimeout(() => {
-      child.kill('SIGKILL')
-      reject(new Error(`timed out after ${timeoutMs / 1000}s`))
+      killedByUs = true
+      // SIGTERM first: a CLI that is merely slow gets to flush its reason.
+      // SIGKILL two seconds later for one that is wedged.
+      child.kill('SIGTERM')
+      setTimeout(() => child.kill('SIGKILL'), 2_000).unref?.()
+      reject(new Error(`timed out after ${timeoutMs / 1000}s (worker budget)`))
     }, timeoutMs)
 
     child.stdout.on('data', d => (out += d))
@@ -81,7 +115,14 @@ function think(prompt, timeoutMs = 180_000, command = CMD) {
     })
     child.on('close', code => {
       clearTimeout(timer)
-      if (code !== 0) return reject(new Error(`${bin} exited ${code}: ${err.slice(0, 200)}`))
+      // Some CLIs (claude -p among them) print their failure to stdout, so an
+      // empty stderr used to leave "exited 1:" with no reason at all.
+      if (killedByUs) return
+      const why = (err.trim() || out.trim()).slice(-300)
+      // 143 is SIGTERM — ours, not a CLI failure. Say so rather than filing it
+      // under "exited 143" and sending the next reader after the wrong thing.
+      if (code === 143) return reject(new Error(`terminated at the worker budget: ${why || '(no output)'}`))
+      if (code !== 0) return reject(new Error(`${bin} exited ${code}: ${why || '(no output)'}`))
       resolve(out)
     })
 
@@ -138,7 +179,10 @@ Return ONLY a JSON object, no prose:
   },
   "board": {
     "topics": ["every distinct topic so far, oldest first, 44 characters max each"],
-    "points": ["up to 4 condensed points from the last minute or two, 120 characters max each, newest last"]
+    "points": ["up to 4 condensed points from the last minute or two, 120 characters max each, newest last"],
+    "overallTopic": "one stable subject for a solo note, 60 characters max",
+    "sections": ["solo-note section roadmap, oldest first, 44 characters max each"],
+    "currentSummary": ["up to 6 detailed points about the current solo-note section, 120 characters max each"]
   }
 }
 
@@ -171,6 +215,13 @@ user glances at while talking:
   decided or promised, with the names, numbers and times that were said. Plain
   words, no filler, no commentary, no guesses. Cover roughly the last minute
   or two, newest point last. Rewrite freely as the conversation moves.
+- For mode id "notes", also maintain overallTopic, sections, and currentSummary.
+  overallTopic is the durable subject of the whole monologue and should not
+  change for incidental examples or tangents. sections is a chronological
+  roadmap of distinct parts of the thought; append only for a meaningful shift
+  and refine the latest heading in place. currentSummary is a fuller working
+  summary of the latest section, preserving concrete requirements, decisions,
+  constraints, examples, and next steps. Use the previous board as memory.
 
 The cue (title/lines) is the one place for help: answer a question that was
 asked, flag a claim that looks wrong (kind "factcheck", say what is correct and
@@ -225,7 +276,12 @@ function normalizeBoard(raw, constraints = {}) {
     .slice(-max)
   const topics = list(raw.topics, Number(constraints.boardTopics) || 8, Number(constraints.boardTopicChars) || 44)
   const points = list(raw.points, Number(constraints.boardPoints) || 4, Number(constraints.boardPointChars) || 120)
-  return topics.length || points.length ? { topics, points } : null
+  const overallTopic = trimText(raw.overallTopic, Number(constraints.overallTopicChars) || 60)
+  const sections = list(raw.sections, Number(constraints.boardSections) || 7, Number(constraints.boardSectionChars) || 44)
+  const currentSummary = list(raw.currentSummary, Number(constraints.currentSummaryPoints) || 6, Number(constraints.currentSummaryChars) || 120)
+  return topics.length || points.length || overallTopic || sections.length || currentSummary.length
+    ? { topics, points, overallTopic, sections, currentSummary }
+    : null
 }
 
 function normalizeCoachCue(parsed, constraints = {}) {
@@ -330,7 +386,12 @@ ideas in runningNote.` : ''}
 
     const reply = await think(prompt, 90_000)
     const parsed = extractJson(reply)
-    return normalizeCoachCue(parsed, input.constraints)
+    const normalized = normalizeCoachCue(parsed, input.constraints)
+    // Solo Notes still uses the model to organize the note, but it never
+    // surfaces an interruption on the glasses while the user is thinking.
+    return mode.id === 'notes' && !input.finalNote
+      ? { ...normalized, title: 'Listening', lines: [], priority: 0, quiet: true }
+      : normalized
   },
 
   async 'assistant.chat'(job) {
@@ -360,7 +421,9 @@ async function runOnce() {
   for (const capability of capabilities) {
     let available
     try {
-      ;({ jobs: available } = await api(`/jobs?capability=${capability}`))
+      const query = new URLSearchParams({ capability })
+      if (capability === 'assistant.chat' && PROVIDER_FILTER) query.set('provider', PROVIDER_FILTER)
+      ;({ jobs: available } = await api(`/jobs?${query}`))
     } catch (err) {
       console.error(`[runner] cannot reach hub: ${err.message}`)
       return did

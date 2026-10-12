@@ -30,6 +30,8 @@ export interface ListenBlock {
 export interface ListenBoard {
   topicsBlock: ListenBlock
   topics: { text: string; current: boolean }[]
+  /** Solo Notes keeps its durable overall subject to one glanceable row. */
+  topicLineLimit?: number
   summaryBlock: ListenBlock
   /** condensed points; each wraps with a hanging indent */
   summary: string[]
@@ -293,6 +295,57 @@ export function listenBoard(state: UiState): ListenBoard | null {
   const board = session.board ?? null
   const note = session.runningNote?.lines ?? []
   const transcript = cleanBlocks(segments)
+
+  if (session.modeId === 'notes') {
+    const fallbackTopic = meaningfulTopic(noteField(note, 'Thread'))
+    const legacySections = board?.topics ?? []
+    const overallTopic = meaningfulTopic(board?.overallTopic ?? null)
+      ?? meaningfulTopic(legacySections[0] ?? null)
+      ?? fallbackTopic
+    const sections = (board?.sections?.length ? board.sections : legacySections)
+      .map(section => meaningfulTopic(section))
+      .filter((section): section is string => Boolean(section))
+    const roadmap = sections.length > 0
+      ? sections.map((section, index) => `${index === sections.length - 1 ? '>' : ' '} ${section}`)
+      : ['Roadmap builds as the thought changes.']
+    let currentSummary = board?.currentSummary?.length
+      ? board.currentSummary
+      : board?.points?.length ? board.points : []
+    const summaryPending = currentSummary.length === 0
+    if (summaryPending) {
+      currentSummary = [aiStatus === 'error' ? 'Summary unavailable. Still recording.' : 'Organizing after the next pause.']
+    }
+
+    let emptyNote: string | null = null
+    if (segments.length === 0 && session.active) {
+      const stt = state.snapshot?.stt
+      emptyNote = !a?.open ? 'No lines yet - mic closed'
+        : a.sent === 0 ? 'No lines yet - nothing sent to hub'
+        : stt && stt.failed > 0 ? 'No lines yet - hub stt failing'
+        : stt && stt.empty > 0 ? 'No lines yet - hub stt heard nothing'
+        : 'No lines yet - waiting on hub'
+    }
+
+    return {
+      topicsBlock: { title: `NOTE  ${shortTime()}`, note: reviewing ? 'REVIEW' : mic },
+      topics: overallTopic ? [{ text: overallTopic, current: true }] : [],
+      topicLineLimit: 1,
+      cueBlock: { title: 'ROADMAP', note: sections.length > 0 ? `${sections.length} sections` : '' },
+      cue: roadmap,
+      cuePending: sections.length === 0,
+      summaryBlock: {
+        title: 'CURRENT SUMMARY',
+        note: aiNote || age(board?.updatedAt ?? session.runningNote?.updatedAt, now),
+      },
+      summary: currentSummary,
+      summaryPending,
+      transcriptBlock: { title: 'CLEAN TRANSCRIPT', note: scrollBack > 0 ? `back ${scrollBack}` : '' },
+      transcript,
+      scrollBack,
+      footer: reviewing ? 'click saves - back discards' : null,
+      emptyNote,
+    }
+  }
 
   // Raw STT changes the transcript tile only. Topics wait for an AI board and
   // reject incidental fragments so this panel stays stable and glanceable.

@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto'
 const PROVIDERS = new Set(['chatgpt', 'claude'])
 const SPACES = new Set(['ops', 'life'])
 const MAX_MESSAGES = 80
+const MAX_QUEUED_TURNS = 20
 
 function clean(value, max = 6000) {
   return String(value ?? '').replace(/\r/g, '').trim().slice(0, max)
@@ -42,6 +43,8 @@ export class AssistantChat {
         this.threads.set(thread.key, {
           ...thread,
           messages: Array.isArray(thread.messages) ? thread.messages.slice(-MAX_MESSAGES) : [],
+          queuedTurns: Array.isArray(thread.queuedTurns) ? thread.queuedTurns.slice(0, MAX_QUEUED_TURNS) : [],
+          activeSource: thread.activeSource ?? null,
         })
       }
     } catch (err) {
@@ -72,6 +75,8 @@ export class AssistantChat {
         messages: [],
         pendingJobId: null,
         appliedJobIds: [],
+        queuedTurns: [],
+        activeSource: null,
         updatedAt: Date.now(),
       }
       this.threads.set(key, thread)
@@ -79,24 +84,70 @@ export class AssistantChat {
     return thread
   }
 
+  #startTurn(thread, turn, jobs) {
+    thread.messages.push({
+      id: randomUUID(),
+      role: 'user',
+      text: turn.text,
+      clientId: turn.clientId || null,
+      at: Date.now(),
+    })
+    thread.messages = thread.messages.slice(-MAX_MESSAGES)
+    const result = jobs.create({
+      capability: 'assistant.chat',
+      priority: 'now',
+      idempotencyKey: turn.clientId ? `assistant.chat:${thread.key}:${turn.clientId}` : null,
+      input: {
+        threadKey: thread.key,
+        space: thread.space,
+        provider: thread.provider,
+        messages: thread.messages.slice(-18).map(({ role, text }) => ({ role, text })),
+      },
+    })
+    if (!result.ok) {
+      thread.messages.pop()
+      return result
+    }
+    thread.pendingJobId = result.job.id
+    thread.activeSource = turn.source ?? null
+    thread.updatedAt = Date.now()
+    return { ok: true, job: result.job }
+  }
+
+  #startQueued(thread, jobs) {
+    if (thread.pendingJobId || thread.queuedTurns.length === 0) return false
+    const next = thread.queuedTurns[0]
+    const started = this.#startTurn(thread, next, jobs)
+    if (!started.ok) return false
+    thread.queuedTurns.shift()
+    return true
+  }
+
   #sync(thread, jobs) {
-    if (!thread.pendingJobId) return
+    let changed = false
+    if (!thread.pendingJobId) {
+      changed = this.#startQueued(thread, jobs)
+      if (changed) this.#persist()
+      return changed
+    }
     const job = jobs.get(thread.pendingJobId)
     if (!job) {
       thread.pendingJobId = null
-      this.#persist()
-      return
-    }
-    if (job.status === 'done' && !thread.appliedJobIds.includes(job.id)) {
-      const text = clean(job.result?.text ?? job.result)
-      if (text) {
-        thread.messages.push({ id: randomUUID(), role: 'assistant', text, at: job.updatedAt })
+      thread.activeSource = null
+      changed = true
+    } else if (job.status === 'done') {
+      if (!thread.appliedJobIds.includes(job.id)) {
+        const text = clean(job.result?.text ?? job.result)
+        if (text) {
+          thread.messages.push({ id: randomUUID(), role: 'assistant', text, at: job.updatedAt })
+        }
+        thread.appliedJobIds = [...thread.appliedJobIds, job.id].slice(-40)
       }
-      thread.appliedJobIds = [...thread.appliedJobIds, job.id].slice(-40)
       thread.pendingJobId = null
+      thread.activeSource = null
       thread.updatedAt = Date.now()
       thread.messages = thread.messages.slice(-MAX_MESSAGES)
-      this.#persist()
+      changed = true
     } else if (job.status === 'failed') {
       thread.messages.push({
         id: randomUUID(),
@@ -105,10 +156,22 @@ export class AssistantChat {
         at: job.updatedAt,
       })
       thread.pendingJobId = null
+      thread.activeSource = null
       thread.updatedAt = Date.now()
       thread.messages = thread.messages.slice(-MAX_MESSAGES)
-      this.#persist()
+      changed = true
     }
+    if (!thread.pendingJobId && this.#startQueued(thread, jobs)) changed = true
+    if (changed) this.#persist()
+    return changed
+  }
+
+  syncAll(jobs) {
+    let changed = 0
+    for (const thread of this.threads.values()) {
+      if (this.#sync(thread, jobs)) changed += 1
+    }
+    return changed
   }
 
   snapshot(space, provider, jobs) {
@@ -119,8 +182,13 @@ export class AssistantChat {
       provider: thread.provider,
       ready: this.providerReady[thread.provider],
       busy: Boolean(pending && ['queued', 'claimed'].includes(pending.status)),
+      queued: thread.queuedTurns.length,
+      activeSource: thread.activeSource,
       pending: pending
         ? {
+            // The job id, so a stuck turn can be named. Nothing else returned
+            // it, which meant diagnosis started by reading jobs.json off disk.
+            id: pending.id,
             status: pending.status,
             claimedBy: pending.claimedBy ?? null,
             attempts: pending.attempts ?? 0,
@@ -151,21 +219,42 @@ export class AssistantChat {
       if (existing) return { ok: true, existing: true, chat: this.snapshot(space, provider, jobs) }
     }
 
-    thread.messages.push({ id: randomUUID(), role: 'user', text: body, clientId: dedupe || null, at: Date.now() })
-    thread.messages = thread.messages.slice(-MAX_MESSAGES)
-    const result = jobs.create({
-      capability: 'assistant.chat',
-      priority: 'now',
-      idempotencyKey: dedupe ? `assistant.chat:${thread.key}:${dedupe}` : null,
-      input: {
-        threadKey: thread.key,
-        space: thread.space,
-        provider: thread.provider,
-        messages: thread.messages.slice(-18).map(({ role, text }) => ({ role, text })),
-      },
-    })
+    const result = this.#startTurn(thread, { text: body, clientId: dedupe || null, source: null }, jobs)
     if (!result.ok) return result
-    thread.pendingJobId = result.job.id
+    this.#persist()
+    return { ok: true, chat: this.snapshot(space, provider, jobs) }
+  }
+
+  queueTurn({ space, provider, text, clientId, source }, jobs) {
+    const thread = this.#thread(space, provider)
+    this.#sync(thread, jobs)
+    const body = clean(text, 4000)
+    if (!body) return { ok: false, code: 400, error: 'message required' }
+    if (!this.providerReady[thread.provider]) {
+      return { ok: false, code: 503, error: `${thread.provider} setup needed on the Mac` }
+    }
+
+    const dedupe = clean(clientId, 120)
+    const known = dedupe && (
+      thread.messages.some(message => message.clientId === dedupe) ||
+      thread.queuedTurns.some(turn => turn.clientId === dedupe) ||
+      thread.activeSource?.clientId === dedupe
+    )
+    if (known) {
+      return { ok: true, existing: true, chat: this.snapshot(space, provider, jobs) }
+    }
+    if (thread.queuedTurns.length >= MAX_QUEUED_TURNS) {
+      return { ok: false, code: 409, error: `${thread.provider} queue is full` }
+    }
+
+    thread.queuedTurns.push({
+      id: randomUUID(),
+      text: body,
+      clientId: dedupe || null,
+      source: source && typeof source === 'object' ? source : null,
+      queuedAt: Date.now(),
+    })
+    this.#startQueued(thread, jobs)
     thread.updatedAt = Date.now()
     this.#persist()
     return { ok: true, chat: this.snapshot(space, provider, jobs) }
@@ -173,7 +262,9 @@ export class AssistantChat {
 
   clear(space, provider) {
     const thread = this.#thread(space, provider)
-    if (thread.pendingJobId) return { ok: false, code: 409, error: 'wait for the current reply' }
+    if (thread.pendingJobId || thread.queuedTurns.length > 0) {
+      return { ok: false, code: 409, error: 'wait for current and queued work' }
+    }
     thread.messages = []
     thread.updatedAt = Date.now()
     this.#persist()
