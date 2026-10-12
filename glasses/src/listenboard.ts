@@ -225,10 +225,10 @@ export function cleanSpeech(raw: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1)
 }
 
-function cleanBlocks(segments: CoachSegment[]): { speaker: 'me' | 'other'; text: string }[] {
+function cleanBlocks(segments: CoachSegment[], forceMe = false): { speaker: 'me' | 'other'; text: string }[] {
   const blocks: { speaker: 'me' | 'other'; text: string }[] = []
   for (const segment of segments) {
-    const speaker = segment.speaker === 'me' ? 'me' : 'other'
+    const speaker = forceMe || segment.speaker === 'me' ? 'me' : 'other'
     const text = segment.text.replace(/\s+/g, ' ').trim()
     if (!text) continue
     const previous = blocks[blocks.length - 1]
@@ -294,7 +294,7 @@ export function listenBoard(state: UiState): ListenBoard | null {
   const aiNote = aiStatus === 'thinking' ? 'AI updating' : aiStatus === 'error' ? 'AI failed' : ''
   const board = session.board ?? null
   const note = session.runningNote?.lines ?? []
-  const transcript = cleanBlocks(segments)
+  const transcript = cleanBlocks(segments, session.modeId === 'notes')
 
   if (session.modeId === 'notes') {
     const fallbackTopic = meaningfulTopic(noteField(note, 'Thread'))

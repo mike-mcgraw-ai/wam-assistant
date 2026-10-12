@@ -374,6 +374,9 @@ ${transcript}
 
 ${input.finalNote ? `The session has ended. This result will become the saved note, not a live interruption.
 Read the complete supplied transcript as one conversation. Return kind "recap" and do not return quiet.
+Preserve the previous board's supported overall topic, roadmap, and current summary unless the complete
+transcript clearly corrects them. Treat isolated short fragments that are not supported elsewhere as
+uncertain transcription noise; never promote one into a fact, title, task, or next action.
 The lines become the note visible in the Notes list:
 1. A specific one-line title for what is worth remembering, not the opening scene.
 2. The most important supported facts, decisions, requests, or connections.

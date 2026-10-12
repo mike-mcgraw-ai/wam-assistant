@@ -1,8 +1,8 @@
-# Proving the assistant path, and writing down why it broke
+# Recordings you can audit and keep
 
-- Public version: `v0.17.0`
-- Face build: `0.132.0`
-- Originally completed: `2026-10-11`
+- Public version: `v0.18.0`
+- Face build: `0.134.0`
+- Originally completed: `2026-10-12`
 - Sanitized and published: `2026-10-13`
 
-An end-to-end check for a real assistant turn, reporting each job transition and its timing; a subprocess wrapper that caps the tool's own timeout below its own so failures explain themselves; and the engineering record extended with the delivery, tooling and interaction mistakes behind each fix.
+Original audio and exact speech-to-text output share a private retention boundary, with phone playback, raw-versus-joined transcript inspection, explicit keep controls, and summary safeguards against noisy transport fragments.

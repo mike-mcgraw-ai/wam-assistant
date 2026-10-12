@@ -153,7 +153,25 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
         day: '2026-10-11', startHour: 5, started: true, startedAt: now - 15 * M,
         checklistIds: ['laundry', 'dishes', 'vacuum'], transcript: 'Laundry, dishes, and vacuum today.',
       },
+      morningBrief: null,
     },
+  }
+
+  const morningBrief = {
+    schemaVersion: 1,
+    space: 'life' as const,
+    day: '2026-10-11',
+    generatedAt: new Date(now).toISOString(),
+    snapshotAt: new Date(now).toISOString(),
+    mode: 'morning',
+    started: false,
+    summary: {
+      line1: 'Texts setup   Mail setup',
+      line2: 'LinkedIn off   Weather 61F rain',
+      line3: 'Money setup',
+      asOfLabel: 'as of 7:05a',
+    },
+    sources: {},
   }
 
   const amRun = snapshot.checklists.active.find((r: any) => r.checklistId === 'am-rounds')
@@ -287,6 +305,7 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
         day: '2026-10-11', startHour: 5, started: false, startedAt: null,
         checklistIds: [], transcript: '',
       },
+      morningBrief,
     },
   }))
   add('Start Day — recording the house walk', render({

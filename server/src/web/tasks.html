@@ -21,6 +21,16 @@
   .notes li{color:var(--fg);font-size:14px;padding:4px 0 4px 12px;
             border-left:2px solid var(--line)}
   .notes li span{color:var(--dim);font-size:11px;margin-left:6px}
+  .recording{margin:9px 0 4px}
+  .recording audio{display:block;width:100%;height:38px;margin:4px 0 7px}
+  .recordingRow{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .recordingState{color:var(--dim);font-size:12px}
+  .recording button{padding:6px 10px;font-size:12px}
+  details.transcript{margin-top:7px;border-top:1px solid var(--line);padding-top:6px}
+  details.transcript summary{color:var(--dim);font-size:12px;cursor:pointer}
+  .transcriptBody{padding:8px 0 2px}
+  .transcriptLabel{color:var(--dim);font-size:11px;font-weight:700;text-transform:uppercase;margin-top:8px}
+  .transcriptCopy{white-space:pre-wrap;font-size:13px;line-height:1.5;margin-top:3px}
   form{display:flex;gap:8px;margin-top:8px}
   .quick form{display:grid;grid-template-columns:1fr auto;align-items:start}
   .quick input.note{grid-column:1 / -1}
@@ -100,10 +110,44 @@ try { who = localStorage.getItem(WHO_KEY) || 'me' } catch {}
 let queue = load(QUEUE_KEY)
 let taskQueue = load(TASK_QUEUE_KEY)
 let tasks = []
+let recordings = {}
 
 function say(msg, queued) {
   $('status').textContent = msg
   $('status').className = queued ? 'queued' : ''
+}
+
+function noteSessionId(note) {
+  if (!String(note?.by || '').startsWith('listen')) return null
+  const id = String(note?.id || '')
+  return id.endsWith(':task:note') ? id.slice(0, -10) : id.endsWith(':note') ? id.slice(0, -5) : null
+}
+
+function durationLabel(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0))
+  const minutes = Math.floor(total / 60)
+  const rest = total % 60
+  return minutes ? minutes + 'm ' + rest + 's' : rest + 's'
+}
+
+function noteExtras(note) {
+  const sessionId = noteSessionId(note)
+  if (!sessionId) return ''
+  const recording = recordings[sessionId]
+  const audio = recording?.available
+    ? '<audio controls preload="none" src="/coach/session/' + encodeURIComponent(sessionId) + '/recording.wav"></audio>'
+    : '<div class="recordingState">Audio was not retained for this older note.</div>'
+  const retention = recording?.available
+    ? '<div class="recordingRow"><span class="recordingState">' +
+        esc(durationLabel(recording.durationSeconds) + (recording.kept ? ' - kept' : ' - 14-day copy')) +
+        '</span><button class="keepRecording" type="button" data-session="' + esc(sessionId) +
+        '" data-keep="' + (recording.kept ? 'false' : 'true') + '">' +
+        (recording.kept ? 'Let expire' : 'Keep recording') + '</button></div>'
+    : ''
+  return '<div class="recording">' + audio + retention +
+    '<details class="transcript" data-session="' + esc(sessionId) + '">' +
+      '<summary>Check transcript</summary><div class="transcriptBody">Open to load transcript.</div>' +
+    '</details></div>'
 }
 
 function render() {
@@ -128,14 +172,56 @@ function render() {
       '<div class="name"><span>' + esc(t.label) + '</span></div>' +
       '<div class="meta">' + esc((t.pending ? 'saving - ' : '') + est + shut + (t.note ? ' - ' + t.note : '')) + '</div>' +
       (notes.length ? '<ul class="notes">' + notes.map(n =>
-        '<li>' + esc(n.text) + '<span>' + esc(n.by || '') + (n.pending ? ' - saving' : '') + '</span></li>').join('') + '</ul>' : '') +
+        '<li>' + esc(n.text) + '<span>' + esc(n.by || '') + (n.pending ? ' - saving' : '') + '</span>' +
+        (n.pending ? '' : noteExtras(n)) + '</li>').join('') + '</ul>' : '') +
       (t.pending ? '' : '<form data-id="' + esc(t.id) + '">' +
         '<input placeholder="what do you need to know first?" enterkeyhint="done" autocapitalize="sentences">' +
         '<button type="submit">Add</button>' +
       '</form>') + '</div>'
   }).join('') || '<div class="task">No open tasks.</div>'
 
-  for (const form of document.querySelectorAll('form')) form.onsubmit = onAdd
+  for (const form of document.querySelectorAll('.task form[data-id]')) form.onsubmit = onAdd
+  for (const button of document.querySelectorAll('.keepRecording')) button.onclick = onKeepRecording
+  for (const details of document.querySelectorAll('details.transcript')) details.ontoggle = onTranscriptToggle
+}
+
+async function onKeepRecording(e) {
+  const button = e.currentTarget
+  button.disabled = true
+  try {
+    const res = await fetch('/coach/session/' + encodeURIComponent(button.dataset.session) + '/recording/keep', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keep: button.dataset.keep === 'true' }),
+    })
+    if (!res.ok) throw new Error('Could not update recording')
+    say(button.dataset.keep === 'true' ? 'Recording kept.' : 'Recording will expire after 14 days.', false)
+    await sync()
+  } catch (err) {
+    say(err.message || 'Could not update recording', true)
+    button.disabled = false
+  }
+}
+
+async function onTranscriptToggle(e) {
+  const details = e.currentTarget
+  if (!details.open || details.dataset.loaded === 'true') return
+  const body = details.querySelector('.transcriptBody')
+  body.textContent = 'Loading transcript...'
+  try {
+    const res = await fetch('/coach/session/' + encodeURIComponent(details.dataset.session) + '/transcript', { cache: 'no-store' })
+    if (!res.ok) throw new Error('Transcript unavailable')
+    const data = await res.json()
+    const joined = (data.segments || []).map(segment => segment.text).filter(Boolean).join('\n\n')
+    const raw = (data.rawSegments || []).map((segment, index) => (index + 1) + '. ' + segment.text).filter(Boolean).join('\n')
+    body.innerHTML = '<div class="transcriptLabel">Joined transcript</div>' +
+      '<div class="transcriptCopy">' + esc(joined || 'No transcript lines.') + '</div>' +
+      '<div class="transcriptLabel">Raw STT chunks</div>' +
+      '<div class="transcriptCopy">' + esc(raw || 'No raw chunks.') + '</div>'
+    details.dataset.loaded = 'true'
+  } catch (err) {
+    body.textContent = err.message || 'Transcript unavailable'
+  }
 }
 
 async function flush() {
@@ -178,8 +264,15 @@ async function flushTasks() {
 async function sync() {
   const drained = await flush()
   try {
-    const res = await fetch('/tasks', { cache: 'no-store' })
-    if (res.ok) tasks = (await res.json()).tasks || []
+    const [taskRes, recordingRes] = await Promise.all([
+      fetch('/tasks', { cache: 'no-store' }),
+      fetch('/recordings', { cache: 'no-store' }),
+    ])
+    if (taskRes.ok) tasks = (await taskRes.json()).tasks || []
+    if (recordingRes.ok) {
+      const rows = (await recordingRes.json()).recordings || []
+      recordings = Object.fromEntries(rows.map(recording => [recording.sessionId, recording]))
+    }
     const waiting = queue.length + taskQueue.length
     say(drained && waiting === 0 ? '' : waiting + ' waiting to sync', waiting > 0)
   } catch {

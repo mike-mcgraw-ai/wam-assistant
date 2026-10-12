@@ -21,6 +21,8 @@ import { transcribePcm, transcriberInfo } from './stt.js'
 import { AssistantChat } from './assistant.js'
 import { coalesceTranscriptSegments, isNonSpeechText, parseTaskCommand, transcriptText } from './transcript.js'
 import { handleRemoteInput } from './remoteinput.js'
+import { MorningBrief } from './morningBrief.js'
+import { Recordings } from './recordings.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -95,6 +97,15 @@ const assistant = new AssistantChat({
 const coach = new Coach({
   storePath: join(DATA_DIR, 'coach.json'),
   logPath: join(DATA_DIR, 'coach.jsonl'),
+})
+
+const recordings = new Recordings({
+  rootPath: join(DATA_DIR, 'recordings'),
+})
+
+const morningBrief = new MorningBrief({
+  storePath: join(DATA_DIR, 'morning-brief.json'),
+  timezone: checklists.timezone,
 })
 
 // Apply replies that landed just before a restart and resume any persisted
@@ -363,6 +374,9 @@ function buildPlan(minutes, requestedIds, space) {
   return {
     ...plan,
     day,
+    morningBrief: space
+      ? morningBrief.snapshot({ space, dayStatus: day })
+      : null,
     // Tasks lead the screen, but as their own section above the list rather
     // than as rows in it. Scheduling by efficiency would bury every one of
     // them behind a dishwasher; folding them into the total corrupts it.
@@ -634,10 +648,13 @@ function createCoachCueJob(session, {
 } = {}) {
   if (!session) return null
   const safeSpace = cueSpace(session.space)
+  const mode = coach.getMode(session.modeId) ?? coach.activeMode(safeSpace)
   const recentSegments = coalesceTranscriptSegments(session.segments ?? session.recentSegments)
     .slice(finalNote ? -64 : -32)
+    // Solo Notes is one person thinking aloud. Direction-based speaker guesses
+    // can split one sentence into a fake conversation and distort summaries.
+    .map(segment => mode.id === 'notes' ? { ...segment, speaker: 'me' } : segment)
   if (recentSegments.length === 0) return null
-  const mode = coach.getMode(session.modeId) ?? coach.activeMode(safeSpace)
   const segmentCount = session.segments?.length ?? session.segmentCount ?? recentSegments.length
   return jobs.create({
     capability: 'coach.cue',
@@ -1071,6 +1088,8 @@ async function drainTranscriptions() {
           at: body.at,
         })
         if (result.ok && !result.duplicate) {
+          const archived = recordings.addTranscriptSegment(sessionId, result.segment)
+          if (!archived.ok) console.warn(`[recording] transcript: ${archived.error}`)
           if (result.session.context?.taskId !== '__assistant__') {
             scheduleCoachCue(result.session)
           }
@@ -1142,6 +1161,40 @@ function servePhonePackage(req, res) {
     res.destroy(err)
   })
   return stream.pipe(res)
+}
+
+function serveRecording(req, res, sessionId) {
+  const wav = recordings.wav(sessionId)
+  if (!wav) return json(res, 404, { error: 'recording not found' })
+
+  const range = String(req.headers.range || '').match(/^bytes=(\d*)-(\d*)$/)
+  let start = 0
+  let end = wav.length - 1
+  let status = 200
+  if (range) {
+    start = range[1] ? Number(range[1]) : 0
+    end = range[2] ? Number(range[2]) : end
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || start >= wav.length) {
+      cors(res)
+      res.writeHead(416, { 'Content-Range': `bytes */${wav.length}` })
+      return res.end()
+    }
+    end = Math.min(end, wav.length - 1)
+    status = 206
+  }
+
+  const body = wav.subarray(start, end + 1)
+  cors(res)
+  res.writeHead(status, {
+    'Content-Type': 'audio/wav',
+    'Content-Length': body.length,
+    'Accept-Ranges': 'bytes',
+    'Cache-Control': 'private, no-store',
+    'Content-Disposition': `inline; filename="wam-${sessionId}.wav"`,
+    ...(status === 206 ? { 'Content-Range': `bytes ${start}-${end}/${wav.length}` } : {}),
+  })
+  if (req.method === 'HEAD') return res.end()
+  return res.end(body)
 }
 
 function readBody(req, limitBytes = 256 * 1024) {
@@ -1273,6 +1326,11 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  if (req.method === 'GET' && url.pathname === '/recordings') {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    return json(res, 200, { ok: true, recordings: recordings.list() })
+  }
+
   // The iPad controller. The glasses are glanceable; this is the surface the
   // system is actually driven from, with room for the columns nine lines has
   // to compress.
@@ -1398,20 +1456,55 @@ const server = http.createServer(async (req, res) => {
   const coachTranscriptMatch = url.pathname.match(/^\/coach\/session\/([^/]+)\/transcript$/)
   if (req.method === 'GET' && coachTranscriptMatch) {
     if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
-    const session = coach.session(decodeURIComponent(coachTranscriptMatch[1]))
-    if (!session) return json(res, 404, { error: 'unknown session' })
-    const rawSegments = (session.segments ?? []).filter(segment => segment.final !== false)
+    const id = decodeURIComponent(coachTranscriptMatch[1])
+    const session = coach.session(id)
+    const archived = recordings.transcript(id)
+    if (!session && archived.length === 0) return json(res, 404, { error: 'unknown session' })
+    const merged = [...(session?.segments ?? []), ...archived]
+      .filter(segment => segment.final !== false)
+      .sort((a, b) => a.at - b.at)
+    const seen = new Set()
+    const rawSegments = merged.filter(segment => {
+      const key = segment.clientId || segment.id || `${segment.at}:${segment.text}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
     return json(res, 200, {
       ok: true,
-      id: session.id,
-      title: session.title,
-      startedAt: session.startedAt,
-      endedAt: session.endedAt,
-      context: session.context ?? null,
+      id,
+      title: session?.title || 'Listen recording',
+      startedAt: session?.startedAt || recordings.summary(id)?.createdAt || null,
+      endedAt: session?.endedAt || recordings.summary(id)?.endedAt || null,
+      context: session?.context ?? null,
       // Readers get speech-sized blocks; diagnostics retain every exact STT
       // transport chunk without forcing the glasses to display those chunks.
       segments: coalesceTranscriptSegments(rawSegments),
       rawSegments,
+      recording: recordings.summary(id),
+    })
+  }
+
+  const coachRecordingMatch = url.pathname.match(/^\/coach\/session\/([^/]+)\/recording\.wav$/)
+  if ((req.method === 'GET' || req.method === 'HEAD') && coachRecordingMatch) {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    return serveRecording(req, res, decodeURIComponent(coachRecordingMatch[1]))
+  }
+
+  const coachRecordingKeepMatch = url.pathname.match(/^\/coach\/session\/([^/]+)\/recording\/keep$/)
+  if (req.method === 'POST' && coachRecordingKeepMatch) {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    let body = {}
+    try {
+      const raw = await readBody(req)
+      if (raw) body = JSON.parse(raw)
+    } catch (err) {
+      return json(res, 400, { error: `bad body: ${err.message}` })
+    }
+    const result = recordings.setKeep(decodeURIComponent(coachRecordingKeepMatch[1]), body.keep === true)
+    return json(res, result.ok ? 200 : 404, {
+      ...result,
+      ...(result.recording ? { recording: recordings.summary(result.recording.sessionId) } : {}),
     })
   }
 
@@ -1432,6 +1525,7 @@ const server = http.createServer(async (req, res) => {
       const timer = coachCueTimers.get(id)
       if (timer) clearTimeout(timer)
       coachCueTimers.delete(id)
+      recordings.finalize(id, body.at)
       const result = coach.removeSession(id)
       if (result.ok) jobs.removeForCoachSession(id)
       return json(res, result.ok ? 200 : 404, result)
@@ -1440,6 +1534,7 @@ const server = http.createServer(async (req, res) => {
     if (action === 'end') {
       const id = decodeURIComponent(sessionId)
       const result = coach.endSession(id, body.at)
+      if (result.ok) recordings.finalize(id, result.session?.endedAt || body.at)
       const timer = coachCueTimers.get(id)
       if (timer) clearTimeout(timer)
       coachCueTimers.delete(id)
@@ -1456,6 +1551,7 @@ const server = http.createServer(async (req, res) => {
             priority: 'now',
             finalNote: note.summaryTarget,
             previousRunningNote: modelRunningNote(prior),
+            previousBoard: modelBoard(prior),
           })
         }
       }
@@ -1472,6 +1568,13 @@ const server = http.createServer(async (req, res) => {
       } catch {
         return json(res, 400, { error: 'bad audio' })
       }
+      const recording = recordings.addChunk(decodeURIComponent(sessionId), pcm, {
+        sampleRate: body.sampleRate,
+        channels: body.channels,
+        clientId: body.clientId,
+        at: body.at,
+      })
+      if (!recording.ok) console.warn(`[recording] ${recording.error}`)
       if (pcm.length < 1600) return json(res, 200, { ok: true, skipped: true, reason: 'too short' })
 
       // Accept now, transcribe after.
@@ -1830,6 +1933,34 @@ const server = http.createServer(async (req, res) => {
       cue,
       changed: cue.id !== since,
       nextAfterMs: cue.nextAfterMs,
+    })
+  }
+
+  // ---- morning brief ----------------------------------------------------
+  if (req.method === 'GET' && url.pathname === '/brief') {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    const space = url.searchParams.get('space') === 'ops' ? 'ops' : 'life'
+    return json(res, 200, morningBrief.snapshot({
+      space,
+      dayStatus: checklists.dayStatus(space),
+    }))
+  }
+
+  if (req.method === 'POST' && url.pathname === '/brief/source') {
+    if (!authorized(req, INGEST_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    let body
+    try {
+      body = JSON.parse(await readBody(req, 32 * 1024))
+    } catch (err) {
+      return json(res, 400, { error: `bad body: ${err.message}` })
+    }
+    const result = morningBrief.updateSource(body)
+    if (!result.ok) return json(res, 400, result)
+    const space = body?.space === 'ops' ? 'ops' : 'life'
+    return json(res, 200, {
+      ok: true,
+      source: result.source,
+      brief: morningBrief.snapshot({ space, dayStatus: checklists.dayStatus(space) }),
     })
   }
 

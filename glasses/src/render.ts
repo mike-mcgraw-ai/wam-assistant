@@ -1083,21 +1083,25 @@ function renderPlan(state: UiState, cursor: number): string {
     )
   }
 
-  // This is the shell of the morning brief, intentionally visible before any
-  // integrations exist. Labels stay beside the emoji because the glasses font
-  // may drop an unsupported symbol; the placeholders preserve the space real
-  // notification counts, weather, and financial values will need later.
+  // Before Start Day, the hub owns the brief contract. Older hubs still fall
+  // back to the basic setup/off rows so the screen stays truthful.
   if (state.space === 'life' && plan.day?.started !== true) {
     const startSelected = cursor === 1
+    const summary = plan.morningBrief?.summary ?? {
+      line1: 'Texts setup   Mail setup',
+      line2: 'LinkedIn off   Weather setup',
+      line3: 'Money setup',
+      asOfLabel: 'as of setup',
+    }
     return assemble(
       [
         clockLine(state),
         spaceLine(state, cursor === 0),
         'Good morning, Mike.',
-        '📱 Texts XX   ✉ Emails XX',
-        '🔗 LinkedIn XX   ☀ Weather XX°',
-        '💵 Accounts $XX,XXX',
-        '📈 Tracker $XXX,XXX',
+        clipToWidth(summary.line1),
+        clipToWidth(summary.line2),
+        clipToWidth(summary.line3),
+        clipToWidth(summary.asOfLabel),
         `${startSelected ? '>' : ' '}+   Start Day`,
         planTip(state, rows, cursor),
       ],

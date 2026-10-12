@@ -287,6 +287,48 @@ export interface DoneRow {
   cumulativeWallMs: null
 }
 
+export type MorningBriefStatus = 'ok' | 'stale' | 'notConfigured' | 'disabled' | 'error'
+
+export interface MorningBriefSource {
+  id: 'texts' | 'mail' | 'linkedin' | 'weather' | 'money' | string
+  label: string
+  status: MorningBriefStatus
+  kind: string
+  value: number | string | boolean | null
+  display: string
+  asOf: string | null
+  staleAt: string | null
+  ttlSeconds: number | null
+  source: string | null
+  confidence: string
+  privacy: string
+  error: string | null
+  slots?: Array<{
+    id: string
+    label: string
+    display: string
+    asOf: string | null
+    confidence: string
+  }>
+}
+
+export interface MorningBrief {
+  schemaVersion: number
+  space: Space
+  day: string
+  generatedAt: string
+  snapshotAt: string
+  mode: 'morning' | 'started' | string
+  started: boolean
+  summary: {
+    line1: string
+    line2: string
+    line3: string
+    asOfLabel: string
+  }
+  sources: Record<string, MorningBriefSource>
+}
+
 export interface BlockPlan {
   minutes: number
   budgetMs: number
@@ -305,6 +347,7 @@ export interface BlockPlan {
     checklistIds: string[]
     transcript: string
   } | null
+  morningBrief?: MorningBrief | null
 }
 
 export interface CoachCue {
