@@ -1,6 +1,6 @@
 # Device Build History
 
-WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 19 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
+WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 20 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
 
 | Face build | Attribution / status | Change |
 |---|---|---|
@@ -130,3 +130,4 @@ WAM used rapid numbered device builds for hardware testing. These entries are do
 | v0.133.0 | Codex (ready for EvenHub package) | Build the first functional morning brief contract and all-source glasses readout. |
 | v0.134.0 | Codex (ready for EvenHub package) | Retain original Listen audio and its exact STT output long enough to audit transcripts and preserve selected moments. |
 | v0.135.0 | Codex (ready for EvenHub package) | Add the first live morning brief source: basic weather. |
+| v0.136.0 | Codex (ready for EvenHub package) | Keep basic morning brief values visible while real source adapters are still coming online. |

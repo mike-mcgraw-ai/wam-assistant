@@ -48,6 +48,40 @@ test('weather config stays setup until manual coordinates are present', async ()
   assert.equal(snapshot.summary.line2, 'LinkedIn off   Weather setup')
 })
 
+test('weather adapter keeps seeded weather visible until coordinates are present', async () => {
+  const brief = new MorningBrief({ timezone: 'America/New_York' })
+  assert.equal(brief.updateSource({
+    id: 'weather',
+    status: 'ok',
+    display: '61F',
+    value: 61,
+    asOf: '2026-10-13T11:00:00.000Z',
+    ttlSeconds: 3600,
+    source: 'manual-seed',
+    confidence: 'seeded',
+  }).ok, true)
+
+  const result = await refreshWeatherBrief({
+    morningBrief: brief,
+    env: {},
+    fetchImpl: async () => {
+      throw new Error('should not fetch without coordinates')
+    },
+    now: Date.UTC(2026, 9, 13, 11, 5),
+  })
+
+  assert.equal(result.ok, true)
+  assert.equal(result.preserved, true)
+  const snapshot = brief.snapshot({
+    now: Date.UTC(2026, 9, 13, 11, 5),
+    dayStatus: { day: '2026-10-13', started: false },
+  })
+  assert.equal(snapshot.sources.weather.status, 'ok')
+  assert.equal(snapshot.sources.weather.display, '61F')
+  assert.equal(snapshot.sources.weather.source, 'manual-seed')
+  assert.equal(snapshot.summary.line2, 'LinkedIn off   Weather 61F')
+})
+
 test('weather adapter reads NWS point and hourly forecast into the brief', async () => {
   const brief = new MorningBrief({ timezone: 'America/New_York' })
   const calls = []
@@ -152,4 +186,3 @@ test('weather config and cadence are explicit', () => {
   )
   assert.equal(weatherRefreshDelayMs({ env: { WEATHER_POLL_MS: '60000' } }), 60_000)
 })
-

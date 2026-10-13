@@ -119,6 +119,15 @@ function errorDisplay(current) {
     : 'err'
 }
 
+function preserveWithoutCoordinates(current) {
+  return current
+    && ['ok', 'stale'].includes(current.status)
+    && current.source
+    && current.source !== 'nws'
+    && current.display
+    && current.display !== 'setup'
+}
+
 export async function refreshWeatherBrief({
   morningBrief,
   env = process.env,
@@ -140,6 +149,10 @@ export async function refreshWeatherBrief({
   }
 
   if (!config.configured) {
+    const current = currentWeatherSource(morningBrief)
+    if (!config.error && preserveWithoutCoordinates(current)) {
+      return { ok: true, source: current, preserved: true }
+    }
     return morningBrief.updateSource({
       id: 'weather',
       status: config.error ? 'error' : 'notConfigured',
@@ -194,4 +207,3 @@ export async function refreshWeatherBrief({
     }, { now })
   }
 }
-
