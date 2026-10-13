@@ -25,6 +25,7 @@ import { coalesceTranscriptSegments, isNonSpeechText, parseTaskCommand, transcri
 import { handleRemoteInput } from './remoteinput.js'
 import { MorningBrief } from './morningBrief.js'
 import { Recordings } from './recordings.js'
+import { remainingPlanSteps } from './planRows.js'
 import { refreshWeatherBrief, weatherRefreshDelayMs } from './sources/weather.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -256,20 +257,19 @@ function choresForPlan(requestedIds, space, now = Date.now()) {
     .map(s => ({ ...s, schedulable: s.plan.every(step => step.hasDuration) }))
     .filter(s => requestedIds.length === 0 || requestedIds.includes(s.checklistId))
     .map(s => {
-      const run = active.find(r => r.checklistId === s.checklistId && !r.complete)
+      // A partial Start Day run can be complete even though it intentionally
+      // contains only the named tail of a routine. Keep using that run as the
+      // source of included/done step IDs. Ignoring it here rebuilt the whole
+      // template immediately after its last included step was checked, so
+      // "Vacuum" followed by "Empty canister" came straight back again.
+      const run = active.find(r => r.checklistId === s.checklistId)
 
       // Drop every completed step individually, rather than slicing from a
       // cursor. The cursor model assumed you work top to bottom; Mike works a
       // list out of order by design, so a step finished early stayed in the
       // running order and kept adding its minutes to every total below it.
       // What is left is what is left, whatever order it got done in.
-      const doneIds = new Set(
-        (run?.items ?? []).filter(i => i.done).map(i => i.id),
-      )
-      const includedIds = run ? new Set(run.items.map(i => i.id)) : null
-      let steps = s.plan
-        .filter(step => !includedIds || includedIds.has(step.id))
-        .filter(step => !doneIds.has(step.id))
+      let steps = remainingPlanSteps(s.plan, run)
         .map((step, i, remaining) => ({ ...step, position: i + 1, total: remaining.length }))
 
       let readyAt = 0

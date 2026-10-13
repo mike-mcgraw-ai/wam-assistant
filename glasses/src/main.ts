@@ -1512,6 +1512,21 @@ function followCursor(): void {
   state.scrollTop = Math.max(0, Math.min(state.scrollTop, Math.max(0, total - size)))
 }
 
+/** Record one completed-row page-away and retire it after the second. */
+function ageCompletedRows(keys: Iterable<string>): boolean {
+  let hidOne = false
+  for (const key of new Set(keys)) {
+    if (state.hiddenDone.has(key)) continue
+    const count = (state.donePageAways.get(key) ?? 0) + 1
+    state.donePageAways.set(key, count)
+    if (count < 2) continue
+    state.hiddenDone.add(key)
+    state.stickyDone.delete(key)
+    hidOne = true
+  }
+  return hidOne
+}
+
 function move(delta: number): void {
   // Bound to a local so TypeScript can narrow the union; every branch mutates
   // the same object state.view already points at.
@@ -1611,17 +1626,7 @@ function move(delta: number): void {
 
   if (view.kind === 'plan' && doneBefore) {
     const doneAfter = new Set(visiblePlanDoneKeys(state, view.cursor))
-    let hidOne = false
-    for (const key of doneBefore) {
-      if (doneAfter.has(key)) continue
-      const count = (state.donePageAways.get(key) ?? 0) + 1
-      state.donePageAways.set(key, count)
-      if (count >= 2) {
-        state.hiddenDone.add(key)
-        state.stickyDone.delete(key)
-        hidOne = true
-      }
-    }
+    const hidOne = ageCompletedRows([...doneBefore].filter(key => !doneAfter.has(key)))
     if (hidOne) clampCursor()
   }
 }
@@ -1770,6 +1775,7 @@ async function stepFromPlan(choreId: string, stepId: string): Promise<void> {
 }
 
 async function openPlan(): Promise<void> {
+  const returningToPlan = state.view.kind !== 'plan'
   // Completed rows have their own two-page-away lifetime. Reopening Home must
   // not erase either undo chance or resurrect a row already paged away twice.
   state.view = { kind: 'plan', cursor: 0 }
@@ -1780,6 +1786,16 @@ async function openPlan(): Promise<void> {
   state.planLoading = false
   if (result.ok) {
     state.plan = result.plan
+    // On a short Home list a completed row can never physically leave the
+    // viewport, so the old page-window counter left it there forever. A trip
+    // into any detail screen and back is also a page-away: keep the first two
+    // returns as undo chances, then retire the completed evidence row.
+    if (returningToPlan) {
+      const doneKeys = result.plan.agenda
+        .filter(row => row.kind === 'done')
+        .map(row => `${row.runId}:${row.stepId}`)
+      ageCompletedRows([...doneKeys, ...state.stickyDone])
+    }
     state.planError = null
     state.error = null
     savePlan(state.space, result.plan)
@@ -2286,6 +2302,23 @@ async function activate(): Promise<void> {
       return
     }
 
+    if (row?.kind === 'task') {
+      // Captured notes is the same collection exposed by the Notes menu, not
+      // an ordinary task with a competing detail screen.
+      if (row.task.taskId === CAPTURE_TASK_ID) {
+        await openNotes()
+        return
+      }
+      // Open it rather than tick it. A one-off usually has something you need
+      // to know before you can start, and the detail screen carries those notes.
+      state.view = { kind: 'task', taskId: row.task.taskId, cursor: 0 }
+      state.scrollTop = 0
+      state.armedTaskId = null
+      clampCursor()
+      await paint()
+      return
+    }
+
     // Start it from here. Going into the chore to click the same step you were
     // already looking at was navigation for its own sake — on the running
     // order you can see the step, so clicking it should be what starts it.
@@ -2328,24 +2361,6 @@ async function activate(): Promise<void> {
       state.hiddenDone.delete(key)
       const plan = await fetchPlan(state.space)
       if (plan.ok) state.plan = plan.plan
-      clampCursor()
-      await paint()
-      return
-    }
-
-    if (row?.kind === 'task') {
-      // Captured notes is the same collection exposed by the Notes menu, not
-      // an ordinary task with a competing detail screen.
-      if (row.task.taskId === CAPTURE_TASK_ID) {
-        await openNotes()
-        return
-      }
-      // Open it rather than tick it. A one-off usually has something you need
-      // to know before you can start — which dentist, how far the drive is —
-      // and completing straight from the list gave that nowhere to live.
-      state.view = { kind: 'task', taskId: row.task.taskId, cursor: 0 }
-      state.scrollTop = 0
-      state.armedTaskId = null
       clampCursor()
       await paint()
       return

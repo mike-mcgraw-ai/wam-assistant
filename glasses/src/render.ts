@@ -277,15 +277,16 @@ export function planRows(state: UiState): PlanRow[] {
     .filter(row => row.kind !== 'done' || !state.hiddenDone.has(`${row.runId}:${row.stepId}`))
     .map(row => ({ kind: 'agenda', row }))
 
-  // Start Day tasks are commitments, not the entire historical task backlog.
-  // Only the task IDs named in today's walks belong on this day's Home list.
+  // Start Day commitments belong on today's Home screen, but only the exact
+  // task IDs committed by today's walk. That keeps the historical backlog and
+  // catch-all notes task from flooding the running order.
   const committedTaskIds = new Set(plan.day?.taskIds ?? [])
   const committedTasks: PlanRow[] = plan.tasks
     .filter(task => task.taskId !== CAPTURE_TASK_ID && committedTaskIds.has(task.taskId))
     .map(task => ({ kind: 'task', task }))
 
-  // The LIFE line, made selectable. Scrolling up off the first task lands on
-  // it, and a click opens the voice-note path — general capture, no subject,
+  // The LIFE line, made selectable. Scrolling up off the first body row lands
+  // on it, and a click opens the voice-note path — general capture, no subject,
   // which is the "just let me say a thing" case that otherwise needed the
   // long-press menu.
   // It costs no row: the header line was already on screen doing nothing.
@@ -1119,7 +1120,6 @@ function planTip(state: UiState, rows: PlanRow[], cursor: number): string {
       ? '! Task - click again to finish'
       : '! Task - click to open'
   }
-
   if (row.kind === 'listen') {
     return state.coachSession?.active ? 'Recording - click to open Listen' : 'Capture - talk, or read your notes'
   }

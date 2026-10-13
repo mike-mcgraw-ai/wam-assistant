@@ -38,6 +38,121 @@ function cleanTaskClause(value) {
   return cleaned.charAt(0).toUpperCase() + cleaned.slice(1)
 }
 
+const ACTION_WORDS = new Set([
+  'answer',
+  'book',
+  'bring',
+  'buy',
+  'call',
+  'change',
+  'check',
+  'clean',
+  'clear',
+  'drop',
+  'email',
+  'empty',
+  'feed',
+  'fill',
+  'find',
+  'finish',
+  'fix',
+  'fold',
+  'load',
+  'make',
+  'message',
+  'move',
+  'order',
+  'pack',
+  'pay',
+  'pick',
+  'put',
+  'refill',
+  'replace',
+  'repair',
+  'return',
+  'schedule',
+  'send',
+  'set',
+  'shop',
+  'sort',
+  'start',
+  'take',
+  'text',
+  'unload',
+  'wash',
+  'water',
+])
+
+const STOP_WORDS = new Set(['a', 'an', 'and', 'for', 'my', 'of', 'on', 'or', 'the', 'to'])
+
+function actionSource(value) {
+  return normalizeMatchText(value).replace(/^(?:(?:okay|ok|so|today|please)\s+)+/, '')
+}
+
+function isActionableTaskClause(raw) {
+  const source = actionSource(raw)
+  if (!source) return false
+  if (/^(?:(?:i|we)\s+(?:need|want|have|got|gotta|should|must)\s+(?:to\s+)?|(?:need|remember)\s+to\s+)/.test(source)) {
+    return true
+  }
+  const [first] = source.split(' ')
+  return ACTION_WORDS.has(first)
+}
+
+function editDistanceAtMostOne(a, b) {
+  if (a === b) return true
+  if (Math.abs(a.length - b.length) > 1) return false
+  let i = 0
+  let j = 0
+  let edits = 0
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      i += 1
+      j += 1
+      continue
+    }
+    edits += 1
+    if (edits > 1) return false
+    if (a.length === b.length) {
+      i += 1
+      j += 1
+    } else if (a.length > b.length) {
+      i += 1
+    } else {
+      j += 1
+    }
+  }
+  return edits + (a.length - i) + (b.length - j) <= 1
+}
+
+function correctionCandidates(raw) {
+  const tokens = normalizeMatchText(raw).split(' ').filter(Boolean)
+  const spelled = tokens.filter(token => token.length === 1).join('')
+  const words = tokens.filter(token => token.length >= 3 && !STOP_WORDS.has(token) && !ACTION_WORDS.has(token))
+  return [...new Set([...(spelled.length >= 3 ? [spelled] : []), ...words])]
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function matchCase(original, replacement) {
+  return /^[A-Z]/.test(original) ? replacement.charAt(0).toUpperCase() + replacement.slice(1) : replacement
+}
+
+function applyCorrection(label, rawCorrection) {
+  const candidates = correctionCandidates(rawCorrection)
+  if (!candidates.length) return label
+  const words = label.match(/[A-Za-z0-9']+/g) ?? []
+  for (const word of words) {
+    const clean = normalizeMatchText(word)
+    if (clean.length < 3 || STOP_WORDS.has(clean) || ACTION_WORDS.has(clean)) continue
+    const replacement = candidates.find(candidate => candidate !== clean && editDistanceAtMostOne(clean, candidate))
+    if (replacement) return label.replace(new RegExp(`\\b${escapeRegExp(word)}\\b`, 'i'), matchCase(word, replacement))
+  }
+  return label
+}
+
 /**
  * Checklist runs.
  *
@@ -277,7 +392,16 @@ export class Checklists {
 
       if (found.length === 0) {
         const label = cleanTaskClause(rawClause)
-        if (label) unmatched.push(label)
+        if (!label) continue
+        if (!isActionableTaskClause(rawClause)) {
+          const prior = unmatched[unmatched.length - 1]
+          if (prior) {
+            const corrected = applyCorrection(prior, rawClause)
+            if (corrected !== prior) unmatched[unmatched.length - 1] = corrected
+          }
+          continue
+        }
+        unmatched.push(label)
         continue
       }
 

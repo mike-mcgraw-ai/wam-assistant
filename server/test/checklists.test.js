@@ -191,6 +191,22 @@ test('Start Day with no saved list named still starts the day and hands back the
   assert.deepEqual(checklists.snapshot(1_000).active, [])
 })
 
+test('Start Day ignores statement and correction fragments when creating tasks', () => {
+  const checklists = new Checklists(
+    { checklists: [] },
+    { runsPath: null, logPath: null, summaryPath: null },
+  )
+
+  const result = checklists.startDay(
+    'my doctor called the vet. text my doctor and call the bet. V-E-T VET veterinarian.',
+    'life',
+    1_000,
+  )
+
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.unmatched, ['Text my doctor', 'Call the vet'])
+})
+
 test('Start Day from a named step commits only that step onward', () => {
   const checklists = new Checklists(
     {

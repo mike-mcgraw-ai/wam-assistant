@@ -1,6 +1,6 @@
 # Device Build History
 
-WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 26 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
+WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 27 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
 
 | Face build | Attribution / status | Change |
 |---|---|---|
@@ -138,3 +138,7 @@ WAM used rapid numbered device builds for hardware testing. These entries are do
 | v0.141.0 | Claude (ready for EvenHub package) | Life Home before Start Day, as the wearer asked (2026-10-13). |
 | v0.142.0 | Claude (server only; no EvenHub package) | the wearer's main ledger number is on the glasses, and eating out now scores in the life game. |
 | v0.143.0 | Codex (ready for EvenHub package) | Show Start Day tasks on Home and give completed rows two page-away undo chances. |
+| v0.144.0 | Codex (ready for EvenHub package) | Remove the stray Start Day task rows from Home. |
+| v0.145.0 | Codex (ready for EvenHub package) | Stop Start Day from turning correction fragments into extra tasks. |
+| v0.146.0 | Codex (ready for EvenHub package) | Restore cleaned Start Day tasks to Home. |
+| v0.147.0 | Codex (ready for EvenHub package) | Keep a completed partial Start Day routine from rebuilding itself. |
