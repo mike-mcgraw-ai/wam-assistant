@@ -235,6 +235,14 @@ export class MorningBrief {
     const staleAt = status === 'ok'
       ? new Date(new Date(asOf).getTime() + ttlSeconds * 1000).toISOString()
       : null
+    const fallbackDisplay = (() => {
+      if (status === 'disabled') return 'off'
+      if (status === 'notConfigured') return 'setup'
+      if ((status === 'error' || status === 'stale') && base.display && base.display !== 'setup') return base.display
+      if (status === 'error') return 'err'
+      if (status === 'stale') return 'stale'
+      return 'ok'
+    })()
     const next = withoutUndefined({
       ...base,
       id,
@@ -244,7 +252,7 @@ export class MorningBrief {
       value: ['string', 'number', 'boolean'].includes(typeof payload?.value) || payload?.value === null
         ? payload.value
         : null,
-      display: cleanText(payload?.display, status === 'disabled' ? 'off' : status === 'notConfigured' ? 'setup' : status === 'error' ? 'err' : 'ok').slice(0, 32),
+      display: cleanText(payload?.display, fallbackDisplay).slice(0, 32),
       asOf,
       staleAt,
       ttlSeconds,

@@ -23,6 +23,7 @@ import { coalesceTranscriptSegments, isNonSpeechText, parseTaskCommand, transcri
 import { handleRemoteInput } from './remoteinput.js'
 import { MorningBrief } from './morningBrief.js'
 import { Recordings } from './recordings.js'
+import { refreshWeatherBrief, weatherRefreshDelayMs } from './sources/weather.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -107,6 +108,29 @@ const morningBrief = new MorningBrief({
   storePath: join(DATA_DIR, 'morning-brief.json'),
   timezone: checklists.timezone,
 })
+
+async function refreshMorningWeather(reason = 'poll') {
+  const result = await refreshWeatherBrief({
+    morningBrief,
+    env: process.env,
+    logger: console,
+  })
+  if (!result.ok) console.warn(`[weather] ${reason}: ${result.error}`)
+}
+
+function scheduleMorningWeather(delayMs = 0) {
+  setTimeout(() => {
+    refreshMorningWeather('poll')
+      .catch(err => console.warn(`[weather] poll: ${err.message}`))
+      .finally(() => {
+        scheduleMorningWeather(weatherRefreshDelayMs({
+          now: new Date(),
+          timeZone: checklists.timezone,
+          env: process.env,
+        }))
+      })
+  }, delayMs)
+}
 
 // Apply replies that landed just before a restart and resume any persisted
 // per-provider backlog without waiting for the glasses to open Chat.
@@ -2187,6 +2211,8 @@ setInterval(() => {
     console.warn(`[checklists] rollup failed: ${err.message}`)
   }
 }, 5 * 60 * 1000)
+
+scheduleMorningWeather(0)
 
 startSocketMode({
   appToken: process.env.SLACK_APP_TOKEN,

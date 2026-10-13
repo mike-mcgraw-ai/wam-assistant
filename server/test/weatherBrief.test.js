@@ -1,0 +1,155 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+
+import { MorningBrief } from '../src/morningBrief.js'
+import {
+  refreshWeatherBrief,
+  weatherConfigFromEnv,
+  weatherDisplayFromPeriod,
+  weatherRefreshDelayMs,
+} from '../src/sources/weather.js'
+
+function response(body, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    async json() {
+      return body
+    },
+  }
+}
+
+function fakeNwsFetch(routes, calls = []) {
+  return async (url, options) => {
+    calls.push({ url: String(url), headers: options?.headers ?? {} })
+    const found = routes[String(url)]
+    if (!found) return response({ error: 'missing route' }, 404)
+    if (found instanceof Error) throw found
+    return response(found.body, found.status ?? 200)
+  }
+}
+
+test('weather config stays setup until manual coordinates are present', async () => {
+  const brief = new MorningBrief({ timezone: 'America/New_York' })
+  const result = await refreshWeatherBrief({
+    morningBrief: brief,
+    env: {},
+    fetchImpl: async () => {
+      throw new Error('should not fetch without coordinates')
+    },
+  })
+
+  assert.equal(result.ok, true)
+  const snapshot = brief.snapshot({
+    now: Date.UTC(2026, 9, 12, 11, 5),
+    dayStatus: { day: '2026-10-12', started: false },
+  })
+  assert.equal(snapshot.sources.weather.status, 'notConfigured')
+  assert.equal(snapshot.summary.line2, 'LinkedIn off   Weather setup')
+})
+
+test('weather adapter reads NWS point and hourly forecast into the brief', async () => {
+  const brief = new MorningBrief({ timezone: 'America/New_York' })
+  const calls = []
+  const fetchImpl = fakeNwsFetch({
+    'https://api.weather.gov/points/40.0000,-75.0000': {
+      body: {
+        properties: {
+          forecastHourly: 'https://api.weather.gov/gridpoints/PHI/1,2/forecast/hourly',
+        },
+      },
+    },
+    'https://api.weather.gov/gridpoints/PHI/1,2/forecast/hourly': {
+      body: {
+        properties: {
+          periods: [
+            {
+              startTime: '2026-10-12T07:00:00-04:00',
+              temperature: 61,
+              shortForecast: 'Rain Showers',
+              windSpeed: '7 mph',
+            },
+          ],
+        },
+      },
+    },
+  }, calls)
+
+  const result = await refreshWeatherBrief({
+    morningBrief: brief,
+    env: {
+      WEATHER_LAT: '40',
+      WEATHER_LON: '-75',
+      WEATHER_LOCATION_LABEL: 'Home',
+      WEATHER_USER_AGENT: 'WAM test',
+    },
+    fetchImpl,
+    now: Date.UTC(2026, 9, 12, 11, 5),
+  })
+
+  assert.equal(result.ok, true)
+  assert.equal(calls.length, 2)
+  assert.equal(calls[0].headers['User-Agent'], 'WAM test')
+  const snapshot = brief.snapshot({
+    now: Date.UTC(2026, 9, 12, 11, 5),
+    dayStatus: { day: '2026-10-12', started: false },
+  })
+  assert.equal(snapshot.sources.weather.status, 'ok')
+  assert.equal(snapshot.sources.weather.display, '61F rain')
+  assert.equal(snapshot.sources.weather.value, 61)
+  assert.equal(snapshot.summary.line2, 'LinkedIn off   Weather 61F rain')
+})
+
+test('weather adapter preserves last display when provider fails', async () => {
+  const brief = new MorningBrief({ timezone: 'America/New_York' })
+  assert.equal(brief.updateSource({
+    id: 'weather',
+    status: 'ok',
+    display: '61F rain',
+    value: 61,
+    asOf: '2026-10-12T11:00:00.000Z',
+    ttlSeconds: 3600,
+    source: 'nws',
+  }).ok, true)
+
+  const result = await refreshWeatherBrief({
+    morningBrief: brief,
+    env: { WEATHER_LAT: '40', WEATHER_LON: '-75' },
+    fetchImpl: async () => {
+      throw new Error('NWS offline')
+    },
+    now: Date.UTC(2026, 9, 12, 11, 5),
+    logger: { warn() {} },
+  })
+
+  assert.equal(result.ok, true)
+  const snapshot = brief.snapshot({
+    now: Date.UTC(2026, 9, 12, 11, 5),
+    dayStatus: { day: '2026-10-12', started: false },
+  })
+  assert.equal(snapshot.sources.weather.status, 'error')
+  assert.equal(snapshot.sources.weather.display, '61F rain')
+  assert.equal(snapshot.summary.line2, 'LinkedIn off   Weather 61F rain?')
+})
+
+test('weather display picks only decision-changing conditions', () => {
+  assert.equal(weatherDisplayFromPeriod({ temperature: 72, shortForecast: 'Sunny' }), '72F')
+  assert.equal(weatherDisplayFromPeriod({ temperature: 28, shortForecast: 'Freezing Rain' }), '28F ice')
+  assert.equal(weatherDisplayFromPeriod({ temperature: 91, shortForecast: 'Mostly Sunny' }), '91F heat')
+  assert.equal(weatherDisplayFromPeriod({ temperature: 54, shortForecast: 'Fog' }), '54F fog')
+})
+
+test('weather config and cadence are explicit', () => {
+  assert.deepEqual(weatherConfigFromEnv({ WEATHER_ENABLED: '0' }), { enabled: false, configured: true })
+  assert.equal(weatherConfigFromEnv({ WEATHER_LAT: 'x', WEATHER_LON: '-75' }).error, 'invalid weather coordinates')
+  assert.equal(
+    weatherRefreshDelayMs({ now: new Date('2026-10-12T11:00:00Z'), timeZone: 'America/New_York', env: {} }),
+    30 * 60_000,
+  )
+  assert.equal(
+    weatherRefreshDelayMs({ now: new Date('2026-10-12T17:00:00Z'), timeZone: 'America/New_York', env: {} }),
+    2 * 60 * 60_000,
+  )
+  assert.equal(weatherRefreshDelayMs({ env: { WEATHER_POLL_MS: '60000' } }), 60_000)
+})
+

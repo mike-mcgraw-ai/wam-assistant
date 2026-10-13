@@ -1,6 +1,6 @@
 # WAM Assistant
 
-> Historical milestone `v0.18.0`, based on face build `0.134.0`. Originally completed 2026-10-12; sanitized and published 2026-10-13. See [MILESTONE.md](MILESTONE.md) for this checkpoint.
+> Historical milestone `v0.19.0`, based on face build `0.135.0`. Originally completed 2026-10-13; sanitized and published 2026-10-17. See [MILESTONE.md](MILESTONE.md) for this checkpoint.
 
 A portable, privacy-first conversation assistant with an Even G2 smart-glasses
 client. WAM keeps the thread of a real conversation visible without demanding
@@ -14,7 +14,7 @@ recordings, tasks, credentials, private server addresses, packaged apps, or the
 private repository's Git objects.
 
 WAM progressed through more than 100 documented on-device iterations. This
-public history distills that work into 18 runnable milestones so the important
+public history distills that work into 19 runnable milestones so the important
 product and engineering turns remain reviewable without presenting every
 diagnostic or one-line hardware build as a separate release.
 
@@ -28,6 +28,7 @@ diagnostic or one-line hardware build as a separate release.
 - Pixel-measured layout for the glasses' proportional firmware font
 - Four-panel redraw experiments balancing latency, flicker, and readability
 - Idempotent capture, local persistence, retry-safe jobs, and privacy boundaries
+- Source-backed spoken-work review with deliberate task promotion and crash-safe split/merge
 - Simulator tooling, screen checks, tests, and guarded device releases
 
 The engineering record is in `docs/HUD-LESSONS.md`. Its later sections are
@@ -85,6 +86,10 @@ the returned transcript board and cues.
   one can and cannot prove
 - `BUILD_HISTORY.md`: the complete documented device-build ledger
 - `SANITIZATION.md`: source commit and export boundary for this snapshot
+- `docs/SPOKEN-WORK-REVIEW.md`: an in-progress infrastructure case study with synthetic examples
+- `docs/SPOKEN-WORK-DESTINATIONS.md`: a synthetic case study of proposal-only extraction and explicit destinations
+- `docs/SPOKEN-WORK-GLASSES-REVIEW.md`: a synthetic case study of the compact glasses review and guarded voice amendments
+- `docs/SPOKEN-WORK-MIGRATION.md`: a synthetic case study of verified-backup, resumable migration and manual-purge retention
 
 ## Try the software path
 
