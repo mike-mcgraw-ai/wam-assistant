@@ -166,6 +166,8 @@ test('Start Day matches spoken aliases, starts those chores, and records what wa
     skippedAt: null,
     startedAt: at,
     checklistIds: ['laundry', 'dishes', 'vacuum'],
+    runIds: result.runIds,
+    taskIds: [],
     transcript: 'Today I need to wash clothes, load the dishwasher, and clean the floors.',
   })
   assert.deepEqual(checklists.commitments(), [{ day: result.day, space: 'life', runIds: result.runIds, taskIds: [] }])
@@ -221,7 +223,9 @@ test('a walk later in the day adds to the commitments instead of replacing them'
   assert.equal(midday.runIds.length, 2)
   assert.ok(midday.runIds.includes(morning.runIds[0]))
   assert.deepEqual(checklists.commitments()[0].taskIds, ['call-dentist'])
-  assert.equal(checklists.dayStatus('life', 3_000).startedAt, 1_000)
+  const status = checklists.dayStatus('life', 3_000)
+  assert.equal(status.startedAt, 1_000)
+  assert.deepEqual(status.taskIds, ['call-dentist'])
 })
 
 test('overnight: a committed list stays on the list, an uncommitted one closes', () => {

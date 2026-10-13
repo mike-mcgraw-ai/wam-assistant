@@ -258,6 +258,8 @@ export interface TaskRow {
   ms: number | null
   open: boolean
   weight: 'big' | 'normal'
+  /** Start Day heard this as multi-step work; voice planning is the first action. */
+  needsPlan?: boolean
   /** "9am" / "Thu9a" when shut; null while it is open */
   opensLabel: string | null
   /**
@@ -360,6 +362,9 @@ export interface BlockPlan {
     skippedAt?: number | null
     startedAt: number | null
     checklistIds: string[]
+    /** Exact runs and one-off tasks committed by today's Start Day walks. */
+    runIds?: string[]
+    taskIds?: string[]
     transcript: string
   } | null
   morningBrief?: MorningBrief | null

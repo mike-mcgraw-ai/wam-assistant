@@ -233,6 +233,8 @@ export class Checklists {
       skippedAt: saved?.skippedAt ?? null,
       startedAt: saved?.startedAt ?? null,
       checklistIds: Array.isArray(saved?.checklistIds) ? saved.checklistIds : [],
+      runIds: Array.isArray(saved?.runIds) ? saved.runIds : [],
+      taskIds: Array.isArray(saved?.taskIds) ? saved.taskIds : [],
       transcript: saved?.transcript ?? '',
     }
   }

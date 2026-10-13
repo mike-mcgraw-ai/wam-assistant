@@ -59,6 +59,7 @@ import {
   noteTranscriptScrollMax,
   transcriptScrollMax,
   planRows,
+  visiblePlanDoneKeys,
   choreRows,
   taskDetailRows,
   inboxItems,
@@ -186,6 +187,8 @@ const state: UiState = {
   scrollTop: 0,
   armedTaskId: null,
   stickyDone: new Set<string>(),
+  donePageAways: new Map<string, number>(),
+  hiddenDone: new Set<string>(),
   armedNoteId: null,
   listenReviewing: false,
   foreground: true,
@@ -1513,6 +1516,9 @@ function move(delta: number): void {
   // Bound to a local so TypeScript can narrow the union; every branch mutates
   // the same object state.view already points at.
   const view = state.view
+  const doneBefore = view.kind === 'plan'
+    ? new Set(visiblePlanDoneKeys(state, view.cursor))
+    : null
 
   if (view.kind === 'fonttest') {
     view.page = (view.page + 1) % 5
@@ -1602,6 +1608,22 @@ function move(delta: number): void {
   state.armedTaskId = null
   state.armedNoteId = null
   followCursor()
+
+  if (view.kind === 'plan' && doneBefore) {
+    const doneAfter = new Set(visiblePlanDoneKeys(state, view.cursor))
+    let hidOne = false
+    for (const key of doneBefore) {
+      if (doneAfter.has(key)) continue
+      const count = (state.donePageAways.get(key) ?? 0) + 1
+      state.donePageAways.set(key, count)
+      if (count >= 2) {
+        state.hiddenDone.add(key)
+        state.stickyDone.delete(key)
+        hidOne = true
+      }
+    }
+    if (hidOne) clampCursor()
+  }
 }
 
 /**
@@ -1722,12 +1744,18 @@ async function stepFromPlan(choreId: string, stepId: string): Promise<void> {
   }
 
   const armed = item.running || (item.stepKind === 'wait' && item.endsAt !== null)
+  const completedNow = !item.done && armed
   const result = item.done || armed
     ? await checkItem(run.runId, item.id, !item.done)
     : await beginStep(run.runId, item.id)
 
   if (result.ok) {
     if (state.snapshot) state.snapshot.checklists = result.checklists
+    if (completedNow) {
+      const key = `${run.runId}:${item.id}`
+      state.donePageAways.set(key, 0)
+      state.hiddenDone.delete(key)
+    }
     state.error = null
   } else {
     state.error = result.error
@@ -1742,9 +1770,8 @@ async function stepFromPlan(choreId: string, stepId: string): Promise<void> {
 }
 
 async function openPlan(): Promise<void> {
-  // Arriving at the page is what "leave it and come back" means. Ticked daily
-  // steps stay put while you are here and are gone the next time you look.
-  state.stickyDone.clear()
+  // Completed rows have their own two-page-away lifetime. Reopening Home must
+  // not erase either undo chance or resurrect a row already paged away twice.
   state.view = { kind: 'plan', cursor: 0 }
   state.scrollTop = 0
   state.planLoading = true
@@ -2241,6 +2268,8 @@ async function activate(): Promise<void> {
           return
         }
         state.stickyDone.delete(key)
+        state.donePageAways.delete(key)
+        state.hiddenDone.delete(key)
         await toggle(row.runId, row.item.id)
         return
       }
@@ -2251,6 +2280,8 @@ async function activate(): Promise<void> {
       }
       // Held on screen, ticked, until you leave the page.
       state.stickyDone.add(key)
+      state.donePageAways.set(key, 0)
+      state.hiddenDone.delete(key)
       await toggle(row.runId, row.item.id)
       return
     }
@@ -2292,6 +2323,9 @@ async function activate(): Promise<void> {
       const undone = await checkItem(row.row.runId, row.row.stepId, false)
       if (undone.ok && state.snapshot) state.snapshot.checklists = undone.checklists
       else if (!undone.ok) state.error = undone.error
+      const key = `${row.row.runId}:${row.row.stepId}`
+      state.donePageAways.delete(key)
+      state.hiddenDone.delete(key)
       const plan = await fetchPlan(state.space)
       if (plan.ok) state.plan = plan.plan
       clampCursor()

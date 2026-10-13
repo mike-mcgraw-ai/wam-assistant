@@ -117,6 +117,7 @@ function entryText(e, names) {
   if (e.kind === 'complete') return `${list} complete ${signed(e.xp)}`
   if (e.kind === 'carry') return `${list}: ${e.items.length} committed step${e.items.length === 1 ? '' : 's'} not done${e.carried ? ' (carried)' : ''} ${signed(e.xp)}`
   if (e.kind === 'task-miss') return `Task "${e.label}" not done${e.carried ? ' (carried)' : ''} ${signed(e.xp)}`
+  if (e.kind === 'eat-out') return `Eating out, week of ${fmtDay(e.week)}: $${Math.round(e.spent)} of $${e.target} ${signed(e.xp)}`
   return `${list} missed ${e.items.length} ${signed(e.xp)}`
 }
 

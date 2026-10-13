@@ -159,6 +159,10 @@ export interface UiState {
    * and the only way to undo it. These stay until you leave the page.
    */
   stickyDone: Set<string>
+  /** Number of times each completed row has paged fully out of view. */
+  donePageAways: Map<string, number>
+  /** Completed rows stay saved, but disappear locally after two page-aways. */
+  hiddenDone: Set<string>
   /** A second click deletes this selected user-created note; movement disarms. */
   armedNoteId: string | null
   /** true after Listen is stopped but before its note is saved or discarded */
@@ -269,7 +273,16 @@ export function planRows(state: UiState): PlanRow[] {
   // to carry on the running order: it is not a thing to do, it never
   // completes, and its whole contents are one click away behind the LIFE line
   // now. It stays in `plan.tasks` so the Notes screen can still read it.
-  const agenda: PlanRow[] = plan.agenda.map(row => ({ kind: 'agenda', row }))
+  const agenda: PlanRow[] = plan.agenda
+    .filter(row => row.kind !== 'done' || !state.hiddenDone.has(`${row.runId}:${row.stepId}`))
+    .map(row => ({ kind: 'agenda', row }))
+
+  // Start Day tasks are commitments, not the entire historical task backlog.
+  // Only the task IDs named in today's walks belong on this day's Home list.
+  const committedTaskIds = new Set(plan.day?.taskIds ?? [])
+  const committedTasks: PlanRow[] = plan.tasks
+    .filter(task => task.taskId !== CAPTURE_TASK_ID && committedTaskIds.has(task.taskId))
+    .map(task => ({ kind: 'task', task }))
 
   // The LIFE line, made selectable. Scrolling up off the first task lands on
   // it, and a click opens the voice-note path — general capture, no subject,
@@ -294,7 +307,8 @@ export function planRows(state: UiState): PlanRow[] {
       // looking at a shorter list with no sign you did anything, and no way
       // back if the click was wrong. Leaving the page clears the set, so it
       // is gone the next time you come to it.
-      if (item.done && !state.stickyDone.has(`${run.runId}:${item.id}`)) continue
+      const doneKey = `${run.runId}:${item.id}`
+      if (item.done && (!state.stickyDone.has(doneKey) || state.hiddenDone.has(doneKey))) continue
       required.push({ kind: 'daily', runId: run.runId, listName: run.name, item })
     }
   }
@@ -304,7 +318,26 @@ export function planRows(state: UiState): PlanRow[] {
   // never pushes the running order down.
   const walk: PlanRow[] = state.space === 'life' ? [{ kind: 'start-day' }] : []
 
-  return [{ kind: 'listen' }, ...required, ...agenda, ...walk]
+  return [{ kind: 'listen' }, ...required, ...committedTasks, ...agenda, ...walk]
+}
+
+function planPageWindow(rows: PlanRow[], cursor: number) {
+  const body = rows.slice(1)
+  const bodyCursor = Math.max(0, cursor - 1)
+  const size = config.maxLines - 3
+  let start = 0
+  while (bodyCursor >= start + size && start + size < body.length) start += size
+  return body.slice(start, Math.min(body.length, start + size))
+}
+
+/** Completed rows visible on the cursor's current Home page. */
+export function visiblePlanDoneKeys(state: UiState, cursor: number): string[] {
+  const keys = []
+  for (const row of planPageWindow(planRows(state), cursor)) {
+    if (row.kind === 'daily' && row.item.done) keys.push(`${row.runId}:${row.item.id}`)
+    if (row.kind === 'agenda' && row.row.kind === 'done') keys.push(`${row.row.runId}:${row.row.stepId}`)
+  }
+  return keys
 }
 
 /** Rows the cursor is allowed to stop on. */
@@ -1325,7 +1358,8 @@ function renderTaskDetail(state: UiState, taskId: string, cursor: number): strin
     if (row.kind === 'space') lines.push('')
     else if (row.kind === 'listen') {
       const live = state.coachSession?.active
-      lines.push(clip(`${point}${live ? '[*] Stop listening' : '[~] Add a note by voice'}`, LINE_CHARS))
+      const stoppedLabel = task.needsPlan ? 'Build plan by voice' : 'Add a note by voice'
+      lines.push(clip(`${point}${live ? '[*] Stop listening' : `[~] ${stoppedLabel}`}`, LINE_CHARS))
     } else if (row.kind === 'done') {
       const armed = state.armedTaskId === taskId
       lines.push(clip(`${point}${armed ? '[?] Really done?' : '[ ] Mark done'}`, LINE_CHARS))

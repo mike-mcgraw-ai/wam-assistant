@@ -15,6 +15,7 @@ import { Jobs, JOB } from './jobs.js'
 import { distillNote } from './distill.js'
 import { Notifier, sweepWaits } from './notify.js'
 import { computeGame, gameSummary, GameAnnouncer } from './game.js'
+import { cleanEatOut, loadEatOut, saveEatOut } from './eatOut.js'
 import { applyMessage, verifySignature, startSocketMode } from './slack.js'
 import { buildCue } from './cues.js'
 import { Coach } from './coach.js'
@@ -75,6 +76,10 @@ const gameAnnouncer = new GameAnnouncer({
   notifier,
   config: gameConfig,
 })
+// The ledger feed's weekly eating-out totals (facts only, no merchants); the
+// latest push replaces the last, since bank data can still be revised.
+const EAT_OUT_PATH = join(DATA_DIR, 'ledger-eatout.json')
+let ledgerEatOut = loadEatOut(EAT_OUT_PATH)
 function gameState(now = Date.now(), historyDays = 60) {
   const taskInfo = {}
   for (const t of tasks.taskDefs()) {
@@ -89,6 +94,7 @@ function gameState(now = Date.now(), historyDays = 60) {
     commitments: checklists.commitments(),
     taskInfo,
     dayKeyOf: ts => checklists.dayKey(ts),
+    eatOut: ledgerEatOut,
   })
 }
 function announceGame() {
@@ -2117,6 +2123,18 @@ const server = http.createServer(async (req, res) => {
       const result = store.set(id, item.value, { source, note: item.note })
       if (result.ok) written.push(id)
       else rejected.push({ id, error: result.error })
+    }
+
+    // The ledger feed also sends its weekly eating-out totals for the game.
+    if (source === 'ledger' && body && !Array.isArray(body) && body.eatOut !== undefined) {
+      const clean = cleanEatOut(body.eatOut)
+      if (clean.error) rejected.push({ id: 'eatOut', error: clean.error })
+      else {
+        ledgerEatOut = clean
+        saveEatOut(EAT_OUT_PATH, clean)
+        written.push('eatOut')
+        announceGame()
+      }
     }
 
     return json(res, rejected.length && !written.length ? 400 : 200, { written, rejected })
