@@ -45,7 +45,7 @@ test('weather config stays setup until manual coordinates are present', async ()
     dayStatus: { day: '2026-10-12', started: false },
   })
   assert.equal(snapshot.sources.weather.status, 'notConfigured')
-  assert.equal(snapshot.summary.line2, 'LinkedIn off   Weather setup')
+  assert.equal(snapshot.summary.line1, '💬⚙ 📩⚙ 🔗– 🌤⚙ 💵⚙')
 })
 
 test('weather adapter keeps seeded weather visible until coordinates are present', async () => {
@@ -79,7 +79,7 @@ test('weather adapter keeps seeded weather visible until coordinates are present
   assert.equal(snapshot.sources.weather.status, 'ok')
   assert.equal(snapshot.sources.weather.display, '61F')
   assert.equal(snapshot.sources.weather.source, 'manual-seed')
-  assert.equal(snapshot.summary.line2, 'LinkedIn off   Weather 61F')
+  assert.equal(snapshot.summary.line1, '💬⚙ 📩⚙ 🔗– 🌤61° 💵⚙')
 })
 
 test('weather adapter reads NWS point and hourly forecast into the brief', async () => {
@@ -147,7 +147,7 @@ test('weather adapter reads NWS point and hourly forecast into the brief', async
   assert.equal(snapshot.sources.weather.status, 'ok')
   assert.equal(snapshot.sources.weather.display, '61F H88 rain ends 9a')
   assert.equal(snapshot.sources.weather.value, 61)
-  assert.equal(snapshot.summary.line2, 'LinkedIn off   Weather 61F H88 rain ends 9a')
+  assert.equal(snapshot.summary.line1, '💬⚙ 📩⚙ 🔗– 🌤61°💧88☔→9a 💵⚙')
 })
 
 test('weather adapter preserves last display when provider fails', async () => {
@@ -179,7 +179,7 @@ test('weather adapter preserves last display when provider fails', async () => {
   })
   assert.equal(snapshot.sources.weather.status, 'error')
   assert.equal(snapshot.sources.weather.display, '61F rain')
-  assert.equal(snapshot.summary.line2, 'LinkedIn off   Weather 61F rain?')
+  assert.equal(snapshot.summary.line1, '💬⚙ 📩⚙ 🔗– 🌤61°☔? 💵⚙')
 })
 
 test('weather display picks only decision-changing conditions', () => {

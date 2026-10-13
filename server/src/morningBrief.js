@@ -9,6 +9,13 @@ const SOURCE_LABELS = {
   weather: 'Weather',
   money: 'Money',
 }
+const SOURCE_ICONS = {
+  texts: '💬',
+  mail: '📩',
+  linkedin: '🔗',
+  weather: '🌤',
+  money: '💵',
+}
 const SOURCE_KINDS = {
   texts: 'count',
   mail: 'count',
@@ -150,6 +157,16 @@ function moneyDisplay(source, fallback = 'setup') {
   return financeDisplayLooksUseful(display) ? display.slice(0, 32) : fallback
 }
 
+function compactMoneyDisplay(source) {
+  const slots = Array.isArray(source?.slots)
+    ? source.slots
+        .map(slot => cleanText(slot?.display).slice(0, 16))
+        .filter(financeDisplayLooksUseful)
+    : []
+  if (slots.length) return slots.join('/').slice(0, 24)
+  return moneyDisplay(source)
+}
+
 function sourceDisplay(source, nowMs) {
   const status = source.status === 'ok' && source.staleAt && new Date(source.staleAt).getTime() <= nowMs
     ? 'stale'
@@ -164,6 +181,40 @@ function sourceDisplay(source, nowMs) {
 
 function displayLine(source, nowMs) {
   return `${source.label} ${sourceDisplay(source, nowMs)}`
+}
+
+function compactWeatherDisplay(display) {
+  return cleanText(display)
+    .replace(/(\d+)F\b/g, '$1°')
+    .replace(/\bH(\d+)\b/g, '💧$1')
+    .replace(/\brain ends ([^\s?]+)/, '☔→$1')
+    .replace(/\brain ([^\s?]+)/, '☔$1')
+    .replace(/\bno rain\b/, '☔0')
+    .replace(/\brain\b/, '☔')
+    .replace(/\bice\b/, '🧊')
+    .replace(/\bsnow\b/, '❄')
+    .replace(/\bheat\b/, '🔥')
+    .replace(/\bwind\b/, '💨')
+    .replace(/\bfog\b/, '🌫')
+    .replace(/\s+/g, '')
+    .slice(0, 24)
+}
+
+function compactSourceValue(source, nowMs) {
+  const display = sourceDisplay(source, nowMs)
+  if (display === 'setup') return '⚙'
+  if (display === 'off') return '–'
+  if (display === 'err') return '!'
+  if (display === 'stale') return '?'
+  if (source.id === 'weather') return compactWeatherDisplay(display)
+  if (source.id === 'money') return compactMoneyDisplay(source) === 'setup' ? '⚙' : compactMoneyDisplay(source)
+  return cleanText(display).slice(0, 12)
+}
+
+function compactSummaryLine(sources, nowMs) {
+  return SOURCE_ORDER
+    .map(id => `${SOURCE_ICONS[id]}${compactSourceValue(sources[id], nowMs)}`)
+    .join(' ')
 }
 
 export class MorningBrief {
@@ -237,10 +288,10 @@ export class MorningBrief {
       mode: dayStatus?.started ? 'started' : 'morning',
       started: Boolean(dayStatus?.started),
       summary: {
-        line1: `${displayLine(sources.texts, nowMs)}   ${displayLine(sources.mail, nowMs)}`,
-        line2: `${displayLine(sources.linkedin, nowMs)}   ${displayLine(sources.weather, nowMs)}`,
-        line3: displayLine(sources.money, nowMs),
-        asOfLabel: `as of ${localTimeLabel(generatedAt, this.timezone)}`,
+        line1: compactSummaryLine(sources, nowMs),
+        line2: '',
+        line3: '',
+        asOfLabel: `@${localTimeLabel(generatedAt, this.timezone)}`,
       },
       sources,
     }

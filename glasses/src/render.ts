@@ -1108,20 +1108,22 @@ function renderPlan(state: UiState, cursor: number): string {
   if (state.space === 'life' && plan.day?.started !== true) {
     const startSelected = cursor === 1
     const summary = plan.morningBrief?.summary ?? {
-      line1: 'Texts setup   Mail setup',
-      line2: 'LinkedIn off   Weather setup',
-      line3: 'Money setup',
-      asOfLabel: 'as of setup',
+      line1: '💬⚙ 📩⚙ 🔗– 🌤⚙ 💵⚙',
+      line2: '',
+      line3: '',
+      asOfLabel: '@setup',
     }
+    const briefLines = [
+      summary.line1,
+      summary.line2,
+      summary.line3,
+      summary.asOfLabel,
+    ].map(line => clipToWidth(line)).filter(Boolean)
     return assemble(
       [
         clockLine(state),
         spaceLine(state, cursor === 0),
-        'Good morning, Mike.',
-        clipToWidth(summary.line1),
-        clipToWidth(summary.line2),
-        clipToWidth(summary.line3),
-        clipToWidth(summary.asOfLabel),
+        ...briefLines,
         `${startSelected ? '>' : ' '}+   Start Day`,
         planTip(state, rows, cursor),
       ],

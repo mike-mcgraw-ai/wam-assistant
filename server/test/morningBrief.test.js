@@ -27,10 +27,10 @@ test('morning brief creates a truthful all-source setup snapshot', () => {
   assert.equal(snapshot.sources.weather.status, 'notConfigured')
   assert.equal(snapshot.sources.money.status, 'notConfigured')
   assert.deepEqual(snapshot.summary, {
-    line1: 'Texts setup   Mail setup',
-    line2: 'LinkedIn off   Weather setup',
-    line3: 'Money setup',
-    asOfLabel: 'as of 7:05a',
+    line1: '💬⚙ 📩⚙ 🔗– 🌤⚙ 💵⚙',
+    line2: '',
+    line3: '',
+    asOfLabel: '@7:05a',
   })
 })
 
@@ -58,14 +58,14 @@ test('source updates require freshness for ok values and become stale after ttl'
     dayStatus: { day: '2026-10-12', started: false },
   })
   assert.equal(fresh.sources.weather.status, 'ok')
-  assert.equal(fresh.summary.line2, 'LinkedIn off   Weather 61F rain')
+  assert.equal(fresh.summary.line1, '💬⚙ 📩⚙ 🔗– 🌤61°☔ 💵⚙')
 
   const stale = brief.snapshot({
     now: Date.UTC(2026, 9, 12, 11, 6),
     dayStatus: { day: '2026-10-12', started: false },
   })
   assert.equal(stale.sources.weather.status, 'stale')
-  assert.equal(stale.summary.line2, 'LinkedIn off   Weather 61F rain?')
+  assert.equal(stale.summary.line1, '💬⚙ 📩⚙ 🔗– 🌤61°☔? 💵⚙')
 })
 
 test('morning brief persists compact source summaries across restarts', () => {
@@ -91,7 +91,7 @@ test('morning brief persists compact source summaries across restarts', () => {
 
     assert.equal(snapshot.sources.mail.value, 3)
     assert.equal(snapshot.sources.mail.display, '3')
-    assert.equal(snapshot.summary.line1, 'Texts setup   Mail 3')
+    assert.equal(snapshot.summary.line1, '💬⚙ 📩3 🔗– 🌤⚙ 💵⚙')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -152,7 +152,7 @@ test('finance summary renders numeric money slots instead of a slot count', () =
     now: Date.UTC(2026, 9, 12, 11, 5),
     dayStatus: { day: '2026-10-12', started: false },
   })
-  assert.equal(snapshot.summary.line3, 'Money Stack +$240 Stock $18.2k')
+  assert.equal(snapshot.summary.line1, '💬⚙ 📩⚙ 🔗– 🌤⚙ 💵+$240/$18.2k')
 })
 
 test('finance summary will not show seeded placeholders as a number', () => {
@@ -190,5 +190,5 @@ test('finance summary will not show seeded placeholders as a number', () => {
     now: Date.UTC(2026, 9, 12, 11, 5),
     dayStatus: { day: '2026-10-12', started: false },
   })
-  assert.equal(snapshot.summary.line3, 'Money setup')
+  assert.equal(snapshot.summary.line1, '💬⚙ 📩⚙ 🔗– 🌤⚙ 💵⚙')
 })

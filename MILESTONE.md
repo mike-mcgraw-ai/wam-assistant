@@ -1,8 +1,8 @@
-# The morning brief at a glance
+# A one-glance brief strip
 
-- Public version: `v0.22.0`
-- Face build: `0.138.0`
+- Public version: `v0.23.0`
+- Face build: `0.139.0`
 - Originally completed: `2026-10-13`
 - Sanitized and published: `2026-10-17`
 
-Each source is reduced to the value that changes a decision.
+The pre-Start-Day brief compresses into a single compact strip.

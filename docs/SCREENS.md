@@ -16,9 +16,14 @@ on the glasses (`config.maxLines`). Width is really a pixel budget, not a
 character count: a row that is too wide runs off the edge of the compact bitmap
 and is cut, and in the native text fallback it wraps and costs a row.
 
-- **ASCII only, 32–126.** The firmware silently drops any glyph it lacks, and a
-  dropped status marker reads as "fine" — the worst failure this device has.
-  No emoji, no box-drawing, no Unicode blocks.
+- **ASCII for anything that signals state.** The firmware silently drops any
+  glyph it lacks, and a dropped status marker reads as "fine" — the worst
+  failure this device has. No box-drawing, no Unicode blocks.
+  **Emoji exception (2026-10-13):** Mike has seen emoji render on his G2, and
+  approved them for the compact morning strip (v0.139.0). Two limits still
+  hold: `font.json` has no widths for them, so `measure()` and the screens
+  check only estimate how wide an emoji line is; and a status the line
+  depends on (MIC*, connection flags, setup/err) stays ASCII.
 - **Monochrome green.** No colour, no bold, no italic, no font sizes, no
   alignment. One fixed font.
 - **~44 is an estimate.** The firmware font may be proportional. Design to 40
