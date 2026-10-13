@@ -118,6 +118,8 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
     inbox: inboxGroups,
     checklists: checklists.snapshot(now),
     stats: checklists.allStats(),
+    // Near the widest the game text gets: two-digit level, +XP today, streak.
+    game: { level: 12, xp: 9440, into: 630, size: 650, toNext: 20, streak: 112, todayEarned: 165 },
   }
 
   const base: UiState = {

@@ -1,0 +1,225 @@
+/**
+ * The life game: XP, levels, penalties and streaks.
+ *
+ * Everything here is a pure function of the checklist runs and the rule table
+ * in game.config.json. There is no stored score. Every call recomputes from
+ * the full history, so the same history and rules always give the same
+ * number, a rule change re-scores the past consistently, and there is nothing
+ * that can drift out of step with what actually happened. No AI is involved
+ * at any point; Mike's standing rule is that judgement lives in config he can
+ * read, not in a model.
+ *
+ * Sources, per run (runs.json is the final state, unticks already undone):
+ *   step      +stepXP for each item checked in the run
+ *   complete  +completeBonus when every item of the list is checked
+ *   miss      -missPenalty per daily item still unchecked when its day ends,
+ *             from startDay on, on the weekdays the list is due
+ * Days are the checklists' operational days (shifted by resetHour), so a
+ * 1am tick counts toward the day it belongs to, exactly as the lists do.
+ */
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+
+export const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
+
+/** "2026-10-13" -> "tue". Pure calendar maths on the key, no time zone. */
+export function weekday(dayKey) {
+  const [y, m, d] = dayKey.split('-').map(Number)
+  return WEEKDAYS[new Date(Date.UTC(y, m - 1, d)).getUTCDay()]
+}
+
+export function addDays(dayKey, n) {
+  const [y, m, d] = dayKey.split('-').map(Number)
+  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10)
+}
+
+/** Level from total XP. Lv1 starts at 0; each level costs `growth` more. */
+export function levelFor(xp, { base = 100, growth = 50 } = {}) {
+  let level = 1
+  let floor = 0
+  let size = base
+  while (xp >= floor + size) {
+    floor += size
+    level += 1
+    size = base + growth * (level - 1)
+  }
+  return { level, floor, size, into: xp - floor, toNext: floor + size - xp }
+}
+
+export function ruleFor(config, checklistId) {
+  return { ...config.defaults, ...(config.checklists?.[checklistId] || {}) }
+}
+
+/** Daily lists due on a given day, per their penaltyDays. */
+function dueDailies(templates, config, day) {
+  const wd = weekday(day)
+  return [...templates.values()].filter(
+    t => t.kind === 'daily' && (ruleFor(config, t.id).penaltyDays || []).includes(wd),
+  )
+}
+
+/**
+ * @param {object} p
+ * @param {object[]} p.runs        checklist runs (runs.json shape)
+ * @param {Map<string, object>} p.templates  checklistId -> template with items
+ * @param {object} p.config        game.config.json
+ * @param {string} p.today         current operational day key
+ * @param {number} [p.historyDays] how many days of history to return
+ */
+export function computeGame({ runs, templates, config, today, historyDays = 60 }) {
+  const days = new Map()
+  const bucket = day => {
+    if (!days.has(day)) days.set(day, { day, earned: 0, penalty: 0, entries: [] })
+    return days.get(day)
+  }
+
+  // ---- earning: every run, all history -----------------------------------
+  const runIndex = new Map() // `${checklistId}:${day}` -> daily run
+  for (const run of runs) {
+    if (!run?.day) continue
+    const tpl = templates.get(run.checklistId)
+    const rule = ruleFor(config, run.checklistId)
+    const itemIds = tpl ? (tpl.items || []).map(i => i.id) : null
+    const checked = Object.keys(run.checked || {}).filter(id => !itemIds || itemIds.includes(id))
+    if (tpl?.kind === 'daily') runIndex.set(`${run.checklistId}:${run.day}`, run)
+
+    const b = bucket(run.day)
+    for (const itemId of checked) {
+      b.earned += rule.stepXP
+      b.entries.push({ kind: 'step', checklistId: run.checklistId, itemId, xp: rule.stepXP })
+    }
+    if (itemIds?.length && itemIds.every(id => run.checked?.[id])) {
+      b.earned += rule.completeBonus
+      b.entries.push({ kind: 'complete', checklistId: run.checklistId, xp: rule.completeBonus })
+    }
+  }
+
+  // ---- penalties: only finished days, only from startDay ------------------
+  const start = config.startDay || today
+  for (let day = start; day < today; day = addDays(day, 1)) {
+    for (const tpl of dueDailies(templates, config, day)) {
+      const rule = ruleFor(config, tpl.id)
+      if (!rule.missPenalty) continue
+      const run = runIndex.get(`${tpl.id}:${day}`)
+      const missed = (tpl.items || []).filter(i => !run?.checked?.[i.id]).map(i => i.id)
+      if (!missed.length) continue
+      const xp = -rule.missPenalty * missed.length
+      const b = bucket(day)
+      b.penalty += xp
+      b.entries.push({ kind: 'miss', checklistId: tpl.id, items: missed, xp })
+    }
+  }
+
+  // ---- running total, floored at zero -------------------------------------
+  // A floor rather than debt: a bad week can cost levels, but never leaves a
+  // hole so deep that showing up stops visibly moving the number.
+  const ordered = [...days.values()].sort((a, b) => (a.day < b.day ? -1 : 1))
+  let total = 0
+  for (const d of ordered) {
+    d.net = d.earned + d.penalty
+    total = Math.max(0, total + d.net)
+    d.total = total
+  }
+
+  // ---- streaks ------------------------------------------------------------
+  const complete = day => {
+    const due = dueDailies(templates, config, day)
+    if (!due.length) return null // nothing due: neutral
+    return due.every(tpl => {
+      const run = runIndex.get(`${tpl.id}:${day}`)
+      return (tpl.items || []).length > 0 && (tpl.items || []).every(i => run?.checked?.[i.id])
+    })
+  }
+  let streak = 0
+  for (let day = complete(today) ? today : addDays(today, -1), n = 0; n < 1000; day = addDays(day, -1), n++) {
+    const c = complete(day)
+    if (c === null) continue
+    if (!c) break
+    streak += 1
+  }
+  let best = 0
+  let run = 0
+  const first = ordered[0]?.day || today
+  for (let day = first; day <= today; day = addDays(day, 1)) {
+    const c = complete(day)
+    if (c === null) continue
+    run = c ? run + 1 : 0
+    best = Math.max(best, run)
+  }
+
+  const todayRow = days.get(today) || { day: today, earned: 0, penalty: 0, net: 0, entries: [] }
+  return {
+    today,
+    startDay: start,
+    xp: total,
+    ...levelFor(total, config.levels),
+    streak,
+    bestStreak: Math.max(best, streak),
+    todayEarned: todayRow.earned,
+    // The day's misses land when it ends, so "today" never shows a penalty;
+    // the newest landed one is yesterday's.
+    lastPenalty: ordered.filter(d => d.penalty < 0).at(-1) || null,
+    days: ordered.slice(-historyDays).reverse(),
+  }
+}
+
+/** What the glasses need: small and stable. */
+export function gameSummary(g) {
+  return {
+    level: g.level,
+    xp: g.xp,
+    into: g.into,
+    size: g.size,
+    toNext: g.toNext,
+    streak: g.streak,
+    todayEarned: g.todayEarned,
+  }
+}
+
+/**
+ * Level-up and streak-milestone pings, at most once each.
+ *
+ * Remembers the last level and milestone it announced in a small JSON file.
+ * The first run after install records the current values silently, so a
+ * backfilled history does not fire a burst of pings. A level lost to
+ * penalties is recorded without a ping; regaining it pings again.
+ */
+export class GameAnnouncer {
+  constructor({ statePath, notifier, config }) {
+    this.statePath = statePath
+    this.notifier = notifier
+    this.config = config
+    this.state = null
+    if (statePath && existsSync(statePath)) {
+      try { this.state = JSON.parse(readFileSync(statePath, 'utf8')) } catch { this.state = null }
+    }
+  }
+
+  #save() {
+    if (this.statePath) writeFileSync(this.statePath, JSON.stringify(this.state, null, 2) + '\n')
+  }
+
+  async observe(game) {
+    const milestones = this.config.streak?.milestones || []
+    const reached = milestones.filter(m => game.streak >= m).at(-1) || 0
+    if (!this.state) {
+      this.state = { level: game.level, milestone: reached }
+      this.#save()
+      return []
+    }
+    const sent = []
+    if (game.level > this.state.level && this.config.pings?.levelUp !== false) {
+      sent.push(`Level ${game.level} reached: ${game.xp} XP. ${game.toNext} to Level ${game.level + 1}.`)
+    }
+    if (reached > (this.state.milestone || 0) && this.config.pings?.streakMilestone !== false) {
+      sent.push(`${reached}-day streak: every daily list done ${reached} days running.`)
+    }
+    // A broken streak resets the milestone so the next climb announces again.
+    const milestone = game.streak === 0 ? 0 : Math.max(reached, this.state.milestone || 0)
+    if (game.level !== this.state.level || milestone !== this.state.milestone) {
+      this.state = { level: game.level, milestone }
+      this.#save()
+    }
+    for (const text of sent) await this.notifier.send('WAM', text)
+    return sent
+  }
+}

@@ -718,11 +718,31 @@ export function spaceLine(state: UiState, selected = false): string {
         : '  MIC?'
     : ''
 
+  const game = gameText(state)
   const ai = aiWidgetText(state)
   // When the line is the cursor it earns the right-hand slot, so the one thing
   // you can do from here is spelled out instead of guessed at.
   const action = selected ? (state.coachSession?.active ? '   RECORDING' : '   click: talk / notes') : ''
-  return clipToWidth(`${point}${label}${connection}${mic}${action}${ai && !selected ? `   AI: ${ai}` : ''}`)
+  return clipToWidth(`${point}${label}${connection}${mic}${game}${action}${ai && !selected ? `   AI: ${ai}` : ''}`)
+}
+
+/**
+ * The life game on the space line: "  Lv4 ####-  +40  3d".
+ *
+ * It rides on a line that is already there rather than costing one of the nine
+ * rows. ASCII only, like MIC*, so the firmware cannot drop it: the bar is five
+ * cells of progress into the current level, +N is XP earned today (shown only
+ * once there is some), Nd is the streak (only while there is one). Everything
+ * is computed on the hub by fixed rules; this only prints it.
+ */
+export function gameText(state: UiState): string {
+  const g = state.snapshot?.game
+  if (!g) return ''
+  const filled = Math.max(0, Math.min(5, Math.floor((g.into / Math.max(1, g.size)) * 5)))
+  const bar = '#'.repeat(filled) + '-'.repeat(5 - filled)
+  const today = g.todayEarned > 0 ? `  +${g.todayEarned}` : ''
+  const streak = g.streak > 0 ? `  ${g.streak}d` : ''
+  return `  Lv${g.level} ${bar}${today}${streak}`
 }
 
 export function dateLabel(now = new Date()): string {

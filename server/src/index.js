@@ -14,6 +14,7 @@ import { Triage, sweepInbox } from './triage.js'
 import { Jobs, JOB } from './jobs.js'
 import { distillNote } from './distill.js'
 import { Notifier, sweepWaits } from './notify.js'
+import { computeGame, gameSummary, GameAnnouncer } from './game.js'
 import { applyMessage, verifySignature, startSocketMode } from './slack.js'
 import { buildCue } from './cues.js'
 import { Coach } from './coach.js'
@@ -63,6 +64,29 @@ const checklists = new Checklists(checklistConfig, {
 })
 
 const notifier = new Notifier()
+
+// ---- life game -----------------------------------------------------------
+// Scored by fixed rules in game.config.json from the checklist runs; no AI.
+// Recomputed on every read, so there is no stored score to drift.
+const GAME_CONFIG_PATH = process.env.GAME_CONFIG_PATH || join(HERE, 'game.config.json')
+const gameConfig = JSON.parse(readFileSync(GAME_CONFIG_PATH, 'utf8'))
+const gameAnnouncer = new GameAnnouncer({
+  statePath: join(DATA_DIR, 'game-state.json'),
+  notifier,
+  config: gameConfig,
+})
+function gameState(now = Date.now(), historyDays = 60) {
+  return computeGame({
+    runs: [...checklists.runs.values()],
+    templates: checklists.templates,
+    config: gameConfig,
+    today: checklists.dayKey(now),
+    historyDays,
+  })
+}
+function announceGame() {
+  gameAnnouncer.observe(gameState()).catch(err => console.warn(`[game] ping: ${err.message}`))
+}
 
 const inbox = new Inbox({
   storePath: join(DATA_DIR, 'inbox.json'),
@@ -1369,6 +1393,23 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // ---- life game ----------------------------------------------------------
+  if (req.method === 'GET' && url.pathname === '/game/state') {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    const days = Math.max(1, Math.min(400, Number(url.searchParams.get('days')) || 60))
+    return json(res, 200, { ...gameState(Date.now(), days), rules: gameConfig })
+  }
+  if (req.method === 'GET' && url.pathname === '/game') {
+    try {
+      const html = readFileSync(join(WEB_DIR, 'game.html'))
+      cors(res)
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
+      return res.end(html)
+    } catch {
+      return json(res, 404, { error: 'not found' })
+    }
+  }
+
   if (req.method === 'GET' && url.pathname === '/status') {
     try {
       const html = readFileSync(join(WEB_DIR, 'status.html'))
@@ -2013,6 +2054,7 @@ const server = http.createServer(async (req, res) => {
         claude: assistant.providerReady.claude,
       },
       jobs: jobs.summary(),
+      game: gameSummary(gameState()),
     })
   }
 
@@ -2110,6 +2152,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (!result.ok) return json(res, 400, result)
+    if (url.pathname === '/check') announceGame()
     // Return the fresh checklist state so the glasses can repaint from the
     // server's view rather than guessing at what its own write did.
     return json(res, 200, { ok: true, checklists: checklists.snapshot() })
@@ -2202,6 +2245,11 @@ if (process.env.TRIAGE_MODE === 'api') {
     sweepInbox(inbox, triage).catch(err => console.warn(`[triage] sweep: ${err.message}`))
   }, 60_000)
 }
+
+// Day rollover and streak changes happen without a tick, so look again every
+// few minutes. The first look after a restart records silently.
+announceGame()
+setInterval(announceGame, 5 * 60_000)
 
 checklists.maybeRollup()
 setInterval(() => {

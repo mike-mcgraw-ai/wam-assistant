@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#101214">
+<title>WAM Game</title>
+<style>
+  :root{
+    --bg:#101214; --panel:#1a1d20; --line:#343941;
+    --ink:#f1f4f2; --dim:#9aa39e; --accent:#35d386; --warn:#e0b341; --bad:#ef6b5e;
+    color-scheme:dark;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    padding:env(safe-area-inset-top) 0 calc(env(safe-area-inset-bottom) + 84px);
+  }
+  header{
+    position:sticky; top:0; z-index:2; background:#0a0b0c;
+    display:flex; align-items:center; justify-content:space-between;
+    padding:14px 16px; border-bottom:1px solid var(--line);
+  }
+  h1{font-size:18px; margin:0; font-weight:700}
+  main{padding:16px; max-width:760px; margin:0 auto}
+  section{
+    background:var(--panel); border:1px solid var(--line);
+    border-radius:12px; padding:14px; margin:0 0 14px;
+  }
+  h2{font-size:15px; margin:0 0 10px; color:var(--dim); font-weight:700}
+  .big{font-size:30px; font-weight:800; font-variant-numeric:tabular-nums}
+  .meta{color:var(--dim); font-size:13px; margin-top:4px}
+  .bar{height:10px; background:#25282c; border-radius:6px; overflow:hidden; margin-top:10px}
+  .bar > i{display:block; height:100%; background:var(--accent)}
+  .stats{display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:12px}
+  .stat b{display:block; font-size:20px; font-variant-numeric:tabular-nums}
+  .stat span{color:var(--dim); font-size:12px}
+  .row{display:flex; justify-content:space-between; gap:12px; padding:7px 0; border-top:1px solid var(--line)}
+  .row:first-child{border-top:0}
+  .num{font-variant-numeric:tabular-nums; text-align:right; white-space:nowrap}
+  .plus{color:var(--accent)} .minus{color:var(--bad)}
+  details summary{cursor:pointer; list-style:none}
+  details summary::-webkit-details-marker{display:none}
+  .entries{color:var(--dim); font-size:13px; padding:4px 0 6px}
+  table{width:100%; border-collapse:collapse; font-size:14px}
+  td,th{padding:5px 0; border-top:1px solid var(--line); text-align:left}
+  th{color:var(--dim); font-weight:600}
+  td.num,th.num{text-align:right}
+  button{
+    border:1px solid var(--line); border-radius:10px; background:#25282c;
+    color:var(--accent); font:inherit; font-weight:700; padding:10px 13px;
+  }
+  .phone-nav{
+    position:fixed; left:0; right:0; bottom:0; z-index:5;
+    display:grid; grid-template-columns:repeat(5,1fr); gap:1px;
+    background:#0a0b0c; border-top:1px solid var(--line);
+    padding:6px 6px calc(env(safe-area-inset-bottom) + 6px);
+  }
+  .phone-nav a{
+    color:var(--dim); text-decoration:none; text-align:center;
+    padding:9px 4px; border-radius:10px; font-size:13px; font-weight:700;
+  }
+  .phone-nav a.active{background:var(--accent); color:#061a12}
+</style>
+</head>
+<body>
+<header>
+  <h1>Game</h1>
+  <button id="refresh" type="button">Refresh</button>
+</header>
+
+<main>
+  <section>
+    <div id="level" class="big">Loading...</div>
+    <div id="progress" class="meta"></div>
+    <div class="bar"><i id="fill" style="width:0"></i></div>
+    <div class="stats">
+      <div class="stat"><b id="today">--</b><span>earned today</span></div>
+      <div class="stat"><b id="streak">--</b><span>day streak</span></div>
+      <div class="stat"><b id="best">--</b><span>best streak</span></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Days</h2>
+    <div id="days"></div>
+  </section>
+
+  <section>
+    <h2>Rules</h2>
+    <div class="meta" id="rulesNote"></div>
+    <table id="rules"></table>
+  </section>
+</main>
+
+<nav class="phone-nav" aria-label="WAM phone pages">
+  <a href="/dashboard">List</a>
+  <a href="/notes">Notes</a>
+  <a href="/coach">Coach</a>
+  <a class="active" href="/game">Game</a>
+  <a href="/status">Status</a>
+</nav>
+
+<script>
+const $ = id => document.getElementById(id)
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
+const signed = n => (n > 0 ? `+${n}` : String(n))
+const fmtDay = key => {
+  const [y, m, d] = key.split('-').map(Number)
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
+}
+
+function entryText(e, names) {
+  const list = names[e.checklistId] || e.checklistId
+  if (e.kind === 'step') return `${list}: ${e.itemId} ${signed(e.xp)}`
+  if (e.kind === 'complete') return `${list} complete ${signed(e.xp)}`
+  return `${list} missed ${e.items.length} ${signed(e.xp)}`
+}
+
+function render(g) {
+  $('level').textContent = `Level ${g.level}  ·  ${g.xp} XP`
+  $('progress').textContent = `${g.into} / ${g.size} into Level ${g.level}  ·  ${g.toNext} to Level ${g.level + 1}`
+  $('fill').style.width = `${Math.round((g.into / g.size) * 100)}%`
+  $('today').textContent = signed(g.todayEarned)
+  $('streak').textContent = g.streak
+  $('best').textContent = g.bestStreak
+
+  const names = Object.fromEntries(Object.keys(g.rules.checklists || {}).map(id => [id, id]))
+  $('days').innerHTML = g.days.length
+    ? g.days.map(d => {
+        const cls = d.net > 0 ? 'plus' : d.net < 0 ? 'minus' : ''
+        const lines = d.entries.map(e => `<div>${esc(entryText(e, names))}</div>`).join('')
+        return `<details class="row-wrap"><summary class="row"><span>${esc(fmtDay(d.day))}</span>` +
+          `<span class="num ${cls}">${signed(d.net)}  ·  ${d.total} XP</span></summary>` +
+          `<div class="entries">${lines || 'Nothing logged.'}</div></details>`
+      }).join('')
+    : '<div class="meta">Nothing yet. Tick an item on the glasses.</div>'
+
+  const r = g.rules
+  $('rulesNote').textContent =
+    `Penalties count from ${r.startDay}; every past tick still earned XP. ` +
+    `Rules live in server/src/game.config.json — same history, same score, every time.`
+  const rows = Object.entries(r.checklists || {}).map(([id, rule]) => {
+    const x = { ...r.defaults, ...rule }
+    const days = (x.penaltyDays || []).length === 7 ? 'every day' : (x.penaltyDays || []).join(' ') || '—'
+    return `<tr><td>${esc(id)}</td><td class="num">+${x.stepXP}</td><td class="num">+${x.completeBonus}</td>` +
+      `<td class="num">${x.missPenalty ? -x.missPenalty : '—'}</td><td>${esc(days)}</td></tr>`
+  }).join('')
+  $('rules').innerHTML =
+    '<tr><th>List</th><th class="num">Step</th><th class="num">Done</th><th class="num">Miss</th><th>Due</th></tr>' + rows
+}
+
+async function load() {
+  try {
+    const res = await fetch('/game/state?days=60', { cache: 'no-store' })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    render(await res.json())
+  } catch (err) {
+    $('level').textContent = 'Could not reach the hub'
+    $('progress').textContent = err.message
+  }
+}
+$('refresh').addEventListener('click', load)
+load()
+setInterval(load, 60_000)
+</script>
+</body>
+</html>

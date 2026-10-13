@@ -48,6 +48,18 @@ export interface Snapshot {
   /** what the transcriber has been doing; absent on older server builds */
   stt?: SttStats
   assistant?: Record<AssistantProvider, boolean>
+  /** Life game summary, scored server-side by fixed rules; absent on older servers. */
+  game?: GameSummary
+}
+
+export interface GameSummary {
+  level: number
+  xp: number
+  into: number
+  size: number
+  toNext: number
+  streak: number
+  todayEarned: number
 }
 
 export type AssistantProvider = 'chatgpt' | 'claude'
