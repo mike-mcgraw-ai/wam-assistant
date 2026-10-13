@@ -19,6 +19,12 @@ const SOURCE_KINDS = {
 const STATUSES = new Set(['ok', 'stale', 'notConfigured', 'disabled', 'error'])
 const PRIVACY_KEY = /(?:account|acct|card|institution|routing|last[-_ ]?(?:4|four)|transaction|raw|ssn|credential|password|secret)/i
 const LONG_IDENTIFIER = /\b(?:\d[ -]?){12,19}\b/
+const FINANCE_PLACEHOLDER = /^(?:setup|seeded|ready|ok|n\/a|none|unknown|--)?$/i
+const FINANCE_SIGNAL = /[$%+\-]|\d{2,}|\d+\.\d|\b\d+(?:\.\d+)?[kmb]\b/i
+const MONEY_SLOT_LABELS = {
+  stackDelta: 'Stack',
+  personalStock: 'Stock',
+}
 
 function isoTime(value, field) {
   const date = new Date(value)
@@ -109,15 +115,51 @@ function normalizeSlots(slots) {
   }))
 }
 
+function financeDisplayLooksUseful(value) {
+  const text = cleanText(value)
+  if (!text || FINANCE_PLACEHOLDER.test(text)) return false
+  if (/^\d$/.test(text)) return false
+  return FINANCE_SIGNAL.test(text)
+}
+
+function moneySlotLabel(slot, index) {
+  const id = cleanText(slot?.id)
+  if (MONEY_SLOT_LABELS[id]) return MONEY_SLOT_LABELS[id]
+  const label = cleanText(slot?.label, index === 0 ? 'Stack' : 'Stock')
+  return label.split(' ')[0].slice(0, 8) || (index === 0 ? 'Stack' : 'Stock')
+}
+
+function moneyDisplayFromSlots(slots) {
+  if (!Array.isArray(slots)) return ''
+  return slots
+    .map((slot, index) => {
+      const display = cleanText(slot?.display).slice(0, 16)
+      return financeDisplayLooksUseful(display)
+        ? `${moneySlotLabel(slot, index)} ${display}`
+        : ''
+    })
+    .filter(Boolean)
+    .join(' ')
+    .slice(0, 32)
+}
+
+function moneyDisplay(source, fallback = 'setup') {
+  const slotDisplay = moneyDisplayFromSlots(source?.slots)
+  if (slotDisplay) return slotDisplay
+  const display = cleanText(source?.display)
+  return financeDisplayLooksUseful(display) ? display.slice(0, 32) : fallback
+}
+
 function sourceDisplay(source, nowMs) {
   const status = source.status === 'ok' && source.staleAt && new Date(source.staleAt).getTime() <= nowMs
     ? 'stale'
     : source.status
   if (status === 'disabled') return 'off'
   if (status === 'notConfigured') return 'setup'
-  if (status === 'error') return source.display && source.display !== 'setup' ? `${source.display}?` : 'err'
-  if (status === 'stale') return source.display && source.display !== 'setup' ? `${source.display}?` : 'stale'
-  return source.display || 'ok'
+  const display = source.id === 'money' ? moneyDisplay(source) : source.display
+  if (status === 'error') return display && display !== 'setup' ? `${display}?` : 'err'
+  if (status === 'stale') return display && display !== 'setup' ? `${display}?` : 'stale'
+  return display || 'ok'
 }
 
 function displayLine(source, nowMs) {
@@ -241,7 +283,15 @@ export class MorningBrief {
       if ((status === 'error' || status === 'stale') && base.display && base.display !== 'setup') return base.display
       if (status === 'error') return 'err'
       if (status === 'stale') return 'stale'
+      if (id === 'money') return 'setup'
       return 'ok'
+    })()
+    const slots = id === 'money' ? (normalizeSlots(payload?.slots) ?? base.slots) : undefined
+    const display = (() => {
+      const cleaned = cleanText(payload?.display, fallbackDisplay).slice(0, 32)
+      return id === 'money'
+        ? moneyDisplay({ display: cleaned, slots }, fallbackDisplay)
+        : cleaned
     })()
     const next = withoutUndefined({
       ...base,
@@ -252,7 +302,7 @@ export class MorningBrief {
       value: ['string', 'number', 'boolean'].includes(typeof payload?.value) || payload?.value === null
         ? payload.value
         : null,
-      display: cleanText(payload?.display, fallbackDisplay).slice(0, 32),
+      display,
       asOf,
       staleAt,
       ttlSeconds,
@@ -260,7 +310,7 @@ export class MorningBrief {
       confidence: payload?.confidence ? cleanText(payload.confidence).slice(0, 32) : base.confidence,
       privacy: payload?.privacy ? cleanText(payload.privacy).slice(0, 32) : base.privacy,
       error: payload?.error ? cleanText(payload.error).slice(0, 80) : null,
-      slots: id === 'money' ? (normalizeSlots(payload?.slots) ?? base.slots) : undefined,
+      slots,
     })
 
     this.state.sources[space] = {

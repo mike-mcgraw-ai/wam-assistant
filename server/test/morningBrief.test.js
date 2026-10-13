@@ -116,3 +116,79 @@ test('finance updates reject private-looking identifiers', () => {
     'setup',
   )
 })
+
+test('finance summary renders numeric money slots instead of a slot count', () => {
+  const brief = new MorningBrief({ timezone: 'America/New_York' })
+  const updated = brief.updateSource({
+    id: 'money',
+    status: 'ok',
+    display: '2',
+    asOf: '2026-10-12T11:00:00.000Z',
+    ttlSeconds: 3600,
+    source: 'manual',
+    confidence: 'verified',
+    privacy: 'summaryOnly',
+    slots: [
+      {
+        id: 'stackDelta',
+        label: 'Stack delta',
+        display: '+$240',
+        asOf: '2026-10-12T11:00:00.000Z',
+        confidence: 'verified',
+      },
+      {
+        id: 'personalStock',
+        label: 'Personal stock',
+        display: '$18.2k',
+        asOf: '2026-10-12T11:00:00.000Z',
+        confidence: 'verified',
+      },
+    ],
+  })
+
+  assert.equal(updated.ok, true)
+  assert.equal(updated.source.display, 'Stack +$240 Stock $18.2k')
+  const snapshot = brief.snapshot({
+    now: Date.UTC(2026, 9, 12, 11, 5),
+    dayStatus: { day: '2026-10-12', started: false },
+  })
+  assert.equal(snapshot.summary.line3, 'Money Stack +$240 Stock $18.2k')
+})
+
+test('finance summary will not show seeded placeholders as a number', () => {
+  const brief = new MorningBrief({ timezone: 'America/New_York' })
+  const updated = brief.updateSource({
+    id: 'money',
+    status: 'ok',
+    display: '2',
+    asOf: '2026-10-12T11:00:00.000Z',
+    ttlSeconds: 3600,
+    source: 'manual-seed',
+    confidence: 'seeded',
+    privacy: 'summaryOnly',
+    slots: [
+      {
+        id: 'stackDelta',
+        label: 'Stack delta',
+        display: 'seeded',
+        asOf: '2026-10-12T11:00:00.000Z',
+        confidence: 'seeded',
+      },
+      {
+        id: 'personalStock',
+        label: 'Personal stock',
+        display: 'seeded',
+        asOf: '2026-10-12T11:00:00.000Z',
+        confidence: 'seeded',
+      },
+    ],
+  })
+
+  assert.equal(updated.ok, true)
+  assert.equal(updated.source.display, 'setup')
+  const snapshot = brief.snapshot({
+    now: Date.UTC(2026, 9, 12, 11, 5),
+    dayStatus: { day: '2026-10-12', started: false },
+  })
+  assert.equal(snapshot.summary.line3, 'Money setup')
+})

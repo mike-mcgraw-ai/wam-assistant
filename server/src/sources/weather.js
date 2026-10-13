@@ -1,6 +1,7 @@
 const DEFAULT_TTL_SECONDS = 75 * 60
 const MORNING_POLL_MS = 30 * 60_000
 const OFF_HOURS_POLL_MS = 2 * 60 * 60_000
+const RAIN_LOOKAHEAD_MS = 24 * 60 * 60_000
 
 function numberEnv(env, key) {
   if (env[key] === undefined || env[key] === '') return null
@@ -35,6 +36,7 @@ export function weatherConfigFromEnv(env = process.env) {
     label: cleanLabel(env.WEATHER_LOCATION_LABEL),
     ttlSeconds: Math.max(5 * 60, Number(env.WEATHER_TTL_SECONDS) || DEFAULT_TTL_SECONDS),
     userAgent: String(env.NWS_USER_AGENT || env.WEATHER_USER_AGENT || 'WAM Morning Brief (local)').slice(0, 120),
+    timeZone: cleanLabel(env.WEATHER_TIMEZONE || 'America/New_York'),
   }
 }
 
@@ -98,11 +100,87 @@ function conditionFromPeriod(period) {
   return ''
 }
 
-export function weatherDisplayFromPeriod(period) {
+function percentValue(value) {
+  const n = Number(value?.value ?? value)
+  return Number.isFinite(n) ? Math.round(n) : null
+}
+
+function humidityDisplay(period) {
+  const humidity = percentValue(period?.relativeHumidity)
+  return humidity === null ? '' : `H${Math.max(0, Math.min(100, humidity))}`
+}
+
+function periodMs(period, field = 'startTime') {
+  const ms = new Date(period?.[field]).getTime()
+  return Number.isFinite(ms) ? ms : null
+}
+
+function localDateKey(value, timeZone) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date(value))
+}
+
+function briefTimeLabel(value, { now = Date.now(), timeZone = 'America/New_York' } = {}) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  }).formatToParts(date)
+  const hour = parts.find(part => part.type === 'hour')?.value ?? ''
+  const minute = parts.find(part => part.type === 'minute')?.value ?? '00'
+  const suffix = (parts.find(part => part.type === 'dayPeriod')?.value ?? '').toLowerCase().slice(0, 1)
+  const time = minute === '00' ? `${hour}${suffix}` : `${hour}:${minute}${suffix}`
+  return localDateKey(date, timeZone) === localDateKey(now, timeZone) ? time : `tom ${time}`
+}
+
+function rainLikely(period) {
+  const condition = conditionFromPeriod(period)
+  const text = `${period?.shortForecast ?? ''} ${period?.detailedForecast ?? ''}`.toLowerCase()
+  const chance = percentValue(period?.probabilityOfPrecipitation)
+  if (condition === 'rain') return true
+  if (/rain|shower|drizzle|thunder|storm/.test(text)) return true
+  return chance !== null && chance >= 50 && !/snow|ice|sleet|freezing/.test(text)
+}
+
+function rainTimingDisplay(periods, { now = Date.now(), timeZone = 'America/New_York' } = {}) {
+  if (!Array.isArray(periods) || periods.length < 2) return ''
+  const currentStart = periodMs(periods[0]) ?? new Date(now).getTime()
+  const maxStart = currentStart + RAIN_LOOKAHEAD_MS
+  const upcoming = periods.filter(period => {
+    const start = periodMs(period)
+    return start === null || start <= maxStart
+  })
+
+  if (rainLikely(upcoming[0])) {
+    const end = upcoming.find((period, index) => index > 0 && !rainLikely(period))
+    const endLabel = briefTimeLabel(end?.startTime, { now, timeZone })
+    return endLabel ? `rain ends ${endLabel}` : 'rain now'
+  }
+
+  const next = upcoming.find((period, index) => index > 0 && rainLikely(period))
+  const nextLabel = briefTimeLabel(next?.startTime, { now, timeZone })
+  return nextLabel ? `rain ${nextLabel}` : 'no rain'
+}
+
+export function weatherDisplayFromPeriod(period, { periods = null, now = Date.now(), timeZone = 'America/New_York' } = {}) {
   const temp = Math.round(Number(period?.temperature))
   if (!Number.isFinite(temp)) throw new Error('NWS hourly forecast missing temperature')
   const condition = conditionFromPeriod(period)
-  return condition ? `${temp}F ${condition}` : `${temp}F`
+  const parts = [`${temp}F`]
+  const humidity = humidityDisplay(period)
+  if (humidity) parts.push(humidity)
+  if (condition && condition !== 'rain') parts.push(condition)
+  const rainTiming = rainTimingDisplay(periods, { now, timeZone })
+  if (rainTiming) parts.push(rainTiming)
+  else if (condition === 'rain') parts.push('rain')
+  return parts.join(' ')
 }
 
 function currentWeatherSource(morningBrief) {
@@ -179,7 +257,11 @@ export async function refreshWeatherBrief({
     const period = hourly?.properties?.periods?.[0]
     if (!period) throw new Error('NWS hourly forecast has no periods')
 
-    const display = weatherDisplayFromPeriod(period)
+    const display = weatherDisplayFromPeriod(period, {
+      periods: hourly.properties.periods,
+      now,
+      timeZone: config.timeZone,
+    })
     return morningBrief.updateSource({
       id: 'weather',
       status: 'ok',

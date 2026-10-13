@@ -100,8 +100,24 @@ test('weather adapter reads NWS point and hourly forecast into the brief', async
             {
               startTime: '2026-10-12T07:00:00-04:00',
               temperature: 61,
+              relativeHumidity: { value: 88 },
+              probabilityOfPrecipitation: { value: 90 },
               shortForecast: 'Rain Showers',
               windSpeed: '7 mph',
+            },
+            {
+              startTime: '2026-10-12T08:00:00-04:00',
+              temperature: 62,
+              relativeHumidity: { value: 86 },
+              probabilityOfPrecipitation: { value: 70 },
+              shortForecast: 'Rain Showers',
+            },
+            {
+              startTime: '2026-10-12T09:00:00-04:00',
+              temperature: 63,
+              relativeHumidity: { value: 76 },
+              probabilityOfPrecipitation: { value: 15 },
+              shortForecast: 'Mostly Cloudy',
             },
           ],
         },
@@ -129,9 +145,9 @@ test('weather adapter reads NWS point and hourly forecast into the brief', async
     dayStatus: { day: '2026-10-12', started: false },
   })
   assert.equal(snapshot.sources.weather.status, 'ok')
-  assert.equal(snapshot.sources.weather.display, '61F rain')
+  assert.equal(snapshot.sources.weather.display, '61F H88 rain ends 9a')
   assert.equal(snapshot.sources.weather.value, 61)
-  assert.equal(snapshot.summary.line2, 'LinkedIn off   Weather 61F rain')
+  assert.equal(snapshot.summary.line2, 'LinkedIn off   Weather 61F H88 rain ends 9a')
 })
 
 test('weather adapter preserves last display when provider fails', async () => {
@@ -171,6 +187,85 @@ test('weather display picks only decision-changing conditions', () => {
   assert.equal(weatherDisplayFromPeriod({ temperature: 28, shortForecast: 'Freezing Rain' }), '28F ice')
   assert.equal(weatherDisplayFromPeriod({ temperature: 91, shortForecast: 'Mostly Sunny' }), '91F heat')
   assert.equal(weatherDisplayFromPeriod({ temperature: 54, shortForecast: 'Fog' }), '54F fog')
+})
+
+test('weather display includes humidity and rain start or stop timing', () => {
+  const now = Date.UTC(2026, 9, 12, 11, 5)
+  const dryThenRain = [
+    {
+      startTime: '2026-10-12T07:00:00-04:00',
+      temperature: 72,
+      relativeHumidity: { value: 54 },
+      probabilityOfPrecipitation: { value: 5 },
+      shortForecast: 'Sunny',
+    },
+    {
+      startTime: '2026-10-12T08:00:00-04:00',
+      temperature: 74,
+      relativeHumidity: { value: 56 },
+      probabilityOfPrecipitation: { value: 15 },
+      shortForecast: 'Partly Cloudy',
+    },
+    {
+      startTime: '2026-10-12T14:00:00-04:00',
+      temperature: 69,
+      relativeHumidity: { value: 82 },
+      probabilityOfPrecipitation: { value: 80 },
+      shortForecast: 'Rain Showers',
+    },
+  ]
+  assert.equal(
+    weatherDisplayFromPeriod(dryThenRain[0], {
+      periods: dryThenRain,
+      now,
+      timeZone: 'America/New_York',
+    }),
+    '72F H54 rain 2p',
+  )
+
+  const rainingThenDry = [
+    {
+      startTime: '2026-10-12T07:00:00-04:00',
+      temperature: 61,
+      relativeHumidity: { value: 88 },
+      probabilityOfPrecipitation: { value: 90 },
+      shortForecast: 'Rain Showers',
+    },
+    {
+      startTime: '2026-10-12T08:00:00-04:00',
+      temperature: 64,
+      relativeHumidity: { value: 70 },
+      probabilityOfPrecipitation: { value: 10 },
+      shortForecast: 'Mostly Cloudy',
+    },
+  ]
+  assert.equal(
+    weatherDisplayFromPeriod(rainingThenDry[0], {
+      periods: rainingThenDry,
+      now,
+      timeZone: 'America/New_York',
+    }),
+    '61F H88 rain ends 8a',
+  )
+
+  const dry = [
+    dryThenRain[0],
+    {
+      startTime: '2026-10-12T08:00:00-04:00',
+      temperature: 74,
+      relativeHumidity: { value: 53 },
+      probabilityOfPrecipitation: { value: 10 },
+      shortForecast: 'Sunny',
+    },
+  ]
+  assert.equal(
+    weatherDisplayFromPeriod(dry[0], {
+      periods: dry,
+      now,
+      timeZone: 'America/New_York',
+    }),
+    '72F H54 no rain',
+  )
 })
 
 test('weather config and cadence are explicit', () => {

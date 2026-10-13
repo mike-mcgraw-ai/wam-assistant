@@ -25,3 +25,4 @@ These are the real completion dates of private device builds. The sanitized port
 | v0.19.0 | 2026-10-13 | 0.135.0 | **Morning brief: the first live source:** The pre-day brief gains a real weather adapter, cached so a slow provider never blanks it. |
 | v0.20.0 | 2026-10-13 | 0.136.0 | **A brief that never goes blank:** Basic values stay visible while richer source adapters are still being built. |
 | v0.21.0 | 2026-10-13 | 0.137.0 | **A life game scored by fixed rules:** XP, levels, penalties and streaks are computed deterministically on the hub and ride on an existing line. |
+| v0.22.0 | 2026-10-13 | 0.138.0 | **The morning brief at a glance:** Each source is reduced to the value that changes a decision. |

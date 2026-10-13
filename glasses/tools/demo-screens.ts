@@ -169,8 +169,8 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
     started: false,
     summary: {
       line1: 'Texts 0   Mail 0',
-      line2: 'LinkedIn 0   Weather 61F',
-      line3: 'Money 2',
+      line2: 'LinkedIn 0   Weather 61F H88 rain ends 9a',
+      line3: 'Money Stack +$240 Stock $18k',
       asOfLabel: 'as of 7:05a',
     },
     sources: {},
