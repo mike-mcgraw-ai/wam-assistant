@@ -27,6 +27,21 @@ test('a Listen note can be upgraded from raw speech to an AI summary', () => {
   })
 })
 
+test('a structured Solo Note summary is not cut at the old 400-character limit', () => {
+  const tasks = new Tasks(
+    { tasks: [{ id: 'captured-notes', label: 'Captured notes', space: 'life' }] },
+    { storePath: null, logPath: null },
+  )
+  tasks.addNote('captured-notes', 'Raw transcript.', 'listen', 'long:note', 1)
+  const summary = `Solo Note title\nRoadmap: ${'topic '.repeat(70)}\n${'Supported detail. '.repeat(30)}`
+
+  const result = tasks.updateNote('captured-notes', 'long:note', summary, 'listen-ai', 2)
+
+  assert.equal(result.ok, true)
+  assert.ok(tasks.notes('captured-notes')[0].text.length > 400)
+  assert.equal(tasks.notes('captured-notes')[0].text, summary.trim())
+})
+
 test('matchOpenTask finds a task a spoken clause names, and never guesses', async () => {
   const { matchOpenTask } = await import('../src/tasks.js')
   const open = [{ id: 'd', label: 'Call the dentist' }, { id: 'c', label: 'Car' }]

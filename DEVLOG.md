@@ -31,3 +31,4 @@ These are the real completion dates of private device builds. The sanitized port
 | v0.25.0 | 2026-10-13 | 0.141.0 | **A Home that greets before it lists:** Before Start Day, Home is a greeting and one action instead of a dashboard. |
 | v0.26.0 | 2026-10-13 | 0.143.0 | **Commitments on Home, with undo:** Start Day tasks show on Home, and completed rows get two page-away undo chances. |
 | v0.27.0 | 2026-10-13 | 0.147.0 | **Routines that remember partial runs:** A partly completed routine no longer rebuilds itself on the next plan. |
+| v0.28.0 | 2026-10-13 | 0.148.0 | **Closing the feedback loop:** Chat opens at the newest reply, pages stay still while the cursor moves, and saved summaries keep the whole thought. |

@@ -221,7 +221,10 @@ user glances at while talking:
   roadmap of distinct parts of the thought; append only for a meaningful shift
   and refine the latest heading in place. currentSummary is a fuller working
   summary of the latest section, preserving concrete requirements, decisions,
-  constraints, examples, and next steps. Use the previous board as memory.
+  constraints, examples, and next steps. Return 3-6 useful points whenever the
+  transcript supports them; one vague line is not a summary. Merge supported
+  details from the previous board instead of replacing them with only the last
+  audio chunk. Use the previous board as memory.
 
 The cue (title/lines) is the one place for help: answer a question that was
 asked, flag a claim that looks wrong (kind "factcheck", say what is correct and
@@ -344,7 +347,6 @@ const handlers = {
     }
 
     const transcript = segments
-      .slice(input.finalNote ? -64 : -32)
       .map(segment => `${segment.speaker || 'someone'}: ${trimText(segment.text, 500)}`)
       .join('\n')
     const mode = input.mode ?? {}
@@ -377,6 +379,8 @@ Read the complete supplied transcript as one conversation. Return kind "recap" a
 Preserve the previous board's supported overall topic, roadmap, and current summary unless the complete
 transcript clearly corrects them. Treat isolated short fragments that are not supported elsewhere as
 uncertain transcription noise; never promote one into a fact, title, task, or next action.
+For Solo Notes, make board.currentSummary a 3-6 point summary of the whole saved note, not merely the
+last section. Each point must carry a distinct supported requirement, decision, example, or next step.
 The lines become the note visible in the Notes list:
 1. A specific one-line title for what is worth remembering, not the opening scene.
 2. The most important supported facts, decisions, requests, or connections.

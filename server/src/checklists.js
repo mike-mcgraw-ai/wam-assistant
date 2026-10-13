@@ -484,6 +484,20 @@ export class Checklists {
     return { ok: true, taskIds: saved.taskIds }
   }
 
+  /** Replace today's one-off commitments after a review or data repair. */
+  setCommittedTasks(space = 'life', taskIds = [], now = Date.now()) {
+    const ids = [...new Set(taskIds.filter(id => typeof id === 'string' && id))]
+    const day = this.dayKey(now)
+    const key = `${space}:${day}`
+    const prior = this.dayStarts.get(key)
+    if (!prior) return { ok: false, error: 'day not started' }
+    const saved = { ...prior, updatedAt: now, taskIds: ids }
+    this.dayStarts.set(key, saved)
+    this.#log({ type: 'day_set_tasks', day, space, taskIds: ids, at: now })
+    this.#persist()
+    return { ok: true, taskIds: ids }
+  }
+
   /** Every day's commitments, oldest first: { day, space, runIds, taskIds }. */
   commitments() {
     return [...this.dayStarts.values()]
@@ -514,7 +528,7 @@ export class Checklists {
   addNote(checklistId, text, by = 'me', clientId = null, now = Date.now()) {
     const template = this.templates.get(checklistId)
     if (!template) return { ok: false, error: `unknown checklist "${checklistId}"` }
-    const body = String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, 400)
+    const body = String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, 2_000)
     if (!body) return { ok: false, error: 'empty note' }
 
     const notes = this.notes_.get(checklistId) ?? []
@@ -534,7 +548,7 @@ export class Checklists {
     }
     const note = this.notes_.get(checklistId)?.find(row => row.id === noteId)
     if (!note) return { ok: false, error: 'unknown note' }
-    const body = String(text ?? '').trim().slice(0, 400)
+    const body = String(text ?? '').trim().slice(0, 2_000)
     if (!body) return { ok: false, error: 'empty note' }
     note.text = body
     note.by = String(by || note.by || 'me').slice(0, 16)

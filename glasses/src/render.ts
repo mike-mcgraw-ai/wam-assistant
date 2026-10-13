@@ -779,10 +779,10 @@ export function spaceLine(state: UiState, selected = false, labelOverride?: stri
 }
 
 /**
- * The life game on the space line: "  Lv4 ####-  +40  3d".
+ * The life game on the space line: "  Lv4 ####----  +40  3d".
  *
  * It rides on a line that is already there rather than costing one of the nine
- * rows. ASCII only, like MIC*, so the firmware cannot drop it: the bar is five
+ * rows. ASCII only, like MIC*, so the firmware cannot drop it: the bar is eight
  * cells of progress into the current level, +N is XP earned today (shown only
  * once there is some), Nd is the streak (only while there is one). Everything
  * is computed on the hub by fixed rules; this only prints it.
@@ -790,8 +790,9 @@ export function spaceLine(state: UiState, selected = false, labelOverride?: stri
 export function gameText(state: UiState): string {
   const g = state.snapshot?.game
   if (!g) return ''
-  const filled = Math.max(0, Math.min(5, Math.floor((g.into / Math.max(1, g.size)) * 5)))
-  const bar = '#'.repeat(filled) + '-'.repeat(5 - filled)
+  const cells = 8
+  const filled = Math.max(0, Math.min(cells, Math.floor((g.into / Math.max(1, g.size)) * cells)))
+  const bar = '#'.repeat(filled) + '-'.repeat(cells - filled)
   const today = g.todayEarned > 0 ? `  +${g.todayEarned}` : ''
   const streak = g.streak > 0 ? `  ${g.streak}d` : ''
   return `  Lv${g.level} ${bar}${today}${streak}`
@@ -821,15 +822,8 @@ function plainHeader(state: UiState, right: string): string {
 }
 
 /**
- * Sliding window.
- *
- * The view moves by a single row when the cursor would leave it, rather than
- * jumping a whole page. Paging is disorienting on a screen this small: the
- * whole thing changes at once and you have to re-find your place. Sliding
- * keeps every neighbouring row where you last saw it.
- *
- * `top` is the previous scroll position, so the window only moves when it has
- * to — scrolling within the visible rows does not shift anything.
+ * Page-aligned window. The cursor moves against a fixed page; the viewport
+ * changes only after the cursor crosses a page edge.
  */
 export function windowFollow(cursor: number, total: number, size: number, _top: number) {
   // Page-flip, not row-slide.
@@ -848,6 +842,39 @@ export function windowFollow(cursor: number, total: number, size: number, _top: 
     atTop: page === 0,
     atEnd: page >= pages - 1,
   }
+}
+
+/** The app font has no emoji glyphs even though phone notifications do. */
+function glassesSafeText(value: string): string {
+  return value
+    .replace(/💬/gu, ' TXT ')
+    .replace(/📩/gu, ' MAIL ')
+    .replace(/🔗/gu, ' LI ')
+    .replace(/🌤/gu, ' TEMP ')
+    .replace(/💵/gu, ' MONEY ')
+    .replace(/💧/gu, ' HUM ')
+    .replace(/☔/gu, ' RAIN ')
+    .replace(/⚙/gu, ' -- ')
+    .replace(/[–—]/gu, '--')
+    .replace(/°/gu, 'F ')
+    .replace(/→/gu, ' at ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function wrapToGlassWidth(value: string): string[] {
+  const lines: string[] = []
+  let line = ''
+  for (const word of value.split(/\s+/).filter(Boolean)) {
+    const candidate = line ? `${line} ${word}` : word
+    if (!line || measure(candidate) <= USABLE_PX) line = candidate
+    else {
+      lines.push(clipToWidth(line))
+      line = word
+    }
+  }
+  if (line) lines.push(clipToWidth(line))
+  return lines
 }
 
 const SPACES: Array<{ id: Space; label: string }> = [
@@ -1171,11 +1198,11 @@ function renderPlan(state: UiState, cursor: number): string {
       asOfLabel: '@setup',
     }
     const briefLines = [
-      summary.line1,
-      summary.line2,
-      summary.line3,
-      summary.asOfLabel,
-    ].map(line => clipToWidth(line)).filter(Boolean)
+      glassesSafeText(summary.line1),
+      glassesSafeText(summary.line2),
+      glassesSafeText(summary.line3),
+    ].filter(Boolean).flatMap(line => wrapToGlassWidth(line)).slice(0, 3)
+    if (summary.asOfLabel) briefLines.push(clipToWidth(summary.asOfLabel))
     // No hint row here: the rows say what they do, and the armed Skip asks
     // its own question. Mike asked for the walk-the-house hint to go.
     return assemble(
@@ -1656,7 +1683,9 @@ function assistantPassageLines(provider: AssistantProvider, role: AssistantChat[
 
 function assistantMessageLines(chat: AssistantChat | null, provider: AssistantProvider): string[] {
   const lines: string[] = []
-  for (const message of chat?.messages ?? []) {
+  const messages = chat?.messages ?? []
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
     lines.push(...assistantPassageLines(provider, message.role, message.text))
   }
   return lines
@@ -1813,8 +1842,7 @@ function renderAssistant(state: UiState): string {
   const content = assistantActiveContentLines(state, view.provider)
 
   const scroll = Math.max(0, Math.min(assistantScrollMax(state), view.scroll ?? 0))
-  const end = content.length - scroll
-  const window = content.slice(Math.max(0, end - room), end)
+  const window = content.slice(scroll, scroll + room)
   const scrollMark = scroll > 0 ? ` ^${scroll}` : ''
   return assemble(
     [

@@ -620,18 +620,21 @@ function modelNoteSummary(modelResult) {
   const board = modelBoard(modelResult)
   if (board?.overallTopic) {
     const sections = board.sections.length > 1 ? `Roadmap: ${board.sections.join(' > ')}` : ''
-    return [board.overallTopic, sections, ...board.currentSummary]
+    const recapLines = modelResult?.kind === 'recap' && Array.isArray(modelResult.lines)
+      ? modelResult.lines.map(line => String(line || '').trim()).filter(Boolean).slice(0, 3)
+      : []
+    return [board.overallTopic, sections, ...recapLines, ...board.currentSummary]
       .filter(Boolean)
       .join('\n')
-      .slice(0, 400)
+      .slice(0, 2_000)
   }
   const recapLines = modelResult?.kind === 'recap' && Array.isArray(modelResult.lines)
     ? modelResult.lines.map(line => String(line || '').trim()).filter(Boolean).slice(0, 3)
     : []
-  if (recapLines.length) return recapLines.join('\n').slice(0, 400)
+  if (recapLines.length) return recapLines.join('\n').slice(0, 2_000)
   const note = modelRunningNote(modelResult)
   if (!note?.lines?.length) return null
-  return note.lines.slice(0, 3).join('\n').slice(0, 400)
+  return note.lines.slice(0, 3).join('\n').slice(0, 2_000)
 }
 
 function applyFinalListenSummary(job, modelResult) {
@@ -713,8 +716,9 @@ function createCoachCueJob(session, {
   if (!session) return null
   const safeSpace = cueSpace(session.space)
   const mode = coach.getMode(session.modeId) ?? coach.activeMode(safeSpace)
+  const transcriptWindow = finalNote ? undefined : mode.id === 'notes' ? -96 : -32
   const recentSegments = coalesceTranscriptSegments(session.segments ?? session.recentSegments)
-    .slice(finalNote ? -64 : -32)
+    .slice(transcriptWindow)
     // Solo Notes is one person thinking aloud. Direction-based speaker guesses
     // can split one sentence into a fake conversation and distort summaries.
     .map(segment => mode.id === 'notes' ? { ...segment, speaker: 'me' } : segment)
@@ -919,7 +923,11 @@ function ensureCaptureTask(space, at = Date.now()) {
 }
 
 function consolidatedSessionNote(session) {
-  const max = session?.context?.taskId === '__day_start__' ? 4_000 : 400
+  const max = session?.context?.taskId === '__day_start__'
+    ? 4_000
+    : session?.modeId === 'notes'
+      ? 8_000
+      : 4_000
   return transcriptText(session?.segments, max)
 }
 
@@ -1813,6 +1821,42 @@ const server = http.createServer(async (req, res) => {
 
     const result = tasks.complete(id, action === 'done')
     return json(res, result.ok ? 200 : 404, { ...result, tasks: tasks.list() })
+  }
+
+  const taskNoteMatch = url.pathname.match(/^\/task\/([^/]+)\/note\/([^/]+)$/)
+  if (req.method === 'POST' && taskNoteMatch) {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    let body = {}
+    try {
+      const raw = await readBody(req)
+      if (raw) body = JSON.parse(raw)
+    } catch (err) {
+      return json(res, 400, { error: `bad body: ${err.message}` })
+    }
+    const result = tasks.updateNote(
+      decodeURIComponent(taskNoteMatch[1]),
+      decodeURIComponent(taskNoteMatch[2]),
+      body.text,
+      body.by,
+    )
+    return json(res, result.ok ? 200 : 404, { ...result, tasks: tasks.list() })
+  }
+
+  if (req.method === 'POST' && url.pathname === '/day/commitments/tasks') {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    let body = {}
+    try {
+      const raw = await readBody(req)
+      if (raw) body = JSON.parse(raw)
+    } catch (err) {
+      return json(res, 400, { error: `bad body: ${err.message}` })
+    }
+    const requested = Array.isArray(body.taskIds) ? body.taskIds : []
+    const unknown = requested.filter(id => !tasks.has(id))
+    if (unknown.length) return json(res, 400, { ok: false, error: `unknown tasks: ${unknown.join(', ')}` })
+    const space = cueSpace(body.space)
+    const result = checklists.setCommittedTasks(space, requested)
+    return json(res, result.ok ? 200 : 400, { ...result, day: checklists.dayStatus(space) })
   }
 
   if (req.method === 'GET' && url.pathname === '/tasks') {

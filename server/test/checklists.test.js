@@ -244,6 +244,20 @@ test('a walk later in the day adds to the commitments instead of replacing them'
   assert.deepEqual(status.taskIds, ['call-dentist'])
 })
 
+test('reviewed Start Day tasks can replace stale commitments', () => {
+  const checklists = new Checklists(
+    { checklists: [] },
+    { runsPath: null, logPath: null, summaryPath: null },
+  )
+  checklists.startDay('Call the bet', 'life', 1_000)
+  checklists.commitTasks('life', ['call-the-bet', 'correction-fragment'], 2_000)
+
+  const result = checklists.setCommittedTasks('life', ['call-the-vet'], 3_000)
+
+  assert.deepEqual(result, { ok: true, taskIds: ['call-the-vet'] })
+  assert.deepEqual(checklists.dayStatus('life', 3_000).taskIds, ['call-the-vet'])
+})
+
 test('overnight: a committed list stays on the list, an uncommitted one closes', () => {
   const checklists = new Checklists(
     {

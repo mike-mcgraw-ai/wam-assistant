@@ -1125,10 +1125,20 @@ async function finishDayCapture(): Promise<void> {
 }
 
 async function refreshAssistant(provider: AssistantProvider): Promise<void> {
+  const prior = state.assistantThreads[provider] ?? state.assistantChat
+  const priorLatest = prior?.messages?.at(-1)
   const result = await fetchAssistantChat(state.space, provider)
   if (result.ok) {
     state.assistantThreads[provider] = result.chat
     state.assistantChat = result.chat
+    const latest = result.chat.messages?.at(-1)
+    if (
+      state.view.kind === 'assistant' &&
+      state.view.phase === 'chat' &&
+      state.view.provider === provider &&
+      latest?.role === 'assistant' &&
+      (latest.at !== priorLatest?.at || latest.text !== priorLatest?.text)
+    ) state.view.scroll = 0
     state.error = null
   } else state.error = result.error
 }
@@ -1495,9 +1505,7 @@ function clampCursor(): void {
 }
 
 /**
- * Slide the window so the cursor stays visible, moving one row at a time.
- * Called after any cursor change; a no-op while the cursor is already on
- * screen, which is what stops the view drifting under you.
+ * Keep the viewport on a fixed page while the cursor moves within it.
  */
 function followCursor(): void {
   const view = state.view
@@ -1506,10 +1514,8 @@ function followCursor(): void {
   const size = view.kind === 'plan' ? config.rowsPerPage - 1 : config.rowsPerPage
   const total = rowCount()
 
-  if (view.cursor < state.scrollTop) state.scrollTop = view.cursor
-  else if (view.cursor >= state.scrollTop + size) state.scrollTop = view.cursor - size + 1
-
-  state.scrollTop = Math.max(0, Math.min(state.scrollTop, Math.max(0, total - size)))
+  const maxStart = Math.max(0, Math.floor(Math.max(0, total - 1) / size) * size)
+  state.scrollTop = Math.max(0, Math.min(Math.floor(view.cursor / size) * size, maxStart))
 }
 
 /** Record one completed-row page-away and retire it after the second. */

@@ -276,7 +276,7 @@ export class Tasks {
     if (!this.#taskById(id)) {
       return { ok: false, error: `unknown task "${id}"` }
     }
-    const body = String(text ?? '').trim().slice(0, 400)
+    const body = String(text ?? '').trim().slice(0, 2_000)
     if (!body) return { ok: false, error: 'empty note' }
 
     const existing = this.notes_.get(id) ?? []
@@ -294,7 +294,7 @@ export class Tasks {
     const existing = this.notes_.get(id)
     const note = existing?.find(row => row.id === noteId)
     if (!note) return { ok: false, error: 'unknown note' }
-    const body = String(text ?? '').trim().slice(0, 400)
+    const body = String(text ?? '').trim().slice(0, 2_000)
     if (!body) return { ok: false, error: 'empty note' }
     note.text = body
     note.by = String(by || note.by || 'me').slice(0, 16)
