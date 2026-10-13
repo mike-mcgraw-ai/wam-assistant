@@ -133,7 +133,7 @@ test('checkbox-only legacy timings do not feed the read model or stats', () => {
   assert.equal(checklists.stats('morning').plan[0].hasDuration, false)
 })
 
-test('Start Day matches spoken aliases and starts only those preset chores', () => {
+test('Start Day matches spoken aliases, starts those chores, and records what was committed', () => {
   const checklists = new Checklists(
     {
       resetHour: 5,
@@ -146,30 +146,32 @@ test('Start Day matches spoken aliases and starts only those preset chores', () 
     },
     { runsPath: null, logPath: null, summaryPath: null },
   )
+  const at = Date.UTC(2026, 9, 11, 14)
 
-  const result = checklists.startDay(
-    'Today I need to wash clothes, load the dishwasher, and clean the floors.',
-    'life',
-    Date.UTC(2026, 9, 11, 14),
-  )
+  const result = checklists.startDay('Today I need to wash clothes, load the dishwasher, and clean the floors.', 'life', at)
 
   assert.equal(result.ok, true)
   assert.deepEqual(result.checklistIds, ['laundry', 'dishes', 'vacuum'])
+  assert.equal(result.runIds.length, 3)
+  assert.deepEqual(result.unmatched, [])
   assert.deepEqual(
-    checklists.snapshot(Date.UTC(2026, 9, 11, 14)).active.map(run => run.checklistId).sort(),
+    checklists.snapshot(at).active.map(run => run.checklistId).sort(),
     ['dishes', 'laundry', 'vacuum'],
   )
-  assert.deepEqual(checklists.dayStatus('life', Date.UTC(2026, 9, 11, 14)), {
+  assert.deepEqual(checklists.dayStatus('life', at), {
     day: result.day,
     startHour: 6,
     started: true,
-    startedAt: Date.UTC(2026, 9, 11, 14),
+    skipped: false,
+    skippedAt: null,
+    startedAt: at,
     checklistIds: ['laundry', 'dishes', 'vacuum'],
     transcript: 'Today I need to wash clothes, load the dishwasher, and clean the floors.',
   })
+  assert.deepEqual(checklists.commitments(), [{ day: result.day, space: 'life', runIds: result.runIds, taskIds: [] }])
 })
 
-test('Start Day remains unstarted when speech matches no preset chore', () => {
+test('Start Day with no saved list named still starts the day and hands back the clauses as tasks', () => {
   const checklists = new Checklists(
     {
       checklists: [
@@ -181,7 +183,75 @@ test('Start Day remains unstarted when speech matches no preset chore', () => {
 
   const result = checklists.startDay('I should answer some email.', 'life', 1_000)
 
-  assert.equal(result.ok, false)
-  assert.equal(checklists.dayStatus('life', 1_000).started, false)
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.unmatched, ['Answer some email'])
+  assert.equal(checklists.dayStatus('life', 1_000).started, true)
   assert.deepEqual(checklists.snapshot(1_000).active, [])
+})
+
+test('Start Day from a named step commits only that step onward', () => {
+  const checklists = new Checklists(
+    {
+      checklists: [{
+        id: 'laundry', name: 'Laundry', space: 'life', kind: 'ondemand',
+        items: [{ id: 'load', label: 'Load washer' }, { id: 'hang', label: 'Hang' }, { id: 'fold', label: 'Fold' }],
+      }],
+    },
+    { runsPath: null, logPath: null, summaryPath: null },
+  )
+  const result = checklists.startDay('laundry from hang', 'life', 1_000)
+  assert.equal(result.matched[0].fromStep, 'Hang')
+  const run = checklists.runs.get(result.runIds[0])
+  assert.equal(run.startIndex, 1)
+})
+
+test('a walk later in the day adds to the commitments instead of replacing them', () => {
+  const checklists = new Checklists(
+    {
+      checklists: [
+        { id: 'laundry', name: 'Laundry', space: 'life', kind: 'ondemand', items: [] },
+        { id: 'dishes', name: 'Dishes', space: 'life', kind: 'ondemand', items: [] },
+      ],
+    },
+    { runsPath: null, logPath: null, summaryPath: null },
+  )
+  const morning = checklists.startDay('laundry', 'life', 1_000)
+  checklists.commitTasks('life', ['call-dentist'], 2_000)
+  const midday = checklists.startDay('dishes', 'life', 3_000)
+  assert.equal(midday.runIds.length, 2)
+  assert.ok(midday.runIds.includes(morning.runIds[0]))
+  assert.deepEqual(checklists.commitments()[0].taskIds, ['call-dentist'])
+  assert.equal(checklists.dayStatus('life', 3_000).startedAt, 1_000)
+})
+
+test('overnight: a committed list stays on the list, an uncommitted one closes', () => {
+  const checklists = new Checklists(
+    {
+      resetHour: 5,
+      summaryHour: 6,
+      timezone: 'UTC',
+      checklists: [
+        { id: 'laundry', name: 'Laundry', space: 'life', kind: 'ondemand', items: [{ id: 'a', label: 'A' }] },
+        { id: 'dishes', name: 'Dishes', space: 'life', kind: 'ondemand', items: [{ id: 'b', label: 'B' }] },
+      ],
+    },
+    { runsPath: null, logPath: null, summaryPath: null },
+  )
+  const day1 = Date.UTC(2026, 9, 12, 14)
+  checklists.startDay('laundry', 'life', day1)
+  checklists.start('dishes', day1) // started by hand, never committed
+  checklists.maybeRollup(Date.UTC(2026, 9, 13, 7))
+  const open = checklists.snapshot(Date.UTC(2026, 9, 13, 7)).active.map(r => r.checklistId)
+  assert.deepEqual(open, ['laundry'])
+})
+
+test('skip for now is remembered and is not a start', () => {
+  const checklists = new Checklists(
+    { checklists: [] },
+    { runsPath: null, logPath: null, summaryPath: null },
+  )
+  checklists.skipDay('life', 1_000)
+  const status = checklists.dayStatus('life', 1_000)
+  assert.equal(status.skipped, true)
+  assert.equal(status.started, false)
 })

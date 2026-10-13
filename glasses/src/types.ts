@@ -355,6 +355,9 @@ export interface BlockPlan {
     day: string
     startHour: number
     started: boolean
+    /** "Skip for now" chosen today; the normal list shows, Start Day stays one row away. */
+    skipped?: boolean
+    skippedAt?: number | null
     startedAt: number | null
     checklistIds: string[]
     transcript: string

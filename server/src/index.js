@@ -9,7 +9,7 @@ import { Store } from './state.js'
 import { Checklists } from './checklists.js'
 import { agenda, planBlock, reach } from './plan.js'
 import { Inbox } from './inbox.js'
-import { Tasks } from './tasks.js'
+import { Tasks, matchOpenTask } from './tasks.js'
 import { Triage, sweepInbox } from './triage.js'
 import { Jobs, JOB } from './jobs.js'
 import { distillNote } from './distill.js'
@@ -76,12 +76,19 @@ const gameAnnouncer = new GameAnnouncer({
   config: gameConfig,
 })
 function gameState(now = Date.now(), historyDays = 60) {
+  const taskInfo = {}
+  for (const t of tasks.taskDefs()) {
+    taskInfo[t.id] = { label: t.label, doneAt: tasks.done.get(t.id)?.doneAt ?? null }
+  }
   return computeGame({
     runs: [...checklists.runs.values()],
     templates: checklists.templates,
     config: gameConfig,
     today: checklists.dayKey(now),
     historyDays,
+    commitments: checklists.commitments(),
+    taskInfo,
+    dayKeyOf: ts => checklists.dayKey(ts),
   })
 }
 function announceGame() {
@@ -253,9 +260,11 @@ function choresForPlan(requestedIds, space, now = Date.now()) {
       const doneIds = new Set(
         (run?.items ?? []).filter(i => i.done).map(i => i.id),
       )
+      const includedIds = run ? new Set(run.items.map(i => i.id)) : null
       let steps = s.plan
-        .map((step, i) => ({ ...step, position: i + 1, total: s.plan.length }))
+        .filter(step => !includedIds || includedIds.has(step.id))
         .filter(step => !doneIds.has(step.id))
+        .map((step, i, remaining) => ({ ...step, position: i + 1, total: remaining.length }))
 
       let readyAt = 0
 
@@ -278,7 +287,7 @@ function choresForPlan(requestedIds, space, now = Date.now()) {
         steps,
         startIndex: 0,
         readyAt,
-        schedulable: s.schedulable,
+        schedulable: steps.every(step => step.hasDuration),
       }
     })
 }
@@ -307,6 +316,7 @@ function taskRows(space) {
     open: t.open,
     weight: t.weight,
     opensLabel: t.opensLabel,
+    needsPlan: t.needsPlan === true,
     notes: t.notes,
   }))
 }
@@ -907,6 +917,10 @@ function consolidatedSessionNote(session) {
   return transcriptText(session?.segments, max)
 }
 
+function soundsLikePlan(label) {
+  return /\b(?:build|create|design|organize|sort out|clean out|set up|prepare|plan|project|renovate|move)\b/i.test(label)
+}
+
 function routeCoachSession(session, at = Date.now()) {
   const rawText = consolidatedSessionNote(session)
   if (!rawText) return { kind: 'empty', result: { ok: true } }
@@ -914,7 +928,28 @@ function routeCoachSession(session, at = Date.now()) {
   const space = cueSpace(session.space)
 
   if (session.context?.taskId === '__day_start__') {
-    return { kind: 'day-start', result: checklists.startDay(rawText, space, at) }
+    const result = checklists.startDay(rawText, space, at)
+    if (result.ok) {
+      const open = tasks.list(at).filter(t => t.space === space)
+      result.tasks = result.unmatched.map((label, index) => {
+        const existing = matchOpenTask(label, open)
+        if (existing) return { ok: true, task: existing, existing: true }
+        return tasks.addTask({
+          label,
+          space,
+          window: 'anytime',
+          weight: 'big',
+          needsPlan: soundsLikePlan(label),
+          firstNote: label,
+          by: 'start-day',
+          clientId: `${session.id}:day-task:${index}`,
+        }, at)
+      }).filter(created => created.ok).map(created => created.task)
+      // Everything named in the walk is committed: it stays on the list until
+      // done and costs points each day it is not (game.js).
+      checklists.commitTasks(space, result.tasks.map(t => t.id), at)
+    }
+    return { kind: 'day-start', result }
   }
 
   // Classification happens once, after the complete recording exists. A
@@ -2156,6 +2191,17 @@ const server = http.createServer(async (req, res) => {
     // Return the fresh checklist state so the glasses can repaint from the
     // server's view rather than guessing at what its own write did.
     return json(res, 200, { ok: true, checklists: checklists.snapshot() })
+  }
+
+  // ---- Start Day: skip for now ------------------------------------------
+  if (req.method === 'POST' && url.pathname === '/day/skip') {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    let body = {}
+    try { body = JSON.parse((await readBody(req)) || '{}') } catch {}
+    const space = body.space === 'ops' ? 'ops' : 'life'
+    const result = checklists.skipDay(space)
+    if (!result.ok) return json(res, 400, result)
+    return json(res, 200, { ok: true, day: result, checklists: checklists.snapshot() })
   }
 
   // ---- block plan -------------------------------------------------------

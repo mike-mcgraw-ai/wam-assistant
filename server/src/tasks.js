@@ -179,6 +179,7 @@ export class Tasks {
           open: win.open,
           opensLabel: win.opensLabel,
           space: t.space ?? 'life',
+          needsPlan: t.needsPlan === true,
           notes: this.notes(t.id),
         }
       })
@@ -251,6 +252,7 @@ export class Tasks {
       space: input.space === 'ops' ? 'ops' : 'life',
       ...(Number.isFinite(estimate) && estimate > 0 ? { estimateMinutes: Math.round(estimate) } : {}),
       ...(String(input.note || '').trim() ? { note: String(input.note).trim().slice(0, 120) } : {}),
+      ...(input.needsPlan === true ? { needsPlan: true } : {}),
       ...(clientId ? { clientId } : {}),
     }
 
@@ -322,4 +324,28 @@ export class Tasks {
     this.#persist()
     return { ok: true }
   }
+}
+
+/**
+ * The open task a spoken clause names, if any. Fixed rules, no model: the
+ * clause and the task label match once lowercased and stripped of
+ * punctuation, or one contains the other as whole words and the shorter side
+ * is at least two words. "call the dentist about the crown" finds a task
+ * called "Call the dentist"; "call dentist" does not, because it never
+ * guesses — a miss just makes a new task, which is cheap to spot.
+ */
+export function matchOpenTask(clause, openTasks) {
+  const norm = value => String(value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+  const c = norm(clause)
+  if (!c) return null
+  const words = value => value.split(' ').filter(Boolean).length
+  const contains = (hay, needle) => ` ${hay} `.includes(` ${needle} `)
+  return openTasks.find(t => {
+    const l = norm(t.label)
+    if (!l) return false
+    if (l === c) return true
+    if (words(l) >= 2 && contains(c, l)) return true
+    if (words(c) >= 2 && contains(l, c)) return true
+    return false
+  }) ?? null
 }

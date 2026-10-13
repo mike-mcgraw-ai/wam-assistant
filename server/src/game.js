@@ -14,6 +14,12 @@
  *   complete  +completeBonus when every item of the list is checked
  *   miss      -missPenalty per daily item still unchecked when its day ends,
  *             from startDay on, on the weekdays the list is due
+ *   carry     -stepPenalty per committed step still unchecked when a day
+ *             ends: a list named in a Start Day walk (its steps from the
+ *             run's startIndex on), charged every day until done
+ *   task-miss -taskPenalty per committed one-off task still open when a day
+ *             ends, every day until done
+ * A list marked "ignore" in the rules neither earns nor costs anything.
  * Days are the checklists' operational days (shifted by resetHour), so a
  * 1am tick counts toward the day it belongs to, exactly as the lists do.
  */
@@ -52,9 +58,10 @@ export function ruleFor(config, checklistId) {
 /** Daily lists due on a given day, per their penaltyDays. */
 function dueDailies(templates, config, day) {
   const wd = weekday(day)
-  return [...templates.values()].filter(
-    t => t.kind === 'daily' && (ruleFor(config, t.id).penaltyDays || []).includes(wd),
-  )
+  return [...templates.values()].filter(t => {
+    const rule = ruleFor(config, t.id)
+    return t.kind === 'daily' && !rule.ignore && (rule.penaltyDays || []).includes(wd)
+  })
 }
 
 /**
@@ -64,8 +71,14 @@ function dueDailies(templates, config, day) {
  * @param {object} p.config        game.config.json
  * @param {string} p.today         current operational day key
  * @param {number} [p.historyDays] how many days of history to return
+ * @param {object[]} [p.commitments] [{ day, runIds, taskIds }] from Start Day
+ * @param {object} [p.taskInfo]    taskId -> { label, doneAt }
+ * @param {(ts: number) => string} [p.dayKeyOf] instant -> operational day
  */
-export function computeGame({ runs, templates, config, today, historyDays = 60 }) {
+export function computeGame({
+  runs, templates, config, today, historyDays = 60,
+  commitments = [], taskInfo = {}, dayKeyOf = ts => new Date(ts).toISOString().slice(0, 10),
+}) {
   const days = new Map()
   const bucket = day => {
     if (!days.has(day)) days.set(day, { day, earned: 0, penalty: 0, entries: [] })
@@ -78,6 +91,7 @@ export function computeGame({ runs, templates, config, today, historyDays = 60 }
     if (!run?.day) continue
     const tpl = templates.get(run.checklistId)
     const rule = ruleFor(config, run.checklistId)
+    if (rule.ignore) continue
     const itemIds = tpl ? (tpl.items || []).map(i => i.id) : null
     const checked = Object.keys(run.checked || {}).filter(id => !itemIds || itemIds.includes(id))
     if (tpl?.kind === 'daily') runIndex.set(`${run.checklistId}:${run.day}`, run)
@@ -106,6 +120,53 @@ export function computeGame({ runs, templates, config, today, historyDays = 60 }
       const b = bucket(day)
       b.penalty += xp
       b.entries.push({ kind: 'miss', checklistId: tpl.id, items: missed, xp })
+    }
+  }
+
+  // ---- commitments: carried every day until done --------------------------
+  // A commitment's first day is the first Start Day walk that named it. From
+  // then (and from startDay) every finished day it is still not done costs
+  // again: the list keeps it in front of Mike and the score keeps it honest.
+  const commit = { stepPenalty: 10, taskPenalty: 10, ...(config.commitments || {}) }
+  const runById = new Map(runs.map(r => [r.runId, r]))
+  const firstRun = new Map()
+  const firstTask = new Map()
+  for (const c of commitments) {
+    for (const id of c.runIds || []) if (!firstRun.has(id) || c.day < firstRun.get(id)) firstRun.set(id, c.day)
+    for (const id of c.taskIds || []) if (!firstTask.has(id) || c.day < firstTask.get(id)) firstTask.set(id, c.day)
+  }
+  const later = (a, b) => (a > b ? a : b)
+
+  for (const [runId, from] of firstRun) {
+    const run = runById.get(runId)
+    const tpl = run && templates.get(run.checklistId)
+    if (!tpl || ruleFor(config, run.checklistId).ignore || !commit.stepPenalty) continue
+    const startIndex = Number.isInteger(run.startIndex) ? run.startIndex : 0
+    const committed = (tpl.items || []).slice(startIndex)
+    const finishedDay = run.finishedAt ? dayKeyOf(run.finishedAt) : null
+    for (let day = later(from, start); day < today; day = addDays(day, 1)) {
+      if (finishedDay && day > finishedDay) break
+      const left = committed.filter(i => {
+        const c = run.checked?.[i.id]
+        return !c || dayKeyOf(c.at) > day
+      })
+      if (!left.length) break // done by the end of this day, and so of every later one
+      const xp = -commit.stepPenalty * left.length
+      const b = bucket(day)
+      b.penalty += xp
+      b.entries.push({ kind: 'carry', checklistId: run.checklistId, runId, items: left.map(i => i.id), xp, carried: day > from })
+    }
+  }
+
+  for (const [taskId, from] of firstTask) {
+    const info = taskInfo[taskId]
+    if (!info || !commit.taskPenalty) continue
+    const doneDay = info.doneAt ? dayKeyOf(info.doneAt) : null
+    for (let day = later(from, start); day < today; day = addDays(day, 1)) {
+      if (doneDay && doneDay <= day) break
+      const b = bucket(day)
+      b.penalty -= commit.taskPenalty
+      b.entries.push({ kind: 'task-miss', taskId, label: info.label, xp: -commit.taskPenalty, carried: day > from })
     }
   }
 

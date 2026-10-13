@@ -238,6 +238,7 @@ const CAPTURE_TASK_ID = 'captured-notes'
 export type PlanRow =
   | { kind: 'listen' }
   | { kind: 'start-day' }
+  | { kind: 'skip-day' }
   | { kind: 'daily'; runId: string; listName: string; item: ChecklistItem }
   | { kind: 'task'; task: TaskRow }
   | { kind: 'chores' }
@@ -258,8 +259,8 @@ export function planRows(state: UiState): PlanRow[] {
   // Before the morning walk-through, Home is intentionally just the Life
   // doorway and one Start Day action. Preset lists exist, but none of them is
   // today's work until Mike names it.
-  if (state.space === 'life' && plan.day?.started !== true) {
-    return [{ kind: 'listen' }, { kind: 'start-day' }]
+  if (state.space === 'life' && plan.day?.started !== true && plan.day?.skipped !== true) {
+    return [{ kind: 'listen' }, { kind: 'start-day' }, { kind: 'skip-day' }]
   }
 
   // The hub files a Listen capture with no obvious home onto a task called
@@ -297,7 +298,12 @@ export function planRows(state: UiState): PlanRow[] {
     }
   }
 
-  return [{ kind: 'listen' }, ...required, ...agenda]
+  // The walk stays one row away all day: after Start Day it adds to the day
+  // (a mid-day "and also"), after Skip it is the way back in. Last, so it
+  // never pushes the running order down.
+  const walk: PlanRow[] = state.space === 'life' ? [{ kind: 'start-day' }] : []
+
+  return [{ kind: 'listen' }, ...required, ...agenda, ...walk]
 }
 
 /** Rows the cursor is allowed to stop on. */
@@ -1057,7 +1063,12 @@ function planTip(state: UiState, rows: PlanRow[], cursor: number): string {
   const row = rows[cursor]
   if (!row) return 'Life'
   if (row.kind === 'chores') return 'Chores - click to open'
-  if (row.kind === 'start-day') return 'click to walk the house and name today'
+  if (row.kind === 'start-day') {
+    return state.plan?.day?.started ? 'click to add more to today' : 'click to walk the house and name today'
+  }
+  if (row.kind === 'skip-day') {
+    return state.armedTaskId === 'skip-day' ? 'Click again to skip the walk today' : 'Not now - show the list without it'
+  }
   if (row.kind === 'task') {
     return state.armedTaskId === row.task.taskId
       ? '! Task - click again to finish'
@@ -1105,8 +1116,9 @@ function renderPlan(state: UiState, cursor: number): string {
 
   // Before Start Day, the hub owns the brief contract. Older hubs still fall
   // back to the basic setup/off rows so the screen stays truthful.
-  if (state.space === 'life' && plan.day?.started !== true) {
+  if (state.space === 'life' && plan.day?.started !== true && plan.day?.skipped !== true) {
     const startSelected = cursor === 1
+    const skipSelected = cursor === 2
     const summary = plan.morningBrief?.summary ?? {
       line1: '💬⚙ 📩⚙ 🔗– 🌤⚙ 💵⚙',
       line2: '',
@@ -1125,6 +1137,9 @@ function renderPlan(state: UiState, cursor: number): string {
         spaceLine(state, cursor === 0),
         ...briefLines,
         `${startSelected ? '>' : ' '}+   Start Day`,
+        skipSelected && state.armedTaskId === 'skip-day'
+          ? '>[?] Skip the walk today?'
+          : `${skipSelected ? '>' : ' '}    Skip for now`,
         planTip(state, rows, cursor),
       ],
       config.maxChars,
@@ -1172,7 +1187,7 @@ function renderPlan(state: UiState, cursor: number): string {
     if (row.kind === 'chores') {
       lines.push(ruleCentred('Chores', i === bodyCursor && cursor > 0))
     } else if (row.kind === 'start-day') {
-      lines.push(clip(`${point}+   Start Day`, LINE_CHARS))
+      lines.push(clip(`${point}+   ${state.plan?.day?.started ? 'Add to day' : 'Start Day'}`, LINE_CHARS))
     } else if (row.kind === 'daily') {
       const selected = i === bodyCursor && cursor > 0
       if (selected && state.armedTaskId === `${row.runId}:${row.item.id}`) {
@@ -1230,7 +1245,7 @@ function renderDayStart(
     [
       clockLine(state),
       `START DAY  ${phase === 'recording' ? 'REC' : phase === 'reviewing' ? 'REVIEW' : 'TRY AGAIN'}`,
-      ...(phase === 'failed' ? wrap(message || 'No saved chore names matched.', LINE_CHARS) : shown.length ? shown : ['Walk the house. Name every chore for today.']),
+      ...(phase === 'failed' ? wrap(message || 'Nothing heard. Try the walk again.', LINE_CHARS) : shown.length ? shown : ['Walk the house. Name every chore for today.']),
       footer,
     ],
     config.maxChars,

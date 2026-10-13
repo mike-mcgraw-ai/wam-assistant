@@ -1,8 +1,8 @@
-# A one-glance brief strip
+# Start Day as the day's commitment
 
-- Public version: `v0.23.0`
-- Face build: `0.139.0`
+- Public version: `v0.24.0`
+- Face build: `0.140.0`
 - Originally completed: `2026-10-13`
 - Sanitized and published: `2026-10-17`
 
-The pre-Start-Day brief compresses into a single compact strip.
+Optional, additive all day, and the definition of what counts as today.

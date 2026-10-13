@@ -117,3 +117,75 @@ test('announcer: silent first run, pings level-ups and milestones once, never a 
   assert.deepEqual(await b.observe({ level: 4, xp: 456, toNext: 244, streak: 0 }), [])
   assert.equal(sent.length, 3)
 })
+
+// ---- commitments ------------------------------------------------------------
+const dayAt = (day, hour = 12) => Date.parse(`${day}T${String(hour).padStart(2, '0')}:00:00Z`)
+const utcDay = ts => new Date(ts).toISOString().slice(0, 10)
+const laundryT = new Map([
+  ['laundry', { id: 'laundry', kind: 'ondemand', items: [{ id: 'load' }, { id: 'hang' }, { id: 'fold' }] }],
+  ['rounds', { id: 'rounds', kind: 'daily', items: [{ id: 'boiler' }] }],
+])
+const cfg = { ...config, startDay: '2026-10-14', commitments: { stepPenalty: 10, taskPenalty: 10 }, checklists: { rounds: { ignore: true, missPenalty: 5, penaltyDays: ['mon', 'tue', 'wed', 'thu', 'fri'] } } }
+
+test('ignored lists neither earn nor cost', () => {
+  const g = computeGame({ runs: [run('rounds', '2026-10-14', ['boiler'])], templates: laundryT, config: cfg, today: '2026-10-17' })
+  assert.equal(g.xp, 0)
+  assert.equal(g.days.flatMap(d => d.entries).length, 0)
+})
+
+test('committed steps left undone cost every day until done, then stop', () => {
+  const laundry = {
+    runId: 'L1', checklistId: 'laundry', day: '2026-10-14', startIndex: 1, // walk said "from hang"
+    checked: { hang: { at: dayAt('2026-10-15') }, fold: { at: dayAt('2026-10-16') } },
+  }
+  const g = computeGame({
+    runs: [laundry], templates: laundryT, config: cfg, today: '2026-10-18',
+    commitments: [{ day: '2026-10-14', runIds: ['L1'], taskIds: [] }], dayKeyOf: utcDay,
+  })
+  const pen = Object.fromEntries(g.days.map(d => [d.day, d.penalty]))
+  assert.equal(pen['2026-10-14'], -20) // hang + fold left; load was never committed
+  assert.equal(pen['2026-10-15'], -10) // fold left, carried
+  assert.equal(pen['2026-10-16'] ?? 0, 0) // done
+  assert.equal(pen['2026-10-17'] ?? 0, 0)
+  const carried = g.days.find(d => d.day === '2026-10-15').entries.find(e => e.kind === 'carry')
+  assert.equal(carried.carried, true)
+})
+
+test('a committed task costs every day it stays open, and nothing from the day it is done', () => {
+  const g = computeGame({
+    runs: [], templates: laundryT, config: cfg, today: '2026-10-18',
+    commitments: [{ day: '2026-10-14', runIds: [], taskIds: ['dentist'] }],
+    taskInfo: { dentist: { label: 'Call the dentist', doneAt: dayAt('2026-10-16') } },
+    dayKeyOf: utcDay,
+  })
+  const pen = Object.fromEntries(g.days.map(d => [d.day, d.penalty]))
+  assert.equal(pen['2026-10-14'], -10)
+  assert.equal(pen['2026-10-15'], -10)
+  assert.equal(pen['2026-10-16'] ?? 0, 0)
+})
+
+test('commitments before startDay and on today are never charged', () => {
+  const g = computeGame({
+    runs: [], templates: laundryT, config: cfg, today: '2026-10-15',
+    commitments: [{ day: '2026-10-12', runIds: [], taskIds: ['t'] }],
+    taskInfo: { t: { label: 'T', doneAt: null } },
+    dayKeyOf: utcDay,
+  })
+  const pen = Object.fromEntries(g.days.map(d => [d.day, d.penalty]))
+  assert.equal(pen['2026-10-12'], undefined)
+  assert.equal(pen['2026-10-13'], undefined)
+  assert.equal(pen['2026-10-14'], -10) // first day the game counts
+  assert.equal(pen['2026-10-15'], undefined) // today: not over yet
+})
+
+test('a committed list finished by hand with steps left costs that day, then stops', () => {
+  const laundry = { runId: 'L2', checklistId: 'laundry', day: '2026-10-14', finishedAt: dayAt('2026-10-15'), checked: {} }
+  const g = computeGame({
+    runs: [laundry], templates: laundryT, config: cfg, today: '2026-10-18',
+    commitments: [{ day: '2026-10-14', runIds: ['L2'], taskIds: [] }], dayKeyOf: utcDay,
+  })
+  const pen = Object.fromEntries(g.days.map(d => [d.day, d.penalty]))
+  assert.equal(pen['2026-10-14'], -30)
+  assert.equal(pen['2026-10-15'], -30)
+  assert.equal(pen['2026-10-16'] ?? 0, 0)
+})

@@ -561,3 +561,8 @@ export async function fetchSessionSummary(
     clearTimeout(timer)
   }
 }
+
+/** "Skip for now" on the Start Day walk: remembered for today, not a start. */
+export async function skipDay(space: 'life' | 'ops' = 'life') {
+  return post('/day/skip', { space })
+}

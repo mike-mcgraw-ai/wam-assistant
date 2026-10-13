@@ -45,6 +45,7 @@ import {
   startChecklist,
   finishChecklist,
   startCoachSession,
+  skipDay,
 } from './api'
 import { loadPlan, loadSnapshot, savePlan, saveSnapshot } from './storage'
 import {
@@ -1111,7 +1112,7 @@ async function finishDayCapture(): Promise<void> {
     state.view = {
       kind: 'daystart',
       phase: 'failed',
-      message: stopped.note?.result.error || 'No preset chores matched.',
+      message: stopped.note?.result.error || 'Nothing heard. Try the walk again.',
     }
     await paint()
     return
@@ -2204,6 +2205,23 @@ async function activate(): Promise<void> {
 
     if (row?.kind === 'start-day') {
       await startDayCapture()
+      return
+    }
+
+    // Skip is a state change for the whole day, so it arms first.
+    if (row?.kind === 'skip-day') {
+      const gate = confirmGate('skip-day')
+      if (gate !== 'confirmed') {
+        if (gate === 'armed') await paint()
+        return
+      }
+      const result = await skipDay(state.space === 'ops' ? 'ops' : 'life')
+      if (!result.ok) {
+        state.error = result.error
+        await paint()
+        return
+      }
+      await openPlan()
       return
     }
 

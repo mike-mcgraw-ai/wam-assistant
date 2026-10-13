@@ -27,3 +27,4 @@ These are the real completion dates of private device builds. The sanitized port
 | v0.21.0 | 2026-10-13 | 0.137.0 | **A life game scored by fixed rules:** XP, levels, penalties and streaks are computed deterministically on the hub and ride on an existing line. |
 | v0.22.0 | 2026-10-13 | 0.138.0 | **The morning brief at a glance:** Each source is reduced to the value that changes a decision. |
 | v0.23.0 | 2026-10-13 | 0.139.0 | **A one-glance brief strip:** The pre-Start-Day brief compresses into a single compact strip. |
+| v0.24.0 | 2026-10-13 | 0.140.0 | **Start Day as the day's commitment:** Optional, additive all day, and the definition of what counts as today. |

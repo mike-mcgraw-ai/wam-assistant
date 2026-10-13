@@ -16,6 +16,28 @@ function containsPhrase(text, phrase) {
   return ` ${text} `.includes(` ${clean} `)
 }
 
+function dayClauses(value) {
+  return String(value ?? '')
+    .replace(/\b(?:and then|after that|then|also)\b/gi, '|')
+    .replace(/[.!?;,]+/g, '|')
+    .split(/\||\band\b/gi)
+    .map(part => part.trim())
+    .filter(Boolean)
+}
+
+function cleanTaskClause(value) {
+  const cleaned = String(value ?? '')
+    .replace(/^(?:(?:okay|ok|so|today|please)\s+)+/i, '')
+    .replace(/^(?:(?:i|we)\s+(?:need to|want to|have to|got to|gotta|should|must)\s+)/i, '')
+    .replace(/^(?:need|remember)\s+to\s+/i, '')
+    .replace(/^(?:add|put)\s+/i, '')
+    .replace(/\s+(?:to|on)\s+(?:my|the)\s+(?:list|plan)$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!cleaned || cleaned.length < 3) return ''
+  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1)
+}
+
 /**
  * Checklist runs.
  *
@@ -136,7 +158,7 @@ export class Checklists {
 
   // ---- runs --------------------------------------------------------------
 
-  #newRun(template, day, now) {
+  #newRun(template, day, now, { startIndex = 0 } = {}) {
     const run = {
       runId: randomUUID(),
       checklistId: template.id,
@@ -156,6 +178,8 @@ export class Checklists {
       timing: {},
       /** itemIds whose wait has already produced a reminder */
       notified: [],
+      /** Earlier template steps deliberately left out of this particular run. */
+      startIndex: Math.max(0, Math.min(template.items.length - 1, startIndex)),
     }
     this.runs.set(run.runId, run)
     this.#log({ type: 'run_start', runId: run.runId, checklistId: template.id, day, at: now })
@@ -174,16 +198,25 @@ export class Checklists {
   }
 
   /** Start an on-demand run. Returns the existing open one rather than duplicating. */
-  start(checklistId, now = Date.now()) {
+  start(checklistId, now = Date.now(), { startIndex = 0 } = {}) {
     const template = this.templates.get(checklistId)
     if (!template) return { ok: false, error: `unknown checklist "${checklistId}"` }
 
     const open = [...this.runs.values()].find(
       r => r.checklistId === checklistId && !r.finishedAt,
     )
-    if (open) return { ok: true, run: open, existing: true }
+    if (open) {
+      const requested = Math.max(0, Math.min(template.items.length - 1, startIndex))
+      const current = Number.isInteger(open.startIndex) ? open.startIndex : 0
+      if (requested < current) {
+        open.startIndex = requested
+        this.#log({ type: 'run_expand', runId: open.runId, checklistId, startIndex: requested, at: now })
+        this.#persist()
+      }
+      return { ok: true, run: open, existing: true }
+    }
 
-    const run = this.#newRun(template, this.dayKey(now), now)
+    const run = this.#newRun(template, this.dayKey(now), now, { startIndex })
     this.#persist()
     return { ok: true, run }
   }
@@ -195,49 +228,148 @@ export class Checklists {
     return {
       day,
       startHour: this.dayStartHour,
-      started: Boolean(saved),
+      started: Boolean(saved?.startedAt),
+      skipped: Boolean(saved?.skippedAt) && !saved?.startedAt,
+      skippedAt: saved?.skippedAt ?? null,
       startedAt: saved?.startedAt ?? null,
       checklistIds: Array.isArray(saved?.checklistIds) ? saved.checklistIds : [],
       transcript: saved?.transcript ?? '',
     }
   }
 
-  /** Match one complete spoken walk-through to preset on-demand lists. */
-  startDay(text, space = 'life', now = Date.now()) {
-    const transcript = String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, 4_000)
-    if (!transcript) return { ok: false, error: 'nothing heard' }
+  /** Persist a deliberate "not now" without pretending the day was started. */
+  skipDay(space = 'life', now = Date.now()) {
+    const day = this.dayKey(now)
+    const key = `${space}:${day}`
+    const prior = this.dayStarts.get(key) ?? {}
+    if (prior.startedAt) return { ok: true, ...this.dayStatus(space, now), alreadyStarted: true }
+    const saved = {
+      ...prior,
+      day,
+      space,
+      startedAt: null,
+      skippedAt: prior.skippedAt ?? now,
+      checklistIds: Array.isArray(prior.checklistIds) ? prior.checklistIds : [],
+      transcript: prior.transcript ?? '',
+    }
+    this.dayStarts.set(key, saved)
+    this.#log({ type: 'day_skip', day, space, at: now })
+    this.#persist()
+    return { ok: true, ...this.dayStatus(space, now) }
+  }
 
-    const haystack = normalizeMatchText(transcript)
-    const matches = [...this.templates.values()]
+  /** Match spoken work to saved routines and identify the unmatched clauses. */
+  dayIntent(text, space = 'life') {
+    const transcript = String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, 4_000)
+    const templates = [...this.templates.values()]
       .filter(template => template.kind === 'ondemand' && (template.space ?? 'ops') === space)
-      .filter(template => {
+    const byId = new Map()
+    const unmatched = []
+
+    for (const rawClause of dayClauses(transcript)) {
+      const clause = normalizeMatchText(rawClause)
+      const found = templates.filter(template => {
         const phrases = [template.name, template.id, ...(Array.isArray(template.aliases) ? template.aliases : [])]
-        return phrases.some(phrase => containsPhrase(haystack, phrase))
+        return phrases.some(phrase => containsPhrase(clause, phrase))
       })
 
-    if (matches.length === 0) {
-      return { ok: false, error: 'No preset chores matched. Say laundry, dishes, vacuum, or another saved list.' }
+      if (found.length === 0) {
+        const label = cleanTaskClause(rawClause)
+        if (label) unmatched.push(label)
+        continue
+      }
+
+      for (const template of found) {
+        let startIndex = 0
+        for (let i = 0; i < template.items.length; i += 1) {
+          const item = template.items[i]
+          const phrases = [item.label, ...(Array.isArray(item.aliases) ? item.aliases : [])]
+          if (phrases.some(phrase => containsPhrase(clause, phrase))) {
+            startIndex = i
+            break
+          }
+        }
+        const prior = byId.get(template.id)
+        if (!prior || startIndex < prior.startIndex) byId.set(template.id, { template, startIndex })
+      }
     }
 
+    return { transcript, matches: [...byId.values()], unmatched }
+  }
+
+  /** Match one complete spoken walk-through to presets and add it to today. */
+  startDay(text, space = 'life', now = Date.now()) {
+    const { transcript, matches, unmatched } = this.dayIntent(text, space)
+    if (!transcript) return { ok: false, error: 'nothing heard' }
+
     const checklistIds = []
-    for (const template of matches) {
-      const started = this.start(template.id, now)
-      if (started.ok) checklistIds.push(template.id)
+    const runIds = []
+    for (const match of matches) {
+      const started = this.start(match.template.id, now, { startIndex: match.startIndex })
+      if (started.ok) {
+        checklistIds.push(match.template.id)
+        runIds.push(started.run.runId)
+      }
     }
 
     const day = this.dayKey(now)
     const key = `${space}:${day}`
+    const prior = this.dayStarts.get(key) ?? {}
     const saved = {
       day,
       space,
-      startedAt: now,
-      checklistIds,
-      transcript,
+      startedAt: prior.startedAt ?? now,
+      skippedAt: null,
+      updatedAt: now,
+      checklistIds: [...new Set([...(prior.checklistIds ?? []), ...checklistIds])],
+      // What was committed, by identity: these runs and tasks carry over and
+      // cost points (game.js) until done. Additive across the day's walks.
+      runIds: [...new Set([...(prior.runIds ?? []), ...runIds])],
+      taskIds: Array.isArray(prior.taskIds) ? prior.taskIds : [],
+      transcript: [prior.transcript, transcript].filter(Boolean).join('\n').slice(-4_000),
     }
     this.dayStarts.set(key, saved)
     this.#log({ type: 'day_start', ...saved })
     this.#persist()
-    return { ok: true, ...saved, matched: matches.map(template => ({ id: template.id, name: template.name })) }
+    return {
+      ok: true,
+      ...saved,
+      matched: matches.map(({ template, startIndex }) => ({
+        id: template.id,
+        name: template.name,
+        startIndex,
+        fromStep: template.items[startIndex]?.label ?? null,
+      })),
+      unmatched,
+    }
+  }
+
+  /** Add one-off tasks to today's commitments (from a Start Day walk). */
+  commitTasks(space = 'life', taskIds = [], now = Date.now()) {
+    const ids = taskIds.filter(id => typeof id === 'string' && id)
+    if (!ids.length) return { ok: true, taskIds: [] }
+    const day = this.dayKey(now)
+    const key = `${space}:${day}`
+    const prior = this.dayStarts.get(key) ?? { day, space, startedAt: now, checklistIds: [], runIds: [], transcript: '' }
+    const saved = { ...prior, updatedAt: now, taskIds: [...new Set([...(prior.taskIds ?? []), ...ids])] }
+    this.dayStarts.set(key, saved)
+    this.#log({ type: 'day_commit_tasks', day, space, taskIds: ids, at: now })
+    this.#persist()
+    return { ok: true, taskIds: saved.taskIds }
+  }
+
+  /** Every day's commitments, oldest first: { day, space, runIds, taskIds }. */
+  commitments() {
+    return [...this.dayStarts.values()]
+      .filter(d => d?.day && (d.runIds?.length || d.taskIds?.length))
+      .map(d => ({ day: d.day, space: d.space, runIds: d.runIds ?? [], taskIds: d.taskIds ?? [] }))
+      .sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0))
+  }
+
+  /** Was this run committed on any day? Committed runs carry over. */
+  isCommitted(runId) {
+    for (const d of this.dayStarts.values()) if (d?.runIds?.includes(runId)) return true
+    return false
   }
 
   /** The template step definition for an item, or undefined. */
@@ -477,7 +609,8 @@ export class Checklists {
   #shape(run, now) {
     const template = this.templates.get(run.checklistId)
 
-    const items = template.items.map(item => {
+    const startIndex = Number.isInteger(run.startIndex) ? run.startIndex : 0
+    const items = template.items.slice(startIndex).map(item => {
       // `check` is a step that is only ever ticked: one click, done, and the
       // time it happened is the whole record. A list marked `timed: false`
       // makes every step one, which is what a morning routine is — you are not
@@ -550,6 +683,7 @@ export class Checklists {
       checklistId: run.checklistId,
       name: run.name,
       kind: run.kind,
+      startIndex,
       space: template.space ?? 'ops',
       day: run.day,
       done,
@@ -588,10 +722,14 @@ export class Checklists {
     const template = this.templates.get(checklistId)
     if (!template) return null
 
-    const finished = [...this.runs.values()]
+    const completed = [...this.runs.values()]
       .filter(r => r.checklistId === checklistId)
       .map(r => this.#shape(r, Date.now()))
       .filter(r => r.complete)
+    // Whole-list totals only compare whole-list runs. A run that intentionally
+    // began at "Hang" still contributes a real Hang duration below, but it is
+    // not evidence for how long all of Laundry takes.
+    const finished = completed.filter(r => r.startIndex === 0)
 
     const estimateMs = template.items
       .filter(i => this.#stepKind(template, i) === 'do')
@@ -628,7 +766,7 @@ export class Checklists {
         const stepKind = item.kind ?? (template.timed === false ? 'check' : 'do')
         const durations = stepKind === 'check'
           ? []
-          : finished
+          : completed
             .map(r => r.items.find(i => i.id === item.id)?.durationMs)
             .filter(d => typeof d === 'number' && d > 0)
         const median = durations.length >= 3 ? Checklists.median(durations) : null
@@ -649,7 +787,7 @@ export class Checklists {
       }),
       steps: template.items.map(item => {
         const stepKind = item.kind ?? (template.timed === false ? 'check' : 'do')
-        const shaped = finished.map(r => r.items.find(i => i.id === item.id))
+        const shaped = completed.map(r => r.items.find(i => i.id === item.id))
         const durations = stepKind === 'check'
           ? []
           : shaped
@@ -821,9 +959,11 @@ export class Checklists {
     const summary = this.rollup(previous, now)
 
     // Close out any on-demand run left open overnight; an abandoned storm-prep
-    // list should not follow you into the next day as if it were live.
+    // list should not follow you into the next day as if it were live. A run
+    // Mike committed to in a Start Day walk is the exception: it stays on the
+    // list until it is done, and costs points each day it is not (game.js).
     for (const run of this.runs.values()) {
-      if (run.kind === 'ondemand' && !run.finishedAt && run.day !== today) {
+      if (run.kind === 'ondemand' && !run.finishedAt && run.day !== today && !this.isCommitted(run.runId)) {
         run.finishedAt = now
         this.#log({ type: 'run_auto_close', runId: run.runId, checklistId: run.checklistId, at: now })
       }

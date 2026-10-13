@@ -26,3 +26,13 @@ test('a Listen note can be upgraded from raw speech to an AI summary', () => {
     at: 1,
   })
 })
+
+test('matchOpenTask finds a task a spoken clause names, and never guesses', async () => {
+  const { matchOpenTask } = await import('../src/tasks.js')
+  const open = [{ id: 'd', label: 'Call the dentist' }, { id: 'c', label: 'Car' }]
+  assert.equal(matchOpenTask('call the dentist', open)?.id, 'd')
+  assert.equal(matchOpenTask('Call the dentist about the crown', open)?.id, 'd')
+  assert.equal(matchOpenTask('call dentist', open), null)
+  assert.equal(matchOpenTask('wash the car today', open), null) // one-word labels need an exact match
+  assert.equal(matchOpenTask('car', open)?.id, 'c')
+})

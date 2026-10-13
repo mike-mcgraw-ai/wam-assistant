@@ -23,7 +23,7 @@ import { Checklists } from '../../server/src/checklists.js'
 import { agenda, planBlock, reach } from '../../server/src/plan.js'
 import boardsCfg from '../../server/src/boards.config.json'
 import checksCfg from '../../server/src/checklists.config.json'
-import { render, type UiState } from '../src/render'
+import { planRows, render, type UiState } from '../src/render'
 import type { CoachMode } from '../src/types'
 import { newGame, serve, tick as pongTick, nudge } from '../src/pong'
 
@@ -437,6 +437,23 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
   add('Laundry — mid wash cycle', render({ ...base, view: { kind: 'checklist', runId: laundry.runId, cursor: 1 } }))
   add('Running order — cursor row 1', render({ ...withPlan, space: 'life', view: { kind: 'plan', cursor: 1 } }))
   add('Running order — cursor row 4', render({ ...withPlan, space: 'life', view: { kind: 'plan', cursor: 4 } }))
+  {
+    // The walk stays reachable all day: the last row of the running order.
+    const lifeRows = planRows({ ...withPlan, space: 'life' })
+    add('Running order — last row, Add to day', render({ ...withPlan, space: 'life', view: { kind: 'plan', cursor: lifeRows.length - 1 } }))
+  }
+  add('Life home — Skip for now armed', render({
+    ...withPlan,
+    space: 'life',
+    armedTaskId: 'skip-day',
+    view: { kind: 'plan', cursor: 2 },
+    plan: {
+      ...withPlan.plan,
+      timeline: [], agenda: [], progress: [], reach: [], busyMs: 0,
+      day: { day: '2026-10-11', startHour: 5, started: false, startedAt: null, checklistIds: [], transcript: '' },
+      morningBrief,
+    },
+  }))
   add('Index — cold start from cache', render({ ...base, fromCache: true }))
   add('Index — server unreachable', render({ ...base, error: 'timeout' }))
 
