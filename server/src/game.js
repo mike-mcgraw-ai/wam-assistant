@@ -19,11 +19,14 @@
  *             run's startIndex on), charged every day until done
  *   task-miss -taskPenalty per committed one-off task still open when a day
  *             ends, every day until done
+ *   eat-out   +underXP / -overPenalty per settled Mon-Sun week of eating out,
+ *             against the weekly target, on the week's Sunday (eatOut.js)
  * A list marked "ignore" in the rules neither earns nor costs anything.
  * Days are the checklists' operational days (shifted by resetHour), so a
  * 1am tick counts toward the day it belongs to, exactly as the lists do.
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { eatOutEntries } from './eatOut.js'
 
 export const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
 
@@ -74,10 +77,12 @@ function dueDailies(templates, config, day) {
  * @param {object[]} [p.commitments] [{ day, runIds, taskIds }] from Start Day
  * @param {object} [p.taskInfo]    taskId -> { label, doneAt }
  * @param {(ts: number) => string} [p.dayKeyOf] instant -> operational day
+ * @param {object} [p.eatOut]      the ledger's weekly eating-out totals
  */
 export function computeGame({
   runs, templates, config, today, historyDays = 60,
   commitments = [], taskInfo = {}, dayKeyOf = ts => new Date(ts).toISOString().slice(0, 10),
+  eatOut = null,
 }) {
   const days = new Map()
   const bucket = day => {
@@ -168,6 +173,14 @@ export function computeGame({
       b.penalty -= commit.taskPenalty
       b.entries.push({ kind: 'task-miss', taskId, label: info.label, xp: -commit.taskPenalty, carried: day > from })
     }
+  }
+
+  // ---- eating out: one result per settled week, on its Sunday -------------
+  for (const { day, ...entry } of eatOutEntries({ eatOut, rule: config.eatOut, today })) {
+    const b = bucket(day)
+    if (entry.xp > 0) b.earned += entry.xp
+    else b.penalty += entry.xp
+    b.entries.push(entry)
   }
 
   // ---- running total, floored at zero -------------------------------------

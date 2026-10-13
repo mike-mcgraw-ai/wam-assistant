@@ -28,3 +28,4 @@ These are the real completion dates of private device builds. The sanitized port
 | v0.22.0 | 2026-10-13 | 0.138.0 | **The morning brief at a glance:** Each source is reduced to the value that changes a decision. |
 | v0.23.0 | 2026-10-13 | 0.139.0 | **A one-glance brief strip:** The pre-Start-Day brief compresses into a single compact strip. |
 | v0.24.0 | 2026-10-13 | 0.140.0 | **Start Day as the day's commitment:** Optional, additive all day, and the definition of what counts as today. |
+| v0.25.0 | 2026-10-13 | 0.141.0 | **A Home that greets before it lists:** Before Start Day, Home is a greeting and one action instead of a dashboard. |

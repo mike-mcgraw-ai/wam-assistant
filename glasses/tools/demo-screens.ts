@@ -310,6 +310,17 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
       morningBrief,
     },
   }))
+  add('Life home — greeting selected', render({
+    ...withPlan,
+    space: 'life',
+    view: { kind: 'plan', cursor: 0 },
+    plan: {
+      ...withPlan.plan,
+      timeline: [], agenda: [], progress: [], reach: [], busyMs: 0,
+      day: { day: '2026-10-11', startHour: 5, started: false, startedAt: null, checklistIds: [], transcript: '' },
+      morningBrief,
+    },
+  }))
   add('Start Day — recording the house walk', render({
     ...withPlan,
     space: 'life',

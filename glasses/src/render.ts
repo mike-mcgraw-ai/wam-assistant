@@ -2,6 +2,7 @@ import { config } from './config'
 import { ALL_CLEAR } from './art'
 import { renderPong, type PongState } from './pong'
 import { renderFontTest } from './fonttest'
+import { measure, USABLE_PX } from './metrics'
 
 /** Injected by vite.config.ts from app.json; falls back when run under Node. */
 const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : 'dev'
@@ -693,8 +694,11 @@ export function clockLine(_state: UiState, now = new Date()): string {
  * stale or cached data, that belongs with the label saying what you are
  * looking at.
  */
-export function spaceLine(state: UiState, selected = false): string {
-  const label = state.space === 'ops' ? 'OPS' : 'LIFE'
+export function spaceLine(state: UiState, selected = false, labelOverride?: string): string {
+  // Before Start Day, Life Home greets instead of naming the space (Mike,
+  // 2026-10-13). Same line in every other way: selectable, opens talk / notes,
+  // carries the connection, mic and game markers.
+  const label = labelOverride ?? (state.space === 'ops' ? 'OPS' : 'LIFE')
   // Selected, the line stops being a header and starts being a button, so it
   // has to say what the click does rather than only what space you are in.
   const point = selected ? '>  ' : '   '
@@ -729,7 +733,15 @@ export function spaceLine(state: UiState, selected = false): string {
   // When the line is the cursor it earns the right-hand slot, so the one thing
   // you can do from here is spelled out instead of guessed at.
   const action = selected ? (state.coachSession?.active ? '   RECORDING' : '   click: talk / notes') : ''
-  return clipToWidth(`${point}${label}${connection}${mic}${game}${action}${ai && !selected ? `   AI: ${ai}` : ''}`)
+  const aiText = ai && !selected ? `   AI: ${ai}` : ''
+  // Selected, the click hint is the point of the line. If the game markers
+  // would push it off the edge (a long label like the morning greeting), the
+  // markers give way for as long as the cursor is here.
+  const full = `${point}${label}${connection}${mic}${game}${action}${aiText}`
+  if (selected && game && measure(full) > USABLE_PX) {
+    return clipToWidth(`${point}${label}${connection}${mic}${action}`)
+  }
+  return clipToWidth(full)
 }
 
 /**
@@ -1131,16 +1143,17 @@ function renderPlan(state: UiState, cursor: number): string {
       summary.line3,
       summary.asOfLabel,
     ].map(line => clipToWidth(line)).filter(Boolean)
+    // No hint row here: the rows say what they do, and the armed Skip asks
+    // its own question. Mike asked for the walk-the-house hint to go.
     return assemble(
       [
         clockLine(state),
-        spaceLine(state, cursor === 0),
+        spaceLine(state, cursor === 0, 'Good morning, Mike.'),
         ...briefLines,
         `${startSelected ? '>' : ' '}+   Start Day`,
         skipSelected && state.armedTaskId === 'skip-day'
           ? '>[?] Skip the walk today?'
           : `${skipSelected ? '>' : ' '}    Skip for now`,
-        planTip(state, rows, cursor),
       ],
       config.maxChars,
       config.maxLines,
