@@ -33,3 +33,4 @@ These are the real completion dates of private device builds. The sanitized port
 | v0.27.0 | 2026-10-13 | 0.147.0 | **Routines that remember partial runs:** A partly completed routine no longer rebuilds itself on the next plan. |
 | v0.28.0 | 2026-10-13 | 0.148.0 | **Closing the feedback loop:** Chat opens at the newest reply, pages stay still while the cursor moves, and saved summaries keep the whole thought. |
 | v0.29.0 | 2026-10-14 | 0.149.0 | **A day you review before you commit:** A spoken Start Day list becomes a proposal with keep/remove before anything lands on Home. |
+| v0.30.0 | 2026-10-14 | 0.150.0 | **Spoken work stops falling through:** Extra recordings merge into the pending review, and a captured note can become a Home task. |

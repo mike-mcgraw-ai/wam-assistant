@@ -1939,6 +1939,55 @@ const server = http.createServer(async (req, res) => {
     return json(res, 405, { error: 'method not allowed' })
   }
 
+  if (req.method === 'POST' && url.pathname === '/note/promote') {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    let body = {}
+    try {
+      const raw = await readBody(req)
+      if (raw) body = JSON.parse(raw)
+    } catch (err) {
+      return json(res, 400, { error: `bad body: ${err.message}` })
+    }
+
+    const subjectId = String(body.subjectId || '')
+    const noteId = String(body.noteId || '')
+    if (body.kind !== 'task' || subjectId !== CAPTURE_TASK_ID || !noteId) {
+      return json(res, 400, { ok: false, error: 'only captured notes can become Home tasks' })
+    }
+    const found = queuedNote('task', subjectId, noteId)
+    if (!found) return json(res, 404, { ok: false, error: 'unknown note' })
+
+    const at = Date.now()
+    const space = cueSpace(body.space)
+    const firstLine = String(found.note.text || '').split('\n').map(line => line.trim()).find(Boolean) || 'Captured task'
+    const label = firstLine.slice(0, 80)
+    const existing = matchOpenTask(label, tasks.list(at).filter(task => task.space === space))
+    const created = existing
+      ? { ok: true, task: existing, existing: true }
+      : tasks.addTask({
+          label,
+          space,
+          window: 'anytime',
+          weight: 'big',
+          needsPlan: soundsLikePlan(label),
+          by: 'notes-review',
+          clientId: `promote:${noteId}`,
+        }, at)
+    if (!created.ok) return json(res, 400, created)
+
+    const attached = tasks.addNote(created.task.id, found.note.text, found.note.by, noteId, at)
+    if (!attached.ok) return json(res, 400, attached)
+    tasks.removeNote(CAPTURE_TASK_ID, noteId)
+    checklists.commitTasks(space, [created.task.id], at)
+    return json(res, 200, {
+      ok: true,
+      task: created.task,
+      day: checklists.dayStatus(space),
+      tasks: tasks.list(at),
+      checklists: checklists.snapshot(at),
+    })
+  }
+
   if (req.method === 'POST' && url.pathname === '/note/delete') {
     if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
     let body = {}

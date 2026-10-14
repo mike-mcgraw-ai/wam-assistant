@@ -40,6 +40,7 @@ import {
   fetchCoachSession,
   fetchPlan,
   fetchSnapshot,
+  promoteNote,
   sendCoachAudio,
   sendAssistantSession,
   startChecklist,
@@ -2111,6 +2112,30 @@ async function activate(): Promise<void> {
         scroll: 0,
       }
       await paint()
+      return
+    }
+
+    if (action === 'make-task') {
+      const key = `${row.subject.kind}:${row.subject.id}:${row.note.id}:${action}`
+      if (state.armedNoteId !== key) {
+        state.armedNoteId = key
+        await paint()
+        return
+      }
+      state.armedNoteId = null
+      const promoted = await promoteNote(
+        row.subject.id,
+        row.note.id,
+        state.space === 'ops' ? 'ops' : 'life',
+      )
+      if (!promoted.ok) {
+        state.error = promoted.error
+        await paint()
+        return
+      }
+      state.error = null
+      await refresh()
+      await openPlan()
       return
     }
 

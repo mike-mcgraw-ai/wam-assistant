@@ -179,6 +179,26 @@ export async function deleteNote(
   }
 }
 
+/** Move a reviewed catch-all note onto Home without losing its recording. */
+export async function promoteNote(
+  subjectId: string,
+  noteId: string,
+  space: 'life' | 'ops' = 'life',
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const res = await fetch(`${config.serverUrl}/note/promote`, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ kind: 'task', subjectId, noteId, space }),
+      signal: AbortSignal.timeout(config.timeoutMs),
+    })
+    const payload = await res.json().catch(() => null)
+    return res.ok ? { ok: true } : { ok: false, error: payload?.error ?? `server ${res.status}` }
+  } catch (err: unknown) {
+    return { ok: false, error: err instanceof Error ? err.message.slice(0, 40) : 'network error' }
+  }
+}
+
 /** Load the original speaker-formatted session behind a Listen-created note. */
 export async function fetchNoteTranscript(noteId: string): Promise<NoteTranscript | null> {
   if (!noteId.endsWith(':note')) return null

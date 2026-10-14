@@ -555,12 +555,13 @@ function renderNotes(state: UiState, cursor: number): string {
   return assemble(lines, config.maxChars, config.maxLines)
 }
 
-export type NoteDetailAction = 'transcript' | 'queue-chatgpt' | 'queue-claude' | 'delete'
+export type NoteDetailAction = 'transcript' | 'make-task' | 'queue-chatgpt' | 'queue-claude' | 'delete'
 
 export function noteDetailActions(_state: UiState, row: NoteRow | undefined): NoteDetailAction[] {
   if (!row) return []
   const actions: NoteDetailAction[] = []
   if (row.note.id.endsWith(':note')) actions.push('transcript')
+  if (row.subject.kind === 'task' && row.subject.id === CAPTURE_TASK_ID) actions.push('make-task')
   actions.push('queue-chatgpt', 'queue-claude')
   if (row.note.at !== 0) actions.push('delete')
   return actions
@@ -586,6 +587,14 @@ function renderNoteDetail(
   actions.forEach((action, index) => {
     const point = index === cursor ? '>' : ' '
     if (action === 'transcript') lines.push(`${point}[=] Full transcript`)
+    else if (action === 'make-task') {
+      const actionKey = `${key}:${action}`
+      lines.push(
+        state.armedNoteId === actionKey
+          ? `${point}[!] Click again: add Home`
+          : `${point}[+] Make Home task`,
+      )
+    }
     else if (action === 'queue-chatgpt') {
       const actionKey = `${key}:${action}`
       lines.push(

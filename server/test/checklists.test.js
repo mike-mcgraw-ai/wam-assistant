@@ -297,6 +297,22 @@ test('Start Day draft recognizes apply and trims spoken task-building instructio
   assert.deepEqual(result.draft.items.map(item => item.label), ['Apply for three jobs'])
 })
 
+test('later Start Day recordings merge into review instead of replacing it', () => {
+  const checklists = new Checklists(
+    {
+      checklists: [{ id: 'dishes', name: 'Dishes', space: 'life', kind: 'ondemand', items: [] }],
+    },
+    { runsPath: null, logPath: null, summaryPath: null },
+  )
+  checklists.draftDay('Call the vet.', 'life', 'first', 1_000)
+  const later = checklists.draftDay('Dishes and call the vet.', 'life', 'second', 2_000)
+
+  assert.equal(later.draft.id, 'first')
+  assert.deepEqual(later.draft.items.map(item => item.label), ['Call the vet', 'Dishes'])
+  assert.match(later.draft.transcript, /Call the vet\.\nDishes and call the vet\./)
+  assert.equal(checklists.dayStatus('life', 2_000).started, false)
+})
+
 test('committed task ids carry across days without duplicating identities', () => {
   const checklists = new Checklists(
     { timezone: 'UTC', resetHour: 0, checklists: [] },

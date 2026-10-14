@@ -444,7 +444,7 @@ export class Checklists {
         note: '',
       })),
       ...unmatched.map((label, index) => ({
-        id: `task:${index}`,
+        id: `task:${sessionId}:${index}`,
         kind: 'task',
         label,
         include: true,
@@ -463,7 +463,33 @@ export class Checklists {
       taskIds: [],
       transcript: '',
     }
-    const draft = { id: sessionId, createdAt: now, transcript, items }
+    const priorDraft = prior.draft
+    const mergedItems = priorDraft ? priorDraft.items.map(item => ({ ...item })) : []
+    for (const item of items) {
+      const existing = mergedItems.find(candidate =>
+        item.kind === 'checklist'
+          ? candidate.kind === 'checklist' && candidate.checklistId === item.checklistId
+          : candidate.kind === 'task' && normalizeMatchText(candidate.label) === normalizeMatchText(item.label),
+      )
+      if (!existing) {
+        mergedItems.push(item)
+        continue
+      }
+      if (item.kind === 'checklist' && (item.startIndex ?? 0) < (existing.startIndex ?? 0)) {
+        existing.startIndex = item.startIndex
+        existing.fromStep = item.fromStep
+      }
+      // Naming it again means it belongs in the latest proposal, even if an
+      // earlier review had temporarily removed it.
+      existing.include = true
+    }
+    const draft = {
+      id: priorDraft?.id ?? sessionId,
+      createdAt: priorDraft?.createdAt ?? now,
+      updatedAt: now,
+      transcript: [priorDraft?.transcript, transcript].filter(Boolean).join('\n').slice(-4_000),
+      items: mergedItems,
+    }
     this.dayStarts.set(key, { ...prior, updatedAt: now, draft })
     this.#log({ type: 'day_draft', day, space, draftId: draft.id, itemCount: items.length, at: now })
     this.#persist()
