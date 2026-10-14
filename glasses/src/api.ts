@@ -9,6 +9,7 @@ import type {
   CoachMode,
   CoachSessionResponse,
   CoachSessionWriteResponse,
+  DayDraft,
   NoteTranscript,
   Snapshot,
 } from './types'
@@ -565,4 +566,26 @@ export async function fetchSessionSummary(
 /** "Skip for now" on the Start Day walk: remembered for today, not a start. */
 export async function skipDay(space: 'life' | 'ops' = 'life') {
   return post('/day/skip', { space })
+}
+
+/** Review actions for the durable Start Day proposal. */
+export async function updateDayDraft(
+  action: 'toggle' | 'discard' | 'commit',
+  space: 'life' | 'ops' = 'life',
+  itemId?: string,
+  include?: boolean,
+): Promise<{ ok: true; draft?: DayDraft } | { ok: false; error: string }> {
+  try {
+    const res = await fetch(`${config.serverUrl}/day/draft`, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ action, space, itemId, include }),
+      signal: AbortSignal.timeout(config.timeoutMs),
+    })
+    const payload = await res.json().catch(() => null)
+    if (!res.ok) return { ok: false, error: payload?.error ?? `server ${res.status}` }
+    return { ok: true, ...(payload?.draft ? { draft: payload.draft as DayDraft } : {}) }
+  } catch (err: unknown) {
+    return { ok: false, error: err instanceof Error ? err.message.slice(0, 40) : 'network error' }
+  }
 }

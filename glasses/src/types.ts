@@ -343,6 +343,24 @@ export interface MorningBrief {
   sources: Record<string, MorningBriefSource>
 }
 
+export interface DayDraftItem {
+  id: string
+  kind: 'checklist' | 'task'
+  label: string
+  include: boolean
+  checklistId?: string
+  startIndex?: number
+  fromStep?: string | null
+  note?: string
+}
+
+export interface DayDraft {
+  id: string
+  createdAt: number
+  transcript: string
+  items: DayDraftItem[]
+}
+
 export interface BlockPlan {
   minutes: number
   budgetMs: number
@@ -362,10 +380,12 @@ export interface BlockPlan {
     skippedAt?: number | null
     startedAt: number | null
     checklistIds: string[]
-    /** Exact runs and one-off tasks committed by today's Start Day walks. */
+    /** Today's runs plus every unfinished one-off committed by any Start Day walk. */
     runIds?: string[]
     taskIds?: string[]
     transcript: string
+    /** A spoken Start Day proposal waiting for explicit review and commit. */
+    draft?: DayDraft
   } | null
   morningBrief?: MorningBrief | null
 }
@@ -482,6 +502,7 @@ export type CoachSessionWriteResponse =
           error?: string
           checklistIds?: string[]
           matched?: Array<{ id: string; name: string }>
+          draft?: DayDraft
         }
       } | null
     }

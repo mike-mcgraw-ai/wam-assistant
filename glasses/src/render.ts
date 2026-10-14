@@ -58,7 +58,7 @@ export type View =
   | { kind: 'checklist'; runId: string; cursor: number }
   | { kind: 'picker'; cursor: number }
   | { kind: 'plan'; cursor: number }
-  | { kind: 'daystart'; phase: 'recording' | 'reviewing' | 'failed'; scroll?: number; message?: string }
+  | { kind: 'daystart'; phase: 'recording' | 'reviewing' | 'draft' | 'failed'; scroll?: number; cursor?: number; message?: string }
   | { kind: 'chores'; cursor: number }
   | { kind: 'notes'; cursor: number }
   | { kind: 'capture'; cursor: number }
@@ -273,7 +273,15 @@ export function planRows(state: UiState): PlanRow[] {
   // to carry on the running order: it is not a thing to do, it never
   // completes, and its whole contents are one click away behind the LIFE line
   // now. It stays in `plan.tasks` so the Notes screen can still read it.
+  const dailyStepKeys = new Set(
+    (state.snapshot?.checklists?.active ?? [])
+      .filter(run => run.kind === 'daily' && inSpace(run.space, state.space))
+      .flatMap(run => run.items.map(item => `${run.checklistId}:${item.id}`)),
+  )
   const agenda: PlanRow[] = plan.agenda
+    // Daily steps already have a dedicated top-of-Home lane. Letting the
+    // scheduler draw them again is how Shower appeared at both ends.
+    .filter(row => row.kind === 'gap' || !dailyStepKeys.has(`${row.choreId}:${row.stepId}`))
     .filter(row => row.kind !== 'done' || !state.hiddenDone.has(`${row.runId}:${row.stepId}`))
     .map(row => ({ kind: 'agenda', row }))
 
@@ -1210,7 +1218,7 @@ function renderPlan(state: UiState, cursor: number): string {
         clockLine(state),
         spaceLine(state, cursor === 0, 'Good morning, Mike.'),
         ...briefLines,
-        `${startSelected ? '>' : ' '}+   Start Day`,
+        `${startSelected ? '>' : ' '}+   ${plan.day?.draft ? 'Review Day' : 'Start Day'}`,
         skipSelected && state.armedTaskId === 'skip-day'
           ? '>[?] Skip the walk today?'
           : `${skipSelected ? '>' : ' '}    Skip for now`,
@@ -1260,7 +1268,7 @@ function renderPlan(state: UiState, cursor: number): string {
     if (row.kind === 'chores') {
       lines.push(ruleCentred('Chores', i === bodyCursor && cursor > 0))
     } else if (row.kind === 'start-day') {
-      lines.push(clip(`${point}+   ${state.plan?.day?.started ? 'Add to day' : 'Start Day'}`, LINE_CHARS))
+      lines.push(clip(`${point}+   ${state.plan?.day?.draft ? 'Review Day' : state.plan?.day?.started ? 'Add to day' : 'Start Day'}`, LINE_CHARS))
     } else if (row.kind === 'daily') {
       const selected = i === bodyCursor && cursor > 0
       if (selected && state.armedTaskId === `${row.runId}:${row.item.id}`) {
@@ -1298,10 +1306,42 @@ function renderPlan(state: UiState, cursor: number): string {
 
 function renderDayStart(
   state: UiState,
-  phase: 'recording' | 'reviewing' | 'failed',
+  phase: 'recording' | 'reviewing' | 'draft' | 'failed',
   scrollBack = 0,
   message = '',
+  cursor = 0,
 ): string {
+  if (phase === 'draft') {
+    const draft = state.plan?.day?.draft
+    const items = draft?.items ?? []
+    const rows = [
+      ...items.map(item => `${item.include === false ? '[ ]' : '[x]'} ${item.label}${item.fromStep ? ` / ${item.fromStep}` : ''}`),
+      'Build again',
+      'Use this list',
+    ]
+    const selected = Math.max(0, Math.min(rows.length - 1, cursor))
+    const room = Math.max(1, config.maxLines - 3)
+    const start = Math.max(0, Math.min(selected, rows.length - room))
+    const shown = rows.slice(start, start + room).map((line, index) => {
+      const rowIndex = start + index
+      const armed =
+        (rowIndex === items.length && state.armedTaskId === 'day-draft-restart') ||
+        (rowIndex === items.length + 1 && state.armedTaskId === 'day-draft-commit')
+      return clipToWidth(`${rowIndex === selected ? '>' : ' '}${armed ? '[?] ' : ''}${line}`)
+    })
+    const kept = items.filter(item => item.include !== false).length
+    return assemble(
+      [
+        clockLine(state),
+        `REVIEW TODAY  ${kept}/${items.length} kept`,
+        ...shown,
+        selected < items.length ? 'click to keep / remove' : 'click twice to confirm',
+      ],
+      config.maxChars,
+      config.maxLines,
+    )
+  }
+
   const heard = (state.coachSession?.recentSegments ?? [])
     .flatMap(segment => wrap(`> ${segment.text}`, LINE_CHARS))
   const footer = phase === 'recording'
@@ -1915,7 +1955,7 @@ function renderView(state: UiState): string {
     case 'plan':
       return renderPlan(state, state.view.cursor)
     case 'daystart':
-      return renderDayStart(state, state.view.phase, state.view.scroll ?? 0, state.view.message)
+      return renderDayStart(state, state.view.phase, state.view.scroll ?? 0, state.view.message, state.view.cursor ?? 0)
     case 'cue':
       return renderCue(state, state.view.scroll ?? 0)
     case 'assistant':

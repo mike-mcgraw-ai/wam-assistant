@@ -419,7 +419,19 @@ function withDoneInline(rows, done) {
 }
 
 function buildPlan(minutes, requestedIds, space) {
-  const day = space ? checklists.dayStatus(space) : null
+  const rawDay = space ? checklists.dayStatus(space) : null
+  const openTaskIds = space
+    ? new Set(taskRows(space).map(task => task.taskId))
+    : new Set()
+  const carriedTaskIds = space
+    ? checklists.committedTaskIds(space).filter(id => openTaskIds.has(id))
+    : []
+  // A committed one-off remains on Home until it is done, even after the
+  // operational day changes. The persisted day record stays untouched; this
+  // merged view is only the plan contract consumed by the glasses.
+  const day = rawDay
+    ? { ...rawDay, taskIds: [...new Set([...(rawDay.taskIds ?? []), ...carriedTaskIds])] }
+    : null
   let selectedIds = requestedIds
   if (space === 'life' && requestedIds.length === 0) {
     const activeIds = checklists.snapshot().active
@@ -942,28 +954,10 @@ function routeCoachSession(session, at = Date.now()) {
   const space = cueSpace(session.space)
 
   if (session.context?.taskId === '__day_start__') {
-    const result = checklists.startDay(rawText, space, at)
-    if (result.ok) {
-      const open = tasks.list(at).filter(t => t.space === space)
-      result.tasks = result.unmatched.map((label, index) => {
-        const existing = matchOpenTask(label, open)
-        if (existing) return { ok: true, task: existing, existing: true }
-        return tasks.addTask({
-          label,
-          space,
-          window: 'anytime',
-          weight: 'big',
-          needsPlan: soundsLikePlan(label),
-          firstNote: label,
-          by: 'start-day',
-          clientId: `${session.id}:day-task:${index}`,
-        }, at)
-      }).filter(created => created.ok).map(created => created.task)
-      // Everything named in the walk is committed: it stays on the list until
-      // done and costs points each day it is not (game.js).
-      checklists.commitTasks(space, result.tasks.map(t => t.id), at)
-    }
-    return { kind: 'day-start', result }
+    // Ending the recording creates a durable proposal only. Nothing reaches
+    // the real list until the wearer reviews it and confirms Use this list.
+    const result = checklists.draftDay(rawText, space, session.id, at)
+    return { kind: 'day-draft', result }
   }
 
   // Classification happens once, after the complete recording exists. A
@@ -2256,6 +2250,52 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ---- Start Day: skip for now ------------------------------------------
+  if (req.method === 'POST' && url.pathname === '/day/draft') {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    let body = {}
+    try { body = JSON.parse((await readBody(req)) || '{}') } catch {}
+    const space = body.space === 'ops' ? 'ops' : 'life'
+    let result
+
+    if (body.action === 'stage') {
+      result = checklists.draftDay(String(body.transcript || ''), space, String(body.sessionId || crypto.randomUUID()))
+    } else if (body.action === 'toggle') {
+      result = checklists.setDayDraftItem(space, String(body.itemId || ''), body.include !== false)
+    } else if (body.action === 'discard') {
+      result = checklists.discardDayDraft(space)
+    } else if (body.action === 'commit') {
+      result = checklists.commitDayDraft(space)
+      if (result.ok) {
+        const open = tasks.list().filter(task => task.space === space)
+        const created = result.tasks.map((item, index) => {
+          const existing = matchOpenTask(item.label, open)
+          if (existing) return { ok: true, task: existing, existing: true }
+          return tasks.addTask({
+            label: item.label,
+            space,
+            window: 'anytime',
+            weight: 'big',
+            needsPlan: soundsLikePlan(item.label),
+            firstNote: item.note || item.label,
+            by: 'start-day',
+            clientId: `${result.draftId}:day-task:${item.id || index}`,
+          })
+        }).filter(createdTask => createdTask.ok).map(createdTask => createdTask.task)
+        checklists.commitTasks(space, created.map(task => task.id))
+        result.createdTasks = created
+      }
+    } else {
+      result = { ok: false, error: 'unknown draft action' }
+    }
+
+    if (!result.ok) return json(res, 400, result)
+    return json(res, 200, {
+      ...result,
+      day: checklists.dayStatus(space),
+      checklists: checklists.snapshot(),
+    })
+  }
+
   if (req.method === 'POST' && url.pathname === '/day/skip') {
     if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
     let body = {}

@@ -258,6 +258,57 @@ test('reviewed Start Day tasks can replace stale commitments', () => {
   assert.deepEqual(checklists.dayStatus('life', 3_000).taskIds, ['call-the-vet'])
 })
 
+test('Start Day draft changes nothing until reviewed, then commits only kept rows', () => {
+  const checklists = new Checklists(
+    {
+      checklists: [{
+        id: 'laundry', name: 'Laundry', space: 'life', kind: 'ondemand',
+        items: [{ id: 'load', label: 'Load washer' }],
+      }],
+    },
+    { runsPath: null, logPath: null, summaryPath: null },
+  )
+
+  const staged = checklists.draftDay('Do laundry and call the vet.', 'life', 'session-1', 1_000)
+  assert.equal(staged.ok, true)
+  assert.equal(checklists.dayStatus('life', 1_000).started, false)
+  assert.deepEqual(checklists.snapshot(1_000).active, [])
+  assert.deepEqual(staged.draft.items.map(item => item.label), ['Laundry', 'Call the vet'])
+
+  checklists.setDayDraftItem('life', 'checklist:laundry', false, 2_000)
+  const committed = checklists.commitDayDraft('life', 3_000)
+  assert.equal(committed.ok, true)
+  assert.deepEqual(committed.checklistIds, [])
+  assert.deepEqual(committed.tasks.map(item => item.label), ['Call the vet'])
+  assert.equal(checklists.dayStatus('life', 3_000).draft, undefined)
+})
+
+test('Start Day draft recognizes apply and trims spoken task-building instructions', () => {
+  const checklists = new Checklists(
+    { checklists: [] },
+    { runsPath: null, logPath: null, summaryPath: null },
+  )
+  const result = checklists.draftDay(
+    'Apply for three jobs make make that a task when I go into it it has three separate jobs.',
+    'life',
+    'session-2',
+    1_000,
+  )
+  assert.deepEqual(result.draft.items.map(item => item.label), ['Apply for three jobs'])
+})
+
+test('committed task ids carry across days without duplicating identities', () => {
+  const checklists = new Checklists(
+    { timezone: 'UTC', resetHour: 0, checklists: [] },
+    { runsPath: null, logPath: null, summaryPath: null },
+  )
+  checklists.startDay('Call the vet', 'life', Date.UTC(2026, 9, 13, 12))
+  checklists.commitTasks('life', ['call-the-vet'], Date.UTC(2026, 9, 13, 12))
+  checklists.startDay('Text my doctor', 'life', Date.UTC(2026, 9, 14, 12))
+  checklists.commitTasks('life', ['call-the-vet', 'text-my-doctor'], Date.UTC(2026, 9, 14, 12))
+  assert.deepEqual(checklists.committedTaskIds('life'), ['call-the-vet', 'text-my-doctor'])
+})
+
 test('overnight: a committed list stays on the list, an uncommitted one closes', () => {
   const checklists = new Checklists(
     {

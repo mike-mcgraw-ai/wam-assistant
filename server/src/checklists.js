@@ -31,6 +31,7 @@ function cleanTaskClause(value) {
     .replace(/^(?:(?:i|we)\s+(?:need to|want to|have to|got to|gotta|should|must)\s+)/i, '')
     .replace(/^(?:need|remember)\s+to\s+/i, '')
     .replace(/^(?:add|put)\s+/i, '')
+    .replace(/\s+(?:make\s+){1,2}(?:that|it)\s+(?:a\s+)?task\b.*$/i, '')
     .replace(/\s+(?:to|on)\s+(?:my|the)\s+(?:list|plan)$/i, '')
     .replace(/\s+/g, ' ')
     .trim()
@@ -39,6 +40,7 @@ function cleanTaskClause(value) {
 }
 
 const ACTION_WORDS = new Set([
+  'apply',
   'answer',
   'book',
   'bring',
@@ -62,6 +64,7 @@ const ACTION_WORDS = new Set([
   'message',
   'move',
   'order',
+  'organize',
   'pack',
   'pay',
   'pick',
@@ -351,6 +354,7 @@ export class Checklists {
       runIds: Array.isArray(saved?.runIds) ? saved.runIds : [],
       taskIds: Array.isArray(saved?.taskIds) ? saved.taskIds : [],
       transcript: saved?.transcript ?? '',
+      ...(saved?.draft ? { draft: saved.draft } : {}),
     }
   }
 
@@ -421,6 +425,116 @@ export class Checklists {
     }
 
     return { transcript, matches: [...byId.values()], unmatched }
+  }
+
+  /** Stage a spoken walk for review without changing any checklist or task. */
+  draftDay(text, space = 'life', sessionId = randomUUID(), now = Date.now()) {
+    const { transcript, matches, unmatched } = this.dayIntent(text, space)
+    if (!transcript) return { ok: false, error: 'nothing heard' }
+
+    const items = [
+      ...matches.map(({ template, startIndex }) => ({
+        id: `checklist:${template.id}`,
+        kind: 'checklist',
+        label: template.name,
+        checklistId: template.id,
+        startIndex,
+        fromStep: template.items[startIndex]?.label ?? null,
+        include: true,
+        note: '',
+      })),
+      ...unmatched.map((label, index) => ({
+        id: `task:${index}`,
+        kind: 'task',
+        label,
+        include: true,
+        note: '',
+      })),
+    ]
+    const day = this.dayKey(now)
+    const key = `${space}:${day}`
+    const prior = this.dayStarts.get(key) ?? {
+      day,
+      space,
+      startedAt: null,
+      skippedAt: null,
+      checklistIds: [],
+      runIds: [],
+      taskIds: [],
+      transcript: '',
+    }
+    const draft = { id: sessionId, createdAt: now, transcript, items }
+    this.dayStarts.set(key, { ...prior, updatedAt: now, draft })
+    this.#log({ type: 'day_draft', day, space, draftId: draft.id, itemCount: items.length, at: now })
+    this.#persist()
+    return { ok: true, draft }
+  }
+
+  /** Keep or remove one proposed row while reviewing a Start Day draft. */
+  setDayDraftItem(space = 'life', itemId, include, now = Date.now()) {
+    const key = `${space}:${this.dayKey(now)}`
+    const saved = this.dayStarts.get(key)
+    const item = saved?.draft?.items?.find(row => row.id === itemId)
+    if (!item) return { ok: false, error: 'draft item not found' }
+    item.include = include !== false
+    saved.updatedAt = now
+    this.#persist()
+    return { ok: true, draft: saved.draft }
+  }
+
+  /** Throw away only the proposal; no real work was changed yet. */
+  discardDayDraft(space = 'life', now = Date.now()) {
+    const key = `${space}:${this.dayKey(now)}`
+    const saved = this.dayStarts.get(key)
+    if (!saved?.draft) return { ok: true }
+    delete saved.draft
+    saved.updatedAt = now
+    this.#log({ type: 'day_draft_discard', day: saved.day, space, at: now })
+    this.#persist()
+    return { ok: true }
+  }
+
+  /** Commit reviewed checklist rows; the server creates the returned task rows. */
+  commitDayDraft(space = 'life', now = Date.now()) {
+    const day = this.dayKey(now)
+    const key = `${space}:${day}`
+    const prior = this.dayStarts.get(key)
+    const draft = prior?.draft
+    if (!draft) return { ok: false, error: 'no Start Day draft to use' }
+
+    const selected = draft.items.filter(item => item.include !== false)
+    const checklistIds = []
+    const runIds = []
+    for (const item of selected) {
+      if (item.kind !== 'checklist') continue
+      const started = this.start(item.checklistId, now, { startIndex: item.startIndex ?? 0 })
+      if (!started.ok) continue
+      checklistIds.push(item.checklistId)
+      runIds.push(started.run.runId)
+    }
+
+    const { draft: _discarded, ...base } = prior
+    const saved = {
+      ...base,
+      day,
+      space,
+      startedAt: prior.startedAt ?? now,
+      skippedAt: null,
+      updatedAt: now,
+      checklistIds: [...new Set([...(prior.checklistIds ?? []), ...checklistIds])],
+      runIds: [...new Set([...(prior.runIds ?? []), ...runIds])],
+      taskIds: Array.isArray(prior.taskIds) ? prior.taskIds : [],
+      transcript: [prior.transcript, draft.transcript].filter(Boolean).join('\n').slice(-4_000),
+    }
+    this.dayStarts.set(key, saved)
+    this.#log({ type: 'day_draft_commit', day, space, draftId: draft.id, at: now })
+    this.#persist()
+    return {
+      ok: true,
+      draftId: draft.id,
+      tasks: selected.filter(item => item.kind === 'task'),
+      ...saved,
+    }
   }
 
   /** Match one complete spoken walk-through to presets and add it to today. */
@@ -504,6 +618,13 @@ export class Checklists {
       .filter(d => d?.day && (d.runIds?.length || d.taskIds?.length))
       .map(d => ({ day: d.day, space: d.space, runIds: d.runIds ?? [], taskIds: d.taskIds ?? [] }))
       .sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0))
+  }
+
+  /** One-off commitments from every day; unfinished filtering happens in Tasks. */
+  committedTaskIds(space = 'life') {
+    return [...new Set(this.commitments()
+      .filter(commitment => commitment.space === space)
+      .flatMap(commitment => commitment.taskIds))]
   }
 
   /** Was this run committed on any day? Committed runs carry over. */

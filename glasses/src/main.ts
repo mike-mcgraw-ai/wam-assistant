@@ -46,6 +46,7 @@ import {
   finishChecklist,
   startCoachSession,
   skipDay,
+  updateDayDraft,
 } from './api'
 import { loadPlan, loadSnapshot, savePlan, saveSnapshot } from './storage'
 import {
@@ -1064,6 +1065,12 @@ async function beginListening(): Promise<void> {
 }
 
 async function startDayCapture(): Promise<void> {
+  if (state.plan?.day?.draft) {
+    state.view = { kind: 'daystart', phase: 'draft', cursor: 0 }
+    state.armedTaskId = null
+    await paint()
+    return
+  }
   await refreshCoachSession()
   if (state.coachSession?.active) {
     state.error = 'Stop the current recording first'
@@ -1111,7 +1118,7 @@ async function finishDayCapture(): Promise<void> {
     await paint()
     return
   }
-  if (stopped.note?.kind !== 'day-start' || !stopped.note.result.ok) {
+  if (stopped.note?.kind !== 'day-draft' || !stopped.note.result.ok) {
     state.view = {
       kind: 'daystart',
       phase: 'failed',
@@ -1121,7 +1128,12 @@ async function finishDayCapture(): Promise<void> {
     return
   }
   await refresh()
-  await openPlan()
+  const plan = await fetchPlan(state.space)
+  if (plan.ok) state.plan = plan.plan
+  else state.planError = plan.error
+  state.view = { kind: 'daystart', phase: 'draft', cursor: 0 }
+  state.armedTaskId = null
+  await paint()
 }
 
 async function refreshAssistant(provider: AssistantProvider): Promise<void> {
@@ -1513,9 +1525,10 @@ function followCursor(): void {
 
   const size = view.kind === 'plan' ? config.rowsPerPage - 1 : config.rowsPerPage
   const total = rowCount()
+  const cursor = view.cursor ?? 0
 
   const maxStart = Math.max(0, Math.floor(Math.max(0, total - 1) / size) * size)
-  state.scrollTop = Math.max(0, Math.min(Math.floor(view.cursor / size) * size, maxStart))
+  state.scrollTop = Math.max(0, Math.min(Math.floor(cursor / size) * size, maxStart))
 }
 
 /** Record one completed-row page-away and retire it after the second. */
@@ -1549,6 +1562,12 @@ function move(delta: number): void {
   if (view.kind === 'timerReset') return
 
   if (view.kind === 'daystart') {
+    if (view.phase === 'draft') {
+      const count = (state.plan?.day?.draft?.items.length ?? 0) + 2
+      view.cursor = Math.max(0, Math.min(count - 1, (view.cursor ?? 0) + delta))
+      state.armedTaskId = null
+      return
+    }
     const max = transcriptScrollMax(state)
     view.scroll = Math.max(0, Math.min(max, (view.scroll ?? 0) - delta))
     return
@@ -1924,7 +1943,49 @@ async function activate(): Promise<void> {
   if (view.kind === 'daystart') {
     if (view.phase === 'recording') await reviewDayCapture()
     else if (view.phase === 'reviewing') await finishDayCapture()
-    else await startDayCapture()
+    else if (view.phase === 'draft') {
+      const items = state.plan?.day?.draft?.items ?? []
+      const cursor = Math.max(0, Math.min(items.length + 1, view.cursor ?? 0))
+      const space = state.space === 'ops' ? 'ops' : 'life'
+      if (cursor < items.length) {
+        const item = items[cursor]
+        const result = await updateDayDraft('toggle', space, item.id, item.include === false)
+        if (!result.ok) state.error = result.error
+        else if (state.plan?.day && result.draft) state.plan.day.draft = result.draft
+        state.armedTaskId = null
+        await paint()
+        return
+      }
+      if (cursor === items.length) {
+        const gate = confirmGate('day-draft-restart')
+        if (gate !== 'confirmed') {
+          if (gate === 'armed') await paint()
+          return
+        }
+        const result = await updateDayDraft('discard', space)
+        if (!result.ok) {
+          state.error = result.error
+          await paint()
+          return
+        }
+        if (state.plan?.day) delete state.plan.day.draft
+        await startDayCapture()
+        return
+      }
+      const gate = confirmGate('day-draft-commit')
+      if (gate !== 'confirmed') {
+        if (gate === 'armed') await paint()
+        return
+      }
+      const result = await updateDayDraft('commit', space)
+      if (!result.ok) {
+        state.error = result.error
+        await paint()
+        return
+      }
+      await refresh()
+      await openPlan()
+    } else await startDayCapture()
     return
   }
 
@@ -2446,6 +2507,8 @@ async function back(): Promise<void> {
       await finishDayCapture()
     } else if (state.view.phase === 'reviewing') {
       await finishDayCapture()
+    } else if (state.view.phase === 'draft') {
+      await openPlan()
     } else {
       await openPlan()
     }
