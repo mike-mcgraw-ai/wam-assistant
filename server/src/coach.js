@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync } from 'node:fs'
+import { keepPastExpiry, RELEASE_RETENTION_MS, wordCount } from './retention.js'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { displayTranscriptSegments } from './transcript.js'
@@ -331,8 +332,14 @@ export class Coach {
     if (!this.storePath) return
     try {
       mkdirSync(dirname(this.storePath), { recursive: true })
-      const cutoff = Date.now() - 14 * 86400 * 1000
-      const sessions = [...this.sessions.values()].filter(session => !session.endedAt || session.updatedAt > cutoff)
+      // Ended sessions expire after releaseDays, except that dev retention
+      // keeps any with real speech in it (retention.config.json).
+      const cutoff = Date.now() - RELEASE_RETENTION_MS
+      const sessions = [...this.sessions.values()].filter(session =>
+        !session.endedAt || session.updatedAt > cutoff || keepPastExpiry({
+          words: wordCount((session.segments || []).map(segment => segment.text)),
+          seconds: (session.endedAt - session.startedAt) / 1000,
+        }))
       writeFileSync(
         this.storePath,
         JSON.stringify(

@@ -1,6 +1,6 @@
 # Device Build History
 
-WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 30 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
+WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 31 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
 
 | Face build | Attribution / status | Change |
 |---|---|---|
@@ -145,3 +145,6 @@ WAM used rapid numbered device builds for hardware testing. These entries are do
 | v0.148.0 | Codex (ready for EvenHub package) | Finish the unresolved glasses feedback from the latest Solo Notes and chat sessions. |
 | v0.149.0 | Codex (ready for EvenHub package) | Make the daily build reviewable and keep unfinished commitments visible. |
 | v0.150.0 | Codex (ready for EvenHub package) | Stop spoken work from falling between Notes, Start Day review, and Home. |
+| v0.151.0 | Codex (phase 1 built; not packed) | Make existing spoken work visible for review on the phone without changing the source stores. |
+| v0.152.0 | Codex (phase 2 source checkpoint; not packed) | Add review corrections, guarded classification and state changes, explicit Task/Home promotion, and capture ingestion. |
+| v0.153.0 | Claude (ready for EvenHub package) | Show when a confirming click will count. |

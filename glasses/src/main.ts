@@ -431,7 +431,7 @@ async function paintNow(): Promise<void> {
     // Rendered once, used twice: the glasses and the mirror must never be
     // able to show different frames.
     const fastText = !asleep && usesFastTextScreen()
-    const content = asleep ? SLEEP_CONTENT : renderForNativeText()
+    const content = asleep ? SLEEP_CONTENT : withArmCountdown(renderForNativeText())
     // The mirror shows what the glasses show, sleep included — an iPad still
     // lit while the glasses are dark is two devices disagreeing about state.
     mirror(content)
@@ -571,7 +571,12 @@ function clearArmedConfirms(): void {
  *   itself), so a stray tap later only re-arms;
  * - after any confirmed action, every click is ignored for AFTER_ACTION_MS.
  */
-const CONFIRM_MIN_MS = 700
+// The bounce window is shown, not hidden: the armed prompt counts 3, 2, 1
+// and only then says "Click again" (Mike, 2026-10-09: he could not tell when
+// the second click would count). Quick on purpose — 0.9 s in all.
+const ARM_STEPS = 3
+const ARM_STEP_MS = 300
+const CONFIRM_MIN_MS = ARM_STEPS * ARM_STEP_MS
 const CONFIRM_MAX_MS = 6_000
 const AFTER_ACTION_MS = 2_000
 let armedAt = 0
@@ -597,12 +602,26 @@ function confirmGate(key: string): Gate {
   armedAt = now
   window.clearTimeout(armExpiry)
   const stamp = now
+  for (let step = 1; step <= ARM_STEPS; step += 1) {
+    window.setTimeout(() => {
+      if (state.armedTaskId === key && armedAt === stamp) void paint()
+    }, step * ARM_STEP_MS)
+  }
   armExpiry = window.setTimeout(() => {
     if (state.armedTaskId !== key || armedAt !== stamp) return
     state.armedTaskId = null
     void paint()
   }, CONFIRM_MAX_MS)
   return 'armed'
+}
+
+/** While a click would still be ignored, "Click again" reads as a countdown. */
+function withArmCountdown(content: string): string {
+  if (!state.armedTaskId) return content
+  const age = Date.now() - armedAt
+  if (age >= CONFIRM_MIN_MS) return content
+  const left = ARM_STEPS - Math.floor(age / ARM_STEP_MS)
+  return content.replace(/Click again/g, `Wait ${left}`).replace(/click again/g, `wait ${left}`)
 }
 
 async function sleepDisplay(): Promise<void> {

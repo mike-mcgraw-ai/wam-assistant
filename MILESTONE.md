@@ -1,8 +1,8 @@
-# A day you review before you commit
+# Visible confirm timing
 
-- Public version: `v0.29.0`
-- Face build: `0.149.0`
-- Originally completed: `2026-10-14`
+- Public version: `v0.31.0`
+- Face build: `0.153.0`
+- Originally completed: `2026-10-15`
 - Sanitized and published: `2026-10-17`
 
-A spoken Start Day list becomes a proposal with keep/remove before anything lands on Home.
+A 3-2-1 countdown shows when a confirming click will count, and the progress bar becomes one solid line.

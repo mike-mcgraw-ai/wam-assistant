@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { join } from 'node:path'
+import { keepPastExpiry, wordCount } from './retention.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const DEFAULT_RETENTION_MS = 14 * DAY_MS
@@ -242,14 +243,24 @@ export class Recordings {
       .map(recording => this.#public(recording))
   }
 
+  /** Spoken recordings outlive their expiry date in dev retention mode. */
+  #retained(recording) {
+    if (recording.kept) return false
+    const words = wordCount(this.transcript(recording.sessionId).map(segment => segment.text))
+    return keepPastExpiry({ words, seconds: recording.durationSeconds })
+  }
+
   #public(recording) {
+    const retained = this.#retained(recording)
     return {
       sessionId: recording.sessionId,
       createdAt: recording.createdAt,
       updatedAt: recording.updatedAt,
       endedAt: recording.endedAt,
       kept: recording.kept,
-      expiresAt: recording.expiresAt,
+      // Truthful: a recording dev retention protects does not expire.
+      expiresAt: retained ? null : recording.expiresAt,
+      retained,
       bytes: recording.bytes,
       durationSeconds: recording.durationSeconds,
       chunkCount: recording.chunkCount,
@@ -264,6 +275,7 @@ export class Recordings {
       if (!entry.isDirectory()) continue
       const recording = this.#read(entry.name)
       if (!recording || recording.kept || !recording.expiresAt || recording.expiresAt > now) continue
+      if (this.#retained(recording)) continue
       rmSync(join(this.rootPath, entry.name), { recursive: true, force: true })
       removed += 1
     }

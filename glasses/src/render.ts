@@ -2,7 +2,7 @@ import { config } from './config'
 import { ALL_CLEAR } from './art'
 import { renderPong, type PongState } from './pong'
 import { renderFontTest } from './fonttest'
-import { measure, USABLE_PX } from './metrics'
+import { DISPLAY_PX, measure, USABLE_PX, WIDTH } from './metrics'
 
 /** Injected by vite.config.ts from app.json; falls back when run under Node. */
 const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : 'dev'
@@ -779,12 +779,13 @@ export function spaceLine(state: UiState, selected = false, labelOverride?: stri
         : '  MIC?'
     : ''
 
-  const game = gameText(state)
   const ai = aiWidgetText(state)
   // When the line is the cursor it earns the right-hand slot, so the one thing
   // you can do from here is spelled out instead of guessed at.
   const action = selected ? (state.coachSession?.active ? '   RECORDING' : '   click: talk / notes') : ''
   const aiText = ai && !selected ? `   AI: ${ai}` : ''
+  // The game bar takes whatever room the rest of the line leaves.
+  const game = gameText(state, USABLE_PX - measure(`${point}${label}${connection}${mic}${action}${aiText}`))
   // Selected, the click hint is the point of the line. If the game markers
   // would push it off the edge (a long label like the morning greeting), the
   // markers give way for as long as the cursor is here.
@@ -796,23 +797,40 @@ export function spaceLine(state: UiState, selected = false, labelOverride?: stri
 }
 
 /**
- * The life game on the space line: "  Lv4 ####----  +40  3d".
+ * The life game on the space line: "  Lv4 ━━━━━━━──────── 45%  +40  3d".
  *
  * It rides on a line that is already there rather than costing one of the nine
- * rows. ASCII only, like MIC*, so the firmware cannot drop it: the bar is eight
- * cells of progress into the current level, +N is XP earned today (shown only
- * once there is some), Nd is the streak (only while there is one). Everything
- * is computed on the hub by fixed rules; this only prints it.
+ * rows. Mike (2026-10-15) wants the bar big — one line across up to half the
+ * screen — and not drawn with #/-. So progress is a heavy line running into a
+ * light one, and it grows to fill the room the line has left, capped at half
+ * the screen: full length beside LIFE, shorter beside the morning greeting.
+ *
+ * Box-drawing glyphs are not in font.json and the firmware drops what it
+ * lacks, so the level and percentage stay in ASCII beside the bar: if the line
+ * fails to draw, the number still says where he is. The bar is sized as if
+ * each glyph were as wide as `m`, so an unmeasured glyph can only make it
+ * shorter than planned, never push the line into a wrap. +N is XP earned
+ * today, Nd the streak. Everything is computed on the hub by fixed rules.
  */
-export function gameText(state: UiState): string {
+const BAR_HEAVY = '\u2501'
+const BAR_LIGHT = '\u2500'
+const BAR_MAX_PX = DISPLAY_PX / 2 - 48 // half the visible line, after Lv/%
+const BAR_MIN_CELLS = 4
+
+export function gameText(state: UiState, roomPx = USABLE_PX): string {
   const g = state.snapshot?.game
   if (!g) return ''
-  const cells = 8
-  const filled = Math.max(0, Math.min(cells, Math.floor((g.into / Math.max(1, g.size)) * cells)))
-  const bar = '#'.repeat(filled) + '-'.repeat(cells - filled)
+  const fraction = Math.max(0, Math.min(1, g.into / Math.max(1, g.size)))
+  const pct = `${Math.floor(fraction * 100)}%`
   const today = g.todayEarned > 0 ? `  +${g.todayEarned}` : ''
   const streak = g.streak > 0 ? `  ${g.streak}d` : ''
-  return `  Lv${g.level} ${bar}${today}${streak}`
+  const words = `  Lv${g.level}  ${pct}${today}${streak}`
+  const cellPx = WIDTH['m'] ?? 16
+  const cells = Math.min(Math.floor(BAR_MAX_PX / cellPx), Math.floor((roomPx - measure(words) - 4) / cellPx))
+  if (cells < BAR_MIN_CELLS) return words
+  // Never show a full line for partial progress.
+  const heavy = Math.min(fraction < 1 ? cells - 1 : cells, Math.floor(fraction * cells))
+  return `  Lv${g.level} ${BAR_HEAVY.repeat(heavy)}${BAR_LIGHT.repeat(cells - heavy)} ${pct}${today}${streak}`
 }
 
 export function dateLabel(now = new Date()): string {
