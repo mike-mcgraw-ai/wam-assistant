@@ -5,6 +5,7 @@ import {
   cleanTranscriptForDisplay,
   coalesceTranscriptSegments,
   displayTranscriptSegments,
+  mergeRawSegments,
   parseTaskCommand,
   transcriptText,
 } from '../src/transcript.js'
@@ -56,11 +57,27 @@ test('face cleanup preserves short meaningful directions', () => {
   assert.equal(cleanTranscriptForDisplay('Okay. Go left. Wow!'), 'Go left.')
 })
 
-test('face cleanup leads with an explicit request buried after chatter', () => {
+test('face cleanup retains useful context before an explicit request', () => {
   assert.equal(
     cleanTranscriptForDisplay('Wow. The rain is really coming down. Anyway, I want to hide the screen with one gesture.'),
-    'I want to hide the screen with one gesture.',
+    'The rain is really coming down. Anyway, I want to hide the screen with one gesture.',
   )
+})
+
+test('fragmented speech becomes readable units while raw noise remains untouched', () => {
+  const raw = chunks([
+    'Um, we need to make the.',
+    'Listen transcript easier to read.',
+    'So the first thought stays together.',
+    'Wow.',
+    'Then we need the live words to come first.',
+  ])
+  const shown = displayTranscriptSegments(raw)
+  assert.ok(shown.length < raw.length)
+  assert.match(shown.map(segment => segment.text).join(' '), /make the Listen transcript easier to read/i)
+  assert.doesNotMatch(shown.map(segment => segment.text).join(' '), /Wow/i)
+  assert.equal(raw[3].text, 'Wow.')
+  assert.match(transcriptText(raw), /Wow/)
 })
 
 test('ordinary need language is not a task command', () => {
@@ -81,4 +98,13 @@ test('a command-looking fragment inside a longer thought is not classified alone
     'Look around the house and identify what actually needs doing.',
   ]))
   assert.equal(parseTaskCommand(whole), null)
+})
+
+test('final context restores archived early speech without duplicating live chunks', () => {
+  const archive = chunks(['The live transcript needs to read like speech.', 'Keep the raw audio unchanged.'])
+  const live = [archive[1], ...chunks(['The final review also needs the first request.']).map(segment => ({ ...segment, id: 'late', at: 20_000 }))]
+  const merged = mergeRawSegments(live, archive)
+  assert.equal(merged.length, 3)
+  assert.match(merged[0].text, /live transcript/)
+  assert.match(merged.at(-1).text, /final review/)
 })

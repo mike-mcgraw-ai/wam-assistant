@@ -57,6 +57,10 @@ import {
   noteDetailActions,
   noteRows,
   captureRows,
+  assistantCaptureHasWords,
+  assistantLatestReplyId,
+  assistantViewAfterRefresh,
+  assistantScrollBy,
   assistantScrollMax,
   noteTranscriptScrollMax,
   transcriptScrollMax,
@@ -64,6 +68,7 @@ import {
   visiblePlanDoneKeys,
   choreRows,
   taskDetailRows,
+  dayDraftReviewRows,
   inboxItems,
   otherSpace,
   render,
@@ -487,15 +492,19 @@ async function paintNow(): Promise<void> {
       updates.sort((a, b) => sendOrder.indexOf(a.index) - sendOrder.indexOf(b.index))
       const sendStart = performance.now()
       const doneAt: number[] = []
-      const results = await Promise.allSettled(
-        updates.map(({ index, tile }, order) => bridge.updateImageRawData(
+      const submitTile = ({ index, tile }: (typeof updates)[number], order: number) => bridge.updateImageRawData(
           new ImageRawDataUpdate({
             containerID: IMAGE_CONTAINER_IDS[index],
             containerName: IMAGE_CONTAINER_NAMES[index],
             imageData: tile,
           }),
-        ).finally(() => { doneAt[order] = Math.round(performance.now() - sendStart) })),
+        ).finally(() => { doneAt[order] = Math.round(performance.now() - sendStart) })
+      const transcriptFirst = board && updates[0]?.index === 3
+      const firstResults = transcriptFirst ? await Promise.allSettled([submitTile(updates[0], 0)]) : []
+      const restResults = await Promise.allSettled(
+        updates.slice(firstResults.length).map((update, index) => submitTile(update, index + firstResults.length)),
       )
+      const results = [...firstResults, ...restResults]
       if (updates.length > 0 || textSent > 0) {
         paintLog({
           view: state.view.kind,
@@ -1084,8 +1093,8 @@ async function beginListening(): Promise<void> {
   await paint()
 }
 
-async function startDayCapture(): Promise<void> {
-  if (state.plan?.day?.draft) {
+async function startDayCapture(addRecording = false): Promise<void> {
+  if (state.plan?.day?.draft && !addRecording) {
     state.view = { kind: 'daystart', phase: 'draft', cursor: 0 }
     state.armedTaskId = null
     await paint()
@@ -1114,6 +1123,31 @@ async function startDayCapture(): Promise<void> {
   await paint()
 }
 
+async function startDayRowCapture(itemId: string, editKind: 'label' | 'note', returnCursor: number): Promise<void> {
+  const item = state.plan?.day?.draft?.items.find(row => row.id === itemId)
+  if (!item) return
+  await refreshCoachSession()
+  if (state.coachSession?.active) {
+    state.error = 'Stop the current recording first'
+    await paint()
+    return
+  }
+  const started = await startCoachSession('life', {
+    taskId: `__day_${editKind}__:${itemId}`,
+    label: editKind === 'label' ? `Correct ${item.label}` : `Note for ${item.label}`,
+  }, 'conversation')
+  if (!started.ok) {
+    state.error = started.error
+    await paint()
+    return
+  }
+  state.coachSession = started.session
+  state.view = { kind: 'daystart', phase: 'recording', scroll: 0, itemId, editKind, returnCursor }
+  state.error = null
+  await startAudioCapture(started.session.id)
+  await paint()
+}
+
 async function reviewDayCapture(): Promise<void> {
   if (!state.coachSession?.id) return
   await stopAudioCapture()
@@ -1124,6 +1158,7 @@ async function reviewDayCapture(): Promise<void> {
 }
 
 async function finishDayCapture(): Promise<void> {
+  const priorView = state.view.kind === 'daystart' ? state.view : null
   const sessionId = state.coachSession?.id
   if (!sessionId) {
     await startDayCapture()
@@ -1132,18 +1167,19 @@ async function finishDayCapture(): Promise<void> {
   await stopAudioCapture()
   await waitForTranscriptionsToDrain()
   const stopped = await endCoachSession(sessionId)
-  state.coachSession = null
   if (!stopped.ok) {
     state.view = { kind: 'daystart', phase: 'failed', message: stopped.error }
     await paint()
     return
   }
+  state.coachSession = null
   if (stopped.note?.kind !== 'day-draft' || !stopped.note.result.ok) {
-    state.view = {
-      kind: 'daystart',
-      phase: 'failed',
-      message: stopped.note?.result.error || 'Nothing heard. Try the walk again.',
-    }
+    const message = stopped.note?.result.error || 'Nothing heard. Try the walk again.'
+    state.view = priorView?.itemId
+      ? { kind: 'daystart', phase: 'row', itemId: priorView.itemId, cursor: 0, returnCursor: priorView.returnCursor, message }
+      : state.plan?.day?.draft
+        ? { kind: 'daystart', phase: 'draft', cursor: 0, message }
+        : { kind: 'daystart', phase: 'failed', message }
     await paint()
     return
   }
@@ -1151,28 +1187,31 @@ async function finishDayCapture(): Promise<void> {
   const plan = await fetchPlan(state.space)
   if (plan.ok) state.plan = plan.plan
   else state.planError = plan.error
-  state.view = { kind: 'daystart', phase: 'draft', cursor: 0 }
+  state.view = priorView?.itemId
+    ? { kind: 'daystart', phase: 'row', itemId: priorView.itemId, cursor: 0, returnCursor: priorView.returnCursor }
+    : { kind: 'daystart', phase: 'draft', cursor: priorView?.returnCursor ?? 0 }
   state.armedTaskId = null
   await paint()
 }
 
+const assistantRefreshInFlight = new Set<AssistantProvider>()
+
 async function refreshAssistant(provider: AssistantProvider): Promise<void> {
-  const prior = state.assistantThreads[provider] ?? state.assistantChat
-  const priorLatest = prior?.messages?.at(-1)
-  const result = await fetchAssistantChat(state.space, provider)
-  if (result.ok) {
-    state.assistantThreads[provider] = result.chat
-    state.assistantChat = result.chat
-    const latest = result.chat.messages?.at(-1)
-    if (
-      state.view.kind === 'assistant' &&
-      state.view.phase === 'chat' &&
-      state.view.provider === provider &&
-      latest?.role === 'assistant' &&
-      (latest.at !== priorLatest?.at || latest.text !== priorLatest?.text)
-    ) state.view.scroll = 0
-    state.error = null
-  } else state.error = result.error
+  if (assistantRefreshInFlight.has(provider)) return
+  assistantRefreshInFlight.add(provider)
+  try {
+    const result = await fetchAssistantChat(state.space, provider)
+    if (result.ok) {
+      state.assistantThreads[provider] = result.chat
+      if (state.view.kind === 'assistant' && state.view.phase === 'chat' && state.view.provider === provider) {
+        state.assistantChat = result.chat
+        assistantViewAfterRefresh(state.view, result.chat)
+      }
+      state.error = null
+    } else state.error = result.error
+  } finally {
+    assistantRefreshInFlight.delete(provider)
+  }
 }
 
 async function refreshAssistantSummaries(): Promise<void> {
@@ -1252,6 +1291,13 @@ async function saveReviewedListeningSession(): Promise<void> {
     return
   }
 
+  await waitForTranscriptionsToDrain()
+  if ((state.snapshot?.stt?.pending ?? 0) > 0) {
+    state.error = 'Still transcribing; try again'
+    await paint()
+    return
+  }
+  await refreshCoachSession()
   state.listenReviewing = false
   const stopped = await endCoachSession(sessionId)
   if (stopped.ok) state.coachSession = stopped.session
@@ -1279,8 +1325,11 @@ async function preserveListeningAndLeave(): Promise<void> {
   await refreshCoachSession()
 
   const session = state.coachSession?.id === sessionId ? state.coachSession : null
-  const hasWords = Boolean(session?.recentSegments.some(segment => segment.text.trim()))
-  if (hasWords) {
+  const hasWords = Boolean(session && session.segmentCount > 0)
+  const stillTranscribing = (state.snapshot?.stt?.pending ?? 0) > 0
+  if (stillTranscribing) {
+    state.error = 'Words still processing; reopen Listen to save'
+  } else if (hasWords || state.audio.sent > 0) {
     const stopped = await endCoachSession(sessionId)
     if (!stopped.ok) {
       state.error = stopped.error
@@ -1299,26 +1348,7 @@ async function preserveListeningAndLeave(): Promise<void> {
   }
 
   state.listenReviewing = false
-  state.error = null
-  dismissCue()
-  await paint()
-}
-
-async function discardListeningSession(): Promise<void> {
-  const sessionId = state.coachSession?.id
-  await stopAudioCapture()
-  state.listenReviewing = false
-  if (sessionId) {
-    const discarded = await discardCoachSession(sessionId)
-    if (!discarded.ok) {
-      state.error = discarded.error
-      await paint()
-      return
-    }
-  }
-  state.coachSession = null
-  state.cue = null
-  state.error = null
+  if (!stillTranscribing) state.error = null
   dismissCue()
   await paint()
 }
@@ -1383,17 +1413,39 @@ async function finishAssistantCapture(provider: AssistantProvider): Promise<void
   } else state.error = sent?.error ?? 'Transcription timed out'
   if (!stopped.ok && !state.error) state.error = stopped.error
   await paint()
+  if (leaveAssistantAfterSend) {
+    leaveAssistantAfterSend = false
+    await back()
+  }
 }
 
-async function cancelAssistantCapture(): Promise<void> {
+let leaveAssistantAfterSend = false
+
+async function preserveAssistantCapture(): Promise<void> {
   const sessionId = state.coachSession?.id
+  state.assistantRecording = false
+  state.assistantReviewing = true
   await stopAudioCapture()
-  if (sessionId) {
-    const discarded = await discardCoachSession(sessionId)
-    if (!discarded.ok) state.error = discarded.error
-    else state.error = null
+  await paint()
+  await waitForTranscriptionsToDrain()
+  if (sessionId) await refreshCoachSession()
+  if ((state.snapshot?.stt?.pending ?? 0) > 0 || state.error) {
+    state.error = state.error ?? 'Speech is still transcribing. Try back again.'
+    await paint()
+    return
   }
-  if (!state.error) state.coachSession = null
+  if (sessionId) {
+    const session = state.coachSession?.id === sessionId ? state.coachSession : null
+    const hasWords = assistantCaptureHasWords(session)
+    const stopped = hasWords ? await endCoachSession(sessionId) : await discardCoachSession(sessionId)
+    if (!stopped.ok) {
+      state.error = stopped.error
+      await paint()
+      return
+    }
+  }
+  state.coachSession = null
+  state.error = null
   state.assistantRecording = false
   state.assistantReviewing = false
   state.assistantSending = false
@@ -1583,7 +1635,14 @@ function move(delta: number): void {
 
   if (view.kind === 'daystart') {
     if (view.phase === 'draft') {
-      const count = (state.plan?.day?.draft?.items.length ?? 0) + 2
+      const count = (state.plan?.day?.draft?.items.length ?? 0) + 3
+      view.cursor = Math.max(0, Math.min(count - 1, (view.cursor ?? 0) + delta))
+      state.armedTaskId = null
+      return
+    }
+    if (view.phase === 'row') {
+      const item = state.plan?.day?.draft?.items.find(row => row.id === view.itemId)
+      const count = item ? dayDraftReviewRows(item).length : 1
       view.cursor = Math.max(0, Math.min(count - 1, (view.cursor ?? 0) + delta))
       state.armedTaskId = null
       return
@@ -1627,8 +1686,9 @@ function move(delta: number): void {
       view.cursor = Math.max(0, Math.min(1, view.cursor + delta))
     } else {
       const max = assistantScrollMax(state)
-      view.scroll = Math.max(0, Math.min(max, (view.scroll ?? 0) - delta))
+      view.scroll = assistantScrollBy(view.scroll ?? 0, max, delta)
     }
+    state.armedTaskId = null
     return
   }
 
@@ -1963,20 +2023,44 @@ async function activate(): Promise<void> {
   if (view.kind === 'daystart') {
     if (view.phase === 'recording') await reviewDayCapture()
     else if (view.phase === 'reviewing') await finishDayCapture()
-    else if (view.phase === 'draft') {
-      const items = state.plan?.day?.draft?.items ?? []
-      const cursor = Math.max(0, Math.min(items.length + 1, view.cursor ?? 0))
+    else if (view.phase === 'row') {
+      const item = state.plan?.day?.draft?.items.find(row => row.id === view.itemId)
+      if (!item) return
       const space = state.space === 'ops' ? 'ops' : 'life'
-      if (cursor < items.length) {
-        const item = items[cursor]
+      const action = dayDraftReviewRows(item)[view.cursor ?? 0]?.action
+      if (action === 'toggle') {
         const result = await updateDayDraft('toggle', space, item.id, item.include === false)
         if (!result.ok) state.error = result.error
         else if (state.plan?.day && result.draft) state.plan.day.draft = result.draft
+      } else if (action === 'label' || action === 'note') {
+        await startDayRowCapture(item.id, action, view.returnCursor ?? 0)
+        return
+      } else if (action === 'reparse') {
+        const result = await updateDayDraft('reparse', space, item.id)
+        if (!result.ok) state.error = result.error
+        else if (state.plan?.day && result.draft) state.plan.day.draft = result.draft
+      } else if (action === 'back') {
+        state.view = { kind: 'daystart', phase: 'draft', cursor: view.returnCursor ?? 0 }
+      }
+      await paint()
+      return
+    }
+    else if (view.phase === 'draft') {
+      const items = state.plan?.day?.draft?.items ?? []
+      const cursor = Math.max(0, Math.min(items.length + 2, view.cursor ?? 0))
+      const space = state.space === 'ops' ? 'ops' : 'life'
+      if (cursor < items.length) {
+        const item = items[cursor]
+        state.view = { kind: 'daystart', phase: 'row', itemId: item.id, cursor: 0, returnCursor: cursor }
         state.armedTaskId = null
         await paint()
         return
       }
       if (cursor === items.length) {
+        await startDayCapture(true)
+        return
+      }
+      if (cursor === items.length + 1) {
         const gate = confirmGate('day-draft-restart')
         if (gate !== 'confirmed') {
           if (gate === 'armed') await paint()
@@ -1989,7 +2073,7 @@ async function activate(): Promise<void> {
           return
         }
         if (state.plan?.day) delete state.plan.day.draft
-        await startDayCapture()
+        await startDayCapture(true)
         return
       }
       const gate = confirmGate('day-draft-commit')
@@ -2005,23 +2089,31 @@ async function activate(): Promise<void> {
       }
       await refresh()
       await openPlan()
-    } else await startDayCapture()
+    } else if (view.phase === 'failed' && state.coachSession?.id) await finishDayCapture()
+    else await startDayCapture()
     return
   }
 
   if (view.kind === 'assistant') {
     if (view.phase === 'providers') {
       const provider: AssistantProvider = view.cursor === 1 ? 'claude' : 'chatgpt'
-      if (state.snapshot?.assistant?.[provider] !== true) {
+      if ((state.assistantThreads[provider]?.ready ?? state.snapshot?.assistant?.[provider]) !== true) {
         state.error = `${provider === 'claude' ? 'Claude' : 'ChatGPT'} setup needed on Mac`
         await paint()
         return
       }
-      state.view = { kind: 'assistant', phase: 'chat', provider, scroll: 0 }
+      state.view = { kind: 'assistant', phase: 'chat', provider, scroll: 0, replyId: assistantLatestReplyId(state.assistantThreads[provider] ?? null) }
       state.assistantChat = state.assistantThreads[provider] ?? null
       await paint()
       await refreshAssistant(provider)
       await paint()
+      return
+    }
+    if (state.assistantRecording || state.assistantReviewing) {
+      if (Date.now() < actionLockUntil) return
+      actionLockUntil = Date.now() + AFTER_ACTION_MS
+      if (state.assistantRecording) await reviewAssistantCapture()
+      else await finishAssistantCapture(view.provider)
       return
     }
     if (state.assistantSending || state.assistantChat?.busy) {
@@ -2029,9 +2121,9 @@ async function activate(): Promise<void> {
       await paint()
       return
     }
-    if (state.assistantRecording) await reviewAssistantCapture()
-    else if (state.assistantReviewing) await finishAssistantCapture(view.provider)
-    else await startAssistantCapture(view.provider)
+    const gate = confirmGate(`assistant-record:${view.provider}`)
+    if (gate === 'armed') await paint()
+    if (gate === 'confirmed') await startAssistantCapture(view.provider)
     return
   }
 
@@ -2362,6 +2454,23 @@ async function activate(): Promise<void> {
       return
     }
 
+    if (row?.kind === 'rebuild-day') {
+      const gate = confirmGate('rebuild-day')
+      if (gate !== 'confirmed') {
+        if (gate === 'armed') await paint()
+        return
+      }
+      const result = await updateDayDraft('discard', 'life')
+      if (!result.ok) {
+        state.error = result.error
+        await paint()
+        return
+      }
+      if (state.plan?.day) delete state.plan.day.draft
+      await startDayCapture(true)
+      return
+    }
+
     // Skip is a state change for the whole day, so it arms first.
     if (row?.kind === 'skip-day') {
       const gate = confirmGate('skip-day')
@@ -2544,6 +2653,7 @@ async function activate(): Promise<void> {
 }
 
 async function back(): Promise<void> {
+  state.armedTaskId = null
   state.armedNoteId = null
   if (state.view.kind === 'daystart') {
     if (state.view.phase === 'recording') {
@@ -2553,6 +2663,11 @@ async function back(): Promise<void> {
       await finishDayCapture()
     } else if (state.view.phase === 'draft') {
       await openPlan()
+    } else if (state.view.phase === 'row') {
+      state.view = { kind: 'daystart', phase: 'draft', cursor: state.view.returnCursor ?? 0 }
+      await paint()
+    } else if (state.view.phase === 'failed' && state.coachSession?.id) {
+      await finishDayCapture()
     } else {
       await openPlan()
     }
@@ -2591,8 +2706,12 @@ async function back(): Promise<void> {
   }
 
   if (state.view.kind === 'assistant') {
-    if (state.assistantRecording || state.assistantReviewing || state.assistantSending) {
-      await cancelAssistantCapture()
+    if (state.assistantSending) {
+      leaveAssistantAfterSend = true
+      return
+    }
+    if (state.assistantRecording || state.assistantReviewing) {
+      await preserveAssistantCapture()
       if (state.error) {
         await paint()
         return
@@ -2619,7 +2738,7 @@ async function back(): Promise<void> {
       return
     }
     if (state.listenReviewing && state.coachSession?.active) {
-      await discardListeningSession()
+      await preserveListeningAndLeave()
       return
     }
     dismissCue()

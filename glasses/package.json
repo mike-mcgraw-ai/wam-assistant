@@ -1,6 +1,6 @@
 {
   "name": "wam-assistant-glasses",
-  "version": "0.31.0",
+  "version": "0.32.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -15,6 +15,7 @@
     "pack": "npm run build && evenhub pack app.json dist -o opsboard.ehpk",
     "preview": "esbuild tools/preview.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/preview.mjs --log-level=error && node node_modules/.cache/preview.mjs",
     "demo": "esbuild tools/demo.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/demo.mjs --log-level=error && node node_modules/.cache/demo.mjs",
+    "chat:check": "esbuild tools/chat-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/chat-check.mjs --log-level=error && node node_modules/.cache/chat-check.mjs",
     "pack:private": "node tools/pack-private.mjs",
     "ship": "node tools/ship.mjs"
   },

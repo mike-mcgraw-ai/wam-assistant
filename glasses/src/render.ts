@@ -27,6 +27,7 @@ import type {
   TaskNote,
   NoteTranscript,
   DoneRow,
+  DayDraftItem,
 } from './types'
 import {
   assemble,
@@ -58,7 +59,7 @@ export type View =
   | { kind: 'checklist'; runId: string; cursor: number }
   | { kind: 'picker'; cursor: number }
   | { kind: 'plan'; cursor: number }
-  | { kind: 'daystart'; phase: 'recording' | 'reviewing' | 'draft' | 'failed'; scroll?: number; cursor?: number; message?: string }
+  | { kind: 'daystart'; phase: 'recording' | 'reviewing' | 'draft' | 'row' | 'failed'; scroll?: number; cursor?: number; message?: string; itemId?: string; editKind?: 'label' | 'note'; returnCursor?: number }
   | { kind: 'chores'; cursor: number }
   | { kind: 'notes'; cursor: number }
   | { kind: 'capture'; cursor: number }
@@ -79,7 +80,7 @@ export type View =
    */
   | { kind: 'cue'; scroll?: number; modeCursor?: number; startArmed?: boolean }
   | { kind: 'assistant'; phase: 'providers'; cursor: number }
-  | { kind: 'assistant'; phase: 'chat'; provider: AssistantProvider; scroll?: number }
+  | { kind: 'assistant'; phase: 'chat'; provider: AssistantProvider; scroll?: number; replyId?: string | null }
   | { kind: 'timerReset'; done?: boolean; count?: number }
   | { kind: 'pong' }
   | { kind: 'fonttest'; page: number }
@@ -243,6 +244,7 @@ const CAPTURE_TASK_ID = 'captured-notes'
 export type PlanRow =
   | { kind: 'listen' }
   | { kind: 'start-day' }
+  | { kind: 'rebuild-day' }
   | { kind: 'skip-day' }
   | { kind: 'daily'; runId: string; listName: string; item: ChecklistItem }
   | { kind: 'task'; task: TaskRow }
@@ -325,7 +327,9 @@ export function planRows(state: UiState): PlanRow[] {
   // The walk stays one row away all day: after Start Day it adds to the day
   // (a mid-day "and also"), after Skip it is the way back in. Last, so it
   // never pushes the running order down.
-  const walk: PlanRow[] = state.space === 'life' ? [{ kind: 'start-day' }] : []
+  const walk: PlanRow[] = state.space === 'life'
+    ? [{ kind: 'start-day' }, ...(plan.day?.started ? [{ kind: 'rebuild-day' as const }] : [])]
+    : []
 
   return [{ kind: 'listen' }, ...required, ...committedTasks, ...agenda, ...walk]
 }
@@ -1174,6 +1178,7 @@ function planTip(state: UiState, rows: PlanRow[], cursor: number): string {
   if (row.kind === 'start-day') {
     return state.plan?.day?.started ? 'click to add more to today' : 'click to walk the house and name today'
   }
+  if (row.kind === 'rebuild-day') return state.armedTaskId === 'rebuild-day' ? 'Click again to rebuild today' : 'Restart today review; unfinished work stays'
   if (row.kind === 'skip-day') {
     return state.armedTaskId === 'skip-day' ? 'Click again to skip the walk today' : 'Not now - show the list without it'
   }
@@ -1296,6 +1301,8 @@ function renderPlan(state: UiState, cursor: number): string {
       lines.push(ruleCentred('Chores', i === bodyCursor && cursor > 0))
     } else if (row.kind === 'start-day') {
       lines.push(clip(`${point}+   ${state.plan?.day?.draft ? 'Review Day' : state.plan?.day?.started ? 'Add to day' : 'Start Day'}`, LINE_CHARS))
+    } else if (row.kind === 'rebuild-day') {
+      lines.push(clip(`${point}${state.armedTaskId === 'rebuild-day' ? '[?] ' : ''}Rebuild today`, LINE_CHARS))
     } else if (row.kind === 'daily') {
       const selected = i === bodyCursor && cursor > 0
       if (selected && state.armedTaskId === `${row.runId}:${row.item.id}`) {
@@ -1331,18 +1338,50 @@ function renderPlan(state: UiState, cursor: number): string {
   return assemble(lines, config.maxChars, config.maxLines)
 }
 
+export function dayDraftReviewRows(item: DayDraftItem): Array<{ text: string; action?: 'toggle' | 'label' | 'note' | 'reparse' | 'back' }> {
+  const details = [
+    ...wrap(`Label: ${item.label}${item.fromStep ? ` / ${item.fromStep}` : ''}`, LINE_CHARS - 2),
+    ...wrap(`Heard: ${item.source || 'original words unavailable'}`, LINE_CHARS - 2),
+    ...(item.uncertain ? ['Needs review: unclear phrase'] : []),
+    ...(item.conflict ? wrap(`Already on Home: ${item.conflict}`, LINE_CHARS - 2) : []),
+    ...(item.note ? wrap(`Note: ${item.note}`, LINE_CHARS - 2) : []),
+  ]
+  return [
+    ...details.map(text => ({ text })),
+    { text: item.include === false ? 'Include this row' : 'Exclude this row', action: 'toggle' },
+    { text: 'Say full corrected label', action: 'label' },
+    { text: 'Say note for this row', action: 'note' },
+    { text: 'Reparse original words', action: 'reparse' },
+    { text: 'Back to proposal', action: 'back' },
+  ]
+}
+
 function renderDayStart(
   state: UiState,
-  phase: 'recording' | 'reviewing' | 'draft' | 'failed',
+  phase: 'recording' | 'reviewing' | 'draft' | 'row' | 'failed',
   scrollBack = 0,
   message = '',
   cursor = 0,
+  itemId?: string,
 ): string {
+  if (phase === 'row') {
+    const item = state.plan?.day?.draft?.items.find(row => row.id === itemId)
+    if (!item) return assemble(['REVIEW TODAY', 'Row unavailable'], config.maxChars, config.maxLines)
+    const rows = dayDraftReviewRows(item)
+    const room = Math.max(1, config.maxLines - 2)
+    const start = Math.max(0, Math.min(cursor, rows.length - room))
+    return assemble([
+      message ? clipToWidth(`! ${message}`) : clockLine(state),
+      `REVIEW ROW ${item.include === false ? 'excluded' : 'kept'}`,
+      ...rows.slice(start, start + room).map((row, index) => clipToWidth(`${start + index === cursor ? '>' : ' '}${row.text}`)),
+    ], config.maxChars, config.maxLines)
+  }
   if (phase === 'draft') {
     const draft = state.plan?.day?.draft
     const items = draft?.items ?? []
     const rows = [
       ...items.map(item => `${item.include === false ? '[ ]' : '[x]'} ${item.label}${item.fromStep ? ` / ${item.fromStep}` : ''}`),
+      'Add recording',
       'Build again',
       'Use this list',
     ]
@@ -1352,17 +1391,17 @@ function renderDayStart(
     const shown = rows.slice(start, start + room).map((line, index) => {
       const rowIndex = start + index
       const armed =
-        (rowIndex === items.length && state.armedTaskId === 'day-draft-restart') ||
-        (rowIndex === items.length + 1 && state.armedTaskId === 'day-draft-commit')
+        (rowIndex === items.length + 1 && state.armedTaskId === 'day-draft-restart') ||
+        (rowIndex === items.length + 2 && state.armedTaskId === 'day-draft-commit')
       return clipToWidth(`${rowIndex === selected ? '>' : ' '}${armed ? '[?] ' : ''}${line}`)
     })
     const kept = items.filter(item => item.include !== false).length
     return assemble(
       [
-        clockLine(state),
+        message ? clipToWidth(`! ${message}`) : clockLine(state),
         `REVIEW TODAY  ${kept}/${items.length} kept`,
         ...shown,
-        selected < items.length ? 'click to keep / remove' : 'click twice to confirm',
+        selected < items.length ? 'click to inspect row' : selected === items.length ? 'click to record more' : 'click twice to confirm',
       ],
       config.maxChars,
       config.maxLines,
@@ -1694,7 +1733,7 @@ function renderCue(state: UiState, scrollBack = 0): string {
   }
 
   const segments = session?.recentSegments ?? []
-  const reviewFooter = session?.active && state.listenReviewing ? 'click saves - back discards' : null
+  const reviewFooter = session?.active && state.listenReviewing ? 'click saves - back saves' : null
   if (segments.length > 0) {
     const room = Math.max(0, config.maxLines - lines.length - (reviewFooter ? 1 : 0))
     if (room <= 0) {
@@ -1751,11 +1790,35 @@ function assistantPassageLines(provider: AssistantProvider, role: AssistantChat[
 function assistantMessageLines(chat: AssistantChat | null, provider: AssistantProvider): string[] {
   const lines: string[] = []
   const messages = chat?.messages ?? []
+  const latestReply = assistantLatestReplyId(chat)
+  const pendingUser = messages.at(-1)?.role === 'user' && latestReply !== null
   for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (pendingUser && index === messages.length - 1) continue
     const message = messages[index]
     lines.push(...assistantPassageLines(provider, message.role, message.text))
+    if (pendingUser && message.id === latestReply) {
+      const pending = messages[messages.length - 1]
+      lines.push(...assistantPassageLines(provider, pending.role, pending.text))
+    }
   }
   return lines
+}
+
+export function assistantLatestReplyId(chat: AssistantChat | null): string | null {
+  const messages = chat?.messages ?? []
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === 'assistant') return messages[index].id
+  }
+  return null
+}
+
+export function assistantViewAfterRefresh(
+  view: Extract<View, { kind: 'assistant'; phase: 'chat' }>,
+  chat: AssistantChat,
+): void {
+  const replyId = assistantLatestReplyId(chat)
+  if (replyId !== null && replyId !== view.replyId) view.scroll = 0
+  view.replyId = replyId
 }
 
 function assistantClean(text: string): string {
@@ -1838,16 +1901,18 @@ function assistantProviderRows(
   return clipToWidth(`${point}${provider.label}  ${label}`)
 }
 
-function assistantTranscriptGoal(state: UiState): string {
-  const text = (state.coachSession?.recentSegments ?? []).map(segment => segment.text).join(' ')
-  return assistantRequestText(text)
+function assistantFooter(state: UiState): string | null {
+  if (state.error) return state.error
+  if (state.assistantRecording) return 'click stops recording'
+  if (state.assistantReviewing) return 'click sends - back saves words'
+  if (state.assistantSending) return 'voice is being queued'
+  if (state.view.kind === 'assistant' && state.view.phase === 'chat'
+    && state.armedTaskId === `assistant-record:${state.view.provider}`) return 'click again to record'
+  return null
 }
 
-function assistantFooter(state: UiState): string | null {
-  if (state.assistantRecording) return 'click stops recording'
-  if (state.assistantReviewing) return 'click sends - back discards'
-  if (state.assistantSending) return 'voice is being queued'
-  return null
+export function assistantCaptureHasWords(session: CoachSessionSummary | null): boolean {
+  return Boolean(session?.recentSegments.some(segment => segment.text.trim()))
 }
 
 function assistantContentRoom(state: UiState): number {
@@ -1866,11 +1931,6 @@ function assistantLiveTranscriptLines(state: UiState): string[] {
 function assistantActiveContentLines(state: UiState, provider: AssistantProvider): string[] {
   if (state.assistantRecording || state.assistantReviewing) return assistantLiveTranscriptLines(state)
 
-  if (state.assistantSending) {
-    const transcript = transcriptLines(state.coachSession?.recentSegments ?? [])
-    return transcript.length > 0 ? transcript : assistantPassageLines(provider, 'user', assistantTranscriptGoal(state))
-  }
-
   const lines = assistantMessageLines(state.assistantChat, provider)
   if (lines.length > 0) return lines
   return [state.assistantChat?.busy ? assistantNowText(state, provider, state.assistantChat) : 'Ready for your next message.']
@@ -1880,6 +1940,10 @@ export function assistantScrollMax(state: UiState): number {
   if (state.view.kind !== 'assistant' || state.view.phase !== 'chat') return 0
   const room = assistantContentRoom(state)
   return Math.max(0, assistantActiveContentLines(state, state.view.provider).length - room)
+}
+
+export function assistantScrollBy(scroll: number, max: number, delta: number): number {
+  return Math.max(0, Math.min(max, scroll + delta))
 }
 
 function renderAssistant(state: UiState): string {
@@ -1901,9 +1965,11 @@ function renderAssistant(state: UiState): string {
       ? 'REVIEW'
       : state.assistantSending
         ? 'SENDING'
-        : state.assistantChat?.busy
-          ? assistantStatusBadge(state, view.provider, state.assistantChat)
-          : assistantStatusBadge(state, view.provider, state.assistantChat)
+        : state.error
+          ? 'ERROR'
+          : state.armedTaskId === `assistant-record:${view.provider}`
+            ? 'ARMED'
+            : assistantStatusBadge(state, view.provider, state.assistantChat)
   const footer = assistantFooter(state)
   const room = assistantContentRoom(state)
   const content = assistantActiveContentLines(state, view.provider)
@@ -1982,7 +2048,7 @@ function renderView(state: UiState): string {
     case 'plan':
       return renderPlan(state, state.view.cursor)
     case 'daystart':
-      return renderDayStart(state, state.view.phase, state.view.scroll ?? 0, state.view.message, state.view.cursor ?? 0)
+      return renderDayStart(state, state.view.phase, state.view.scroll ?? 0, state.view.message, state.view.cursor ?? 0, state.view.itemId)
     case 'cue':
       return renderCue(state, state.view.scroll ?? 0)
     case 'assistant':

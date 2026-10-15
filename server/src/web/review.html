@@ -1,0 +1,154 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Review Spoken Work</title>
+<style>
+  :root{color-scheme:dark;--bg:#101312;--panel:#1a201d;--line:#35413b;--text:#edf5ef;--muted:#a3b4a9;--accent:#53d391;--warn:#efc36f}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 -apple-system,system-ui,Roboto,sans-serif;padding-bottom:80px}
+  a{color:var(--accent)}
+  header{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:16px;border-bottom:1px solid var(--line)}
+  h1{font-size:19px;margin:0}
+  h2{font-size:20px;line-height:1.25;margin:0 0 7px}
+  main{max-width:760px;margin:auto;padding:14px}
+  .sub,.meta,.empty{color:var(--muted)}
+  .sub{font-size:13px;margin:4px 0 0}
+  .filters{display:flex;gap:8px;margin:0 0 15px}
+  button{border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:10px;padding:9px 12px;font:inherit}
+  button.selected{background:var(--accent);color:#092017;border-color:var(--accent);font-weight:700}
+  button:disabled{opacity:.55}
+  .card{display:block;width:100%;text-align:left;padding:15px;margin:0 0 10px;border:1px solid var(--line);border-radius:14px;background:var(--panel)}
+  .card strong{display:block;font-size:17px;line-height:1.3;margin-bottom:5px}
+  .card .summary{display:block;color:var(--text);margin:8px 0 0;white-space:pre-line;max-height:4.5em;overflow:hidden}
+  .badge{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:2px 8px;margin:0 6px 5px 0;color:var(--muted);font-size:11px}
+  .badge.warn{color:var(--warn);border-color:#876930}
+  .detail{border:1px solid var(--line);border-radius:14px;background:var(--panel);padding:17px}
+  .detail p{white-space:pre-line}
+  .detail section{border-top:1px solid var(--line);margin-top:18px;padding-top:14px}
+  .detail h3{font-size:14px;margin:0 0 8px}
+  .detail ul{margin:5px 0;padding-left:22px}
+  .detail li{margin:5px 0}
+  .transcript{white-space:pre-wrap;overflow-wrap:anywhere;background:#111814;border-radius:9px;padding:12px;color:#e2ede5}
+  details{margin:12px 0}
+  summary{cursor:pointer;color:var(--accent)}
+  audio{display:block;width:100%;margin-top:10px}
+  .back{margin-bottom:14px}
+  nav{position:fixed;bottom:0;left:0;right:0;display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:#080b09;border-top:1px solid var(--line);padding:7px 8px calc(env(safe-area-inset-bottom) + 7px)}
+  nav a{text-align:center;text-decoration:none;padding:8px;border-radius:8px;color:var(--muted);font-weight:700}
+  nav a.active{background:var(--accent);color:#092017}
+</style>
+<header>
+  <div><h1>Review Spoken Work</h1><p class="sub" id="count">Loading…</p></div>
+  <a href="/notes">Notes</a>
+</header>
+<main>
+  <div class="filters" id="filters">
+    <button data-state="active" class="selected">Needs review</button>
+    <button data-state="reviewed">Reviewed</button>
+    <button data-state="all">All</button>
+  </div>
+  <div id="content" role="status">Loading spoken work…</div>
+  <button id="more" hidden>Show more</button>
+</main>
+<nav aria-label="WAM phone pages"><a href="/dashboard">List</a><a href="/notes">Notes</a><a class="active" href="/review">Review</a></nav>
+<script>
+const content = document.getElementById('content')
+const more = document.getElementById('more')
+const count = document.getElementById('count')
+const filters = document.getElementById('filters')
+let state = 'active'
+let cursor = 0
+let rows = []
+let selectedId = null
+
+const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]))
+const dateLabel = value => value ? new Date(value).toLocaleString([], { dateStyle:'medium', timeStyle:'short' }) : 'time unknown'
+const sourceLabel = value => ({solo_notes:'Solo Notes',conversation:'Conversation',listening:'Listen',meeting:'Meeting',start_day:'Start Day',assistant_voice:'Assistant voice',task_voice_note:'Task voice note',captured_note_legacy:'Older Captured Note'}[value] || 'Spoken work')
+const statusLabel = value => ({unreviewed:'Needs review',needs_clarification:'Needs clarification',reviewed:'Reviewed',done:'Done',ignored:'Ignored',merged:'Merged',split:'Split'}[value] || value)
+
+async function request(path) {
+  const response = await fetch(path, { cache:'no-store' })
+  if (!response.ok) throw new Error('Could not load review (' + response.status + ')')
+  return response.json()
+}
+
+function card(item) {
+  const audio = item.audio?.state === 'available' ? 'Audio saved' : item.audio?.state === 'expiring' ? 'Audio may expire' : 'No audio saved'
+  return '<button class="card" data-id="' + escapeHtml(item.id) + '">' +
+    '<strong>' + escapeHtml(item.title || 'Untitled spoken work') + '</strong>' +
+    '<span class="badge">' + escapeHtml(sourceLabel(item.sourceType)) + '</span>' +
+    '<span class="badge ' + (item.reviewState === 'needs_clarification' ? 'warn' : '') + '">' + escapeHtml(statusLabel(item.reviewState)) + '</span>' +
+    '<span class="badge">' + escapeHtml(audio) + '</span>' +
+    '<span class="meta">' + escapeHtml(dateLabel(item.capturedAt)) + '</span>' +
+    (item.summary ? '<span class="summary">' + escapeHtml(item.summary) + '</span>' : '') + '</button>'
+}
+
+function renderList() {
+  content.innerHTML = rows.length ? rows.map(card).join('') : '<p class="empty">Nothing in this view yet.</p>'
+  for (const button of content.querySelectorAll('[data-id]')) button.onclick = () => openItem(button.dataset.id)
+}
+
+async function loadList(reset = true) {
+  if (reset) { cursor = 0; rows = []; selectedId = null; content.textContent = 'Loading spoken work…' }
+  try {
+    const result = await request('/spoken-work?state=' + encodeURIComponent(state) + '&cursor=' + cursor + '&limit=50')
+    rows = rows.concat(result.items || [])
+    cursor = result.nextCursor
+    count.textContent = result.needsReviewCount + ' need review · ' + result.total + ' in this view'
+    more.hidden = cursor == null
+    renderList()
+  } catch (error) { content.textContent = error.message }
+}
+
+function sourceLinks(item) {
+  const refs = item.sourceRefs || []
+  const links = refs.map(ref => {
+    if (ref.store === 'coach') return '<a href="/coach/session/' + encodeURIComponent(ref.id) + '/transcript">Original session transcript</a>'
+    return escapeHtml(ref.store + ': ' + ref.id)
+  })
+  return links.length ? '<ul>' + links.map(link => '<li>' + link + '</li>').join('') + '</ul>' : '<p class="empty">Original source is unavailable.</p>'
+}
+
+async function openItem(id) {
+  selectedId = id
+  more.hidden = true
+  content.textContent = 'Loading detail…'
+  try {
+    const result = await request('/spoken-work/' + encodeURIComponent(id))
+    if (selectedId !== id) return
+    const item = result.item
+    const raw = item.rawTranscript || {}
+    const audio = item.audio || {}
+    const audioHtml = audio.state === 'available' && audio.sessionId
+      ? '<audio controls preload="none" src="/coach/session/' + encodeURIComponent(audio.sessionId) + '/recording.wav"></audio>'
+      : '<p class="empty">' + escapeHtml(audio.state === 'expiring' ? 'Audio may no longer be available.' : 'Audio was not retained for this source.') + '</p>'
+    const questions = (item.clarificationQuestions || []).map(question => '<li>' + escapeHtml(question) + '</li>').join('')
+    const candidates = (item.candidates || []).map(candidate => '<li>' + escapeHtml(candidate.kind + ': ' + candidate.title) + '</li>').join('')
+    const destinations = (item.destinationRefs || []).map(ref => '<li>' + escapeHtml(ref.kind + ': ' + ref.id) + '</li>').join('')
+    const segments = (raw.segments || []).map((segment, index) => (index + 1) + '. ' + (segment.speaker || '?') + ': ' + segment.text).join('\n')
+    content.innerHTML = '<button class="back" id="back">← Back to list</button><article class="detail">' +
+      '<h2>' + escapeHtml(item.title) + '</h2><div class="meta">' + escapeHtml(sourceLabel(item.sourceType) + ' · ' + dateLabel(item.capturedAt) + ' · ' + statusLabel(item.reviewState)) + '</div>' +
+      '<section><h3>Summary</h3><p>' + escapeHtml(item.summary || 'No summary yet. The original words are below.') + '</p></section>' +
+      (questions ? '<section><h3>Needs clarification</h3><ul>' + questions + '</ul></section>' : '') +
+      (candidates ? '<section><h3>Possible work</h3><ul>' + candidates + '</ul></section>' : '') +
+      '<section><h3>Cleaned transcript</h3><div class="transcript">' + escapeHtml(item.cleanedTranscript || 'No transcript available.') + '</div></section>' +
+      '<section><h3>Original audio</h3>' + audioHtml + '</section>' +
+      '<details><summary>Full raw transcript and STT chunks</summary><div class="transcript">' + escapeHtml(raw.text || 'Raw transcript unavailable.') + '</div>' +
+      '<h3>Raw chunks</h3><div class="transcript">' + escapeHtml(segments || 'No raw chunks saved.') + '</div></details>' +
+      '<section><h3>Source</h3>' + sourceLinks(item) + '</section>' +
+      (destinations ? '<section><h3>Already linked</h3><ul>' + destinations + '</ul></section>' : '') +
+      '<p class="empty">Review actions arrive in the next phase. This page is read-only while the backlog is checked.</p></article>'
+    document.getElementById('back').onclick = () => { selectedId = null; more.hidden = cursor == null; renderList() }
+  } catch (error) { content.textContent = error.message }
+}
+
+filters.onclick = event => {
+  const button = event.target.closest('[data-state]')
+  if (!button) return
+  state = button.dataset.state
+  for (const choice of filters.querySelectorAll('button')) choice.classList.toggle('selected', choice === button)
+  loadList()
+}
+more.onclick = () => { if (cursor != null) loadList(false) }
+loadList()
+</script>

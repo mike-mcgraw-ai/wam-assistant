@@ -1,6 +1,6 @@
 # Device Build History
 
-WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 31 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
+WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 32 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
 
 | Face build | Attribution / status | Change |
 |---|---|---|
@@ -148,3 +148,4 @@ WAM used rapid numbered device builds for hardware testing. These entries are do
 | v0.151.0 | Codex (phase 1 built; not packed) | Make existing spoken work visible for review on the phone without changing the source stores. |
 | v0.152.0 | Codex (phase 2 source checkpoint; not packed) | Add review corrections, guarded classification and state changes, explicit Task/Home promotion, and capture ingestion. |
 | v0.153.0 | Claude (ready for EvenHub package) | Show when a confirming click will count. |
+| v0.154.0 | Claude + Codex (ready for EvenHub package) | One glasses release for three Codex branches finished on 2026-10-15 that had not reached main, merged by Claude on claude/integrate-0.154, on top of Claude's v0.153.0 (confirm countdown, solid XP line) and Codex's v0.151.0 phase 1 review pages. |

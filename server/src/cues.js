@@ -79,28 +79,10 @@ function cueTypeEnabled(mode, kind) {
   return mode?.cueTypes?.[key] === true
 }
 
-function segmentSnippet(segment, max = 38) {
-  if (!segment) return ''
-  const who = segment.speaker && segment.speaker !== 'someone' ? `${segment.speaker}: ` : ''
-  return clip(`${who}${segment.text}`, max)
-}
-
-function looksLikeQuestion(text) {
-  const body = String(text || '').trim()
-  if (!body) return false
-  return (
-    body.includes('?') ||
-    /^(who|what|when|where|why|how|can|could|would|should|is|are|did|do|does)\b/i.test(body)
-  )
-}
-
-function latestQuestion(session) {
-  return (session?.recentSegments ?? []).slice().reverse().find(segment => looksLikeQuestion(segment.text))
-}
-
 function modelCueSet(raw, mode) {
   if (!raw || typeof raw !== 'object' || raw.quiet === true) return null
   const kind = MODEL_KINDS.has(raw.kind) ? raw.kind : 'thought'
+  if (kind === 'recap' && mode?.periodicRecap !== true) return null
   if (!cueTypeEnabled(mode, kind)) return null
 
   const lines = Array.isArray(raw.lines) ? raw.lines : [raw.body, raw.text]
@@ -117,24 +99,6 @@ function coachSessionCue(coach, now) {
   if (!session?.active || !mode) return null
 
   const recent = session.recentSegments ?? []
-  const last = recent.at(-1)
-  const question = latestQuestion(session)
-
-  if (question && (cueTypeEnabled(mode, 'answer') || cueTypeEnabled(mode, 'followup'))) {
-    return lineSet(
-      'Question raised',
-      [segmentSnippet(question), cueTypeEnabled(mode, 'answer') ? 'Answer lane queued.' : 'Good follow-up moment.'],
-      { kind: cueTypeEnabled(mode, 'answer') ? 'answer' : 'followup', priority: 3 },
-    )
-  }
-
-  if (mode.promptLulls && last && now - last.at >= mode.lullSeconds * 1000 && cueTypeEnabled(mode, 'followup')) {
-    return lineSet(
-      'Conversation lull',
-      [`Ask about: ${clip(last.text, 32)}`, `${mode.name} mode`],
-      { kind: 'followup', priority: 2 },
-    )
-  }
 
   const recapDue =
     mode.periodicRecap &&
@@ -143,11 +107,7 @@ function coachSessionCue(coach, now) {
 
   if (recapDue) {
     const compass = session.runningNote?.lines?.slice(0, 3) ?? []
-    return lineSet(
-      `${mode.name} recap`,
-      compass.length > 0 ? compass : recent.slice(-3).map(segment => segmentSnippet(segment)),
-      { kind: 'recap', priority: 2 },
-    )
+    if (compass.length >= 2) return lineSet(`${mode.name} recap`, compass, { kind: 'recap', priority: 2 })
   }
 
   if (recent.length === 0) {
@@ -217,6 +177,10 @@ export function buildCue({
 
   if (!cue) {
     cue = coachSessionCue(coach, now)
+  }
+
+  if (!cue && coach?.session?.active) {
+    cue = lineSet('Listening', [], { kind: 'thought', priority: 0, quiet: true })
   }
 
   if (!cue) {

@@ -1,5 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { Checklists } from '../src/checklists.js'
 
@@ -191,7 +194,7 @@ test('Start Day with no saved list named still starts the day and hands back the
   assert.deepEqual(checklists.snapshot(1_000).active, [])
 })
 
-test('Start Day ignores statement and correction fragments when creating tasks', () => {
+test('Start Day ignores fragments without guessing a correction', () => {
   const checklists = new Checklists(
     { checklists: [] },
     { runsPath: null, logPath: null, summaryPath: null },
@@ -204,7 +207,16 @@ test('Start Day ignores statement and correction fragments when creating tasks',
   )
 
   assert.equal(result.ok, true)
-  assert.deepEqual(result.unmatched, ['Text my doctor', 'Call the vet'])
+  assert.deepEqual(result.unmatched, ['Text my doctor', 'Call the bet'])
+})
+
+test('unclear spoken fragments remain visible in the proposal but do not commit by default', () => {
+  const checklists = new Checklists({ checklists: [] }, { runsPath: null, logPath: null, summaryPath: null })
+  const result = checklists.draftDay('Doctor appointment. Text my doctor.', 'life', 'first', 1000)
+  assert.deepEqual(result.draft.items.map(item => [item.label, item.include]), [
+    ['Text my doctor', true], ['Doctor appointment', false],
+  ])
+  assert.deepEqual(checklists.commitDayDraft('life', 2000).tasks.map(item => item.label), ['Text my doctor'])
 })
 
 test('Start Day from a named step commits only that step onward', () => {
@@ -276,10 +288,14 @@ test('Start Day draft changes nothing until reviewed, then commits only kept row
   assert.deepEqual(staged.draft.items.map(item => item.label), ['Laundry', 'Call the vet'])
 
   checklists.setDayDraftItem('life', 'checklist:laundry', false, 2_000)
-  const committed = checklists.commitDayDraft('life', 3_000)
+  const prepared = checklists.prepareDayDraft('life', 3_000)
+  assert.deepEqual(prepared.tasks.map(item => item.label), ['Call the vet'])
+  assert.ok(checklists.dayStatus('life', 3_000).draft)
+  const committed = checklists.commitDayDraft('life', 3_000, ['vet-task'])
   assert.equal(committed.ok, true)
   assert.deepEqual(committed.checklistIds, [])
   assert.deepEqual(committed.tasks.map(item => item.label), ['Call the vet'])
+  assert.deepEqual(committed.taskIds, ['vet-task'])
   assert.equal(checklists.dayStatus('life', 3_000).draft, undefined)
 })
 
@@ -311,6 +327,121 @@ test('later Start Day recordings merge into review instead of replacing it', () 
   assert.deepEqual(later.draft.items.map(item => item.label), ['Call the vet', 'Dishes'])
   assert.match(later.draft.transcript, /Call the vet\.\nDishes and call the vet\./)
   assert.equal(checklists.dayStatus('life', 2_000).started, false)
+})
+
+test('October draft survives restart, keeps later work, and supports explicit row correction', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'day-draft-'))
+  const runsPath = join(directory, 'runs.json')
+  const config = {
+    timezone: 'UTC', resetHour: 0,
+    checklists: [{ id: 'dishes', name: 'Dishes', space: 'life', kind: 'ondemand', items: [{ id: 'load', label: 'Load dishwasher' }] }],
+  }
+  const firstDay = Date.UTC(2026, 9, 14, 12)
+  try {
+    let checklists = new Checklists(config, { runsPath, logPath: null, summaryPath: null })
+    checklists.draftDay('Text my doctor and call the bet. V-E-T VET veterinarian.', 'life', 'doctor', firstDay)
+    checklists = new Checklists(config, { runsPath, logPath: null, summaryPath: null })
+    const later = checklists.draftDay('Dishes and apply for three jobs and clean the cap and clean the wheel room.', 'life', 'later', firstDay + 1000)
+    assert.deepEqual(later.draft.items.map(item => item.label), [
+      'Text my doctor', 'Call the bet', 'V-E-T VET veterinarian', 'Dishes', 'Apply for three jobs', 'Clean the cap', 'Clean the wheel room',
+    ])
+    assert.equal(later.draft.items[2].include, false)
+    const vet = later.draft.items.find(item => item.label === 'Call the bet')
+    assert.equal(checklists.reviseDayDraftItem('life', vet.id, { label: 'Call the vet', note: 'Vet appointment' }, firstDay + 2000).ok, true)
+    const kitchen = later.draft.items.find(item => item.label === 'Clean the cap')
+    const living = later.draft.items.find(item => item.label === 'Clean the wheel room')
+    checklists.reviseDayDraftItem('life', kitchen.id, { label: 'Clean the kitchen' }, firstDay + 2000)
+    checklists.reviseDayDraftItem('life', living.id, { label: 'Clean the living room' }, firstDay + 2000)
+    const committed = checklists.commitDayDraft('life', firstDay + 3000)
+    assert.deepEqual(committed.tasks.map(item => item.label), [
+      'Text my doctor', 'Call the vet', 'Apply for three jobs', 'Clean the kitchen', 'Clean the living room',
+    ])
+    assert.equal(committed.tasks.find(item => item.label === 'Call the vet').note, 'Vet appointment')
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('repeat aliases and one-off names do not double a preset unless deliberately kept', () => {
+  const checklists = new Checklists({
+    checklists: [{ id: 'vacuum', name: 'Vacuum', aliases: ['floors'], space: 'life', kind: 'ondemand', items: [{ id: 'clear', label: 'Clear floors' }] }],
+  }, { runsPath: null, logPath: null, summaryPath: null })
+  const result = checklists.draftDay('Vacuum and clean floors and vacuum.', 'life', 'first', 1000)
+  assert.deepEqual(result.draft.items.map(item => item.label), ['Vacuum'])
+  const later = checklists.draftDay('Vacuum the living room.', 'life', 'second', 2000)
+  assert.deepEqual(later.draft.items.map(item => item.label), ['Vacuum'])
+  const conflicted = checklists.draftDay('Vacuum.', 'life', 'third', 3000, ['Vacuum living room'])
+  assert.equal(conflicted.draft.items[0].include, false)
+  assert.equal(conflicted.draft.items[0].conflict, 'Vacuum living room')
+  assert.deepEqual(checklists.commitDayDraft('life', 4000).checklistIds, [])
+  checklists.draftDay('Vacuum.', 'life', 'fourth', 5000, ['Vacuum living room'])
+  checklists.setDayDraftItem('life', 'checklist:vacuum', true, 6000)
+  assert.deepEqual(checklists.commitDayDraft('life', 7000).checklistIds, ['vacuum'])
+})
+
+test('minor article differences in repeated task labels merge before commit', () => {
+  const checklists = new Checklists({ checklists: [] }, { runsPath: null, logPath: null, summaryPath: null })
+  checklists.draftDay('Clean kitchen.', 'life', 'first', 1000)
+  const later = checklists.draftDay('Clean the kitchen.', 'life', 'second', 2000)
+  assert.deepEqual(later.draft.items.map(item => item.label), ['Clean kitchen'])
+  assert.deepEqual(checklists.commitDayDraft('life', 3000).tasks.map(item => item.label), ['Clean kitchen'])
+})
+
+test('reparse one row preserves other draft work and exposes its source', () => {
+  const checklists = new Checklists({ checklists: [] }, { runsPath: null, logPath: null, summaryPath: null })
+  const result = checklists.draftDay('Clean the cap and apply for three jobs.', 'life', 'first', 1000)
+  const row = result.draft.items[0]
+  assert.match(row.source, /Clean the cap/)
+  checklists.reviseDayDraftItem('life', row.id, { label: 'Clean the kitchen' }, 2000)
+  const reparsed = checklists.reparseDayDraftItem('life', row.id, 3000)
+  assert.equal(reparsed.draft.items[0].label, 'Clean the cap')
+  assert.equal(reparsed.draft.items[1].label, 'Apply for three jobs')
+})
+
+test('a spoken label correction can turn a one-off into a named preset step', () => {
+  const checklists = new Checklists({ checklists: [{
+    id: 'laundry', name: 'Laundry', space: 'life', kind: 'ondemand',
+    items: [{ id: 'load', label: 'Load washer' }, { id: 'hang', label: 'Hang' }],
+  }] }, { runsPath: null, logPath: null, summaryPath: null })
+  const drafted = checklists.draftDay('Clean the wheel room.', 'life', 'first', 1000)
+  const row = drafted.draft.items[0]
+  const revised = checklists.reviseDayDraftItem('life', row.id, { label: 'Laundry from hang' }, 2000)
+  assert.equal(revised.draft.items[0].kind, 'checklist')
+  assert.equal(revised.draft.items[0].fromStep, 'Hang')
+  assert.deepEqual(checklists.commitDayDraft('life', 3000).checklistIds, ['laundry'])
+})
+
+test('rebuild and next-day draft keep unresolved task identities', () => {
+  const checklists = new Checklists({ timezone: 'UTC', resetHour: 0, checklists: [
+    { id: 'dishes', name: 'Dishes', space: 'life', kind: 'ondemand', items: [{ id: 'load', label: 'Load dishwasher' }] },
+  ] }, { runsPath: null, logPath: null, summaryPath: null })
+  const firstDay = Date.UTC(2026, 9, 14, 12)
+  checklists.draftDay('Text my doctor and call the vet.', 'life', 'first', firstDay)
+  checklists.commitDayDraft('life', firstDay + 1000)
+  checklists.commitTasks('life', ['doctor', 'vet'], firstDay + 2000)
+  checklists.draftDay('Clean the kitchen.', 'life', 'second', firstDay + 3000)
+  checklists.discardDayDraft('life', firstDay + 4000)
+  assert.deepEqual(checklists.committedTaskIds('life'), ['doctor', 'vet'])
+  const nextDay = firstDay + 86400_000
+  checklists.draftDay('Dishes.', 'life', 'third', nextDay)
+  assert.deepEqual(checklists.committedTaskIds('life'), ['doctor', 'vet'])
+  assert.deepEqual(checklists.dayStatus('life', nextDay).draft.items.map(item => item.label), ['Dishes'])
+})
+
+test('a removed preset cannot silently disappear during confirmation', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'day-draft-missing-'))
+  const runsPath = join(directory, 'runs.json')
+  try {
+    const withPreset = new Checklists({ checklists: [
+      { id: 'dishes', name: 'Dishes', space: 'life', kind: 'ondemand', items: [{ id: 'load', label: 'Load' }] },
+    ] }, { runsPath, logPath: null, summaryPath: null })
+    withPreset.draftDay('Dishes.', 'life', 'first', 1000)
+    const withoutPreset = new Checklists({ checklists: [] }, { runsPath, logPath: null, summaryPath: null })
+    assert.match(withoutPreset.prepareDayDraft('life', 2000).error, /no longer exists/)
+    assert.equal(withoutPreset.dayStatus('life', 2000).draft.items[0].label, 'Dishes')
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 })
 
 test('committed task ids carry across days without duplicating identities', () => {

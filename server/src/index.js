@@ -12,7 +12,7 @@ import { Inbox } from './inbox.js'
 import { Tasks, matchOpenTask } from './tasks.js'
 import { Triage, sweepInbox } from './triage.js'
 import { Jobs, JOB } from './jobs.js'
-import { distillNote } from './distill.js'
+import { composeListenSummary, fallbackListenSummary, sessionRecap } from './listenSummary.js'
 import { Notifier, sweepWaits } from './notify.js'
 import { computeGame, gameSummary, GameAnnouncer } from './game.js'
 import { cleanEatOut, loadEatOut, saveEatOut } from './eatOut.js'
@@ -21,10 +21,12 @@ import { buildCue } from './cues.js'
 import { Coach } from './coach.js'
 import { transcribePcm, transcriberInfo } from './stt.js'
 import { AssistantChat } from './assistant.js'
-import { coalesceTranscriptSegments, isNonSpeechText, parseTaskCommand, transcriptText } from './transcript.js'
+import { coalesceTranscriptSegments, isNonSpeechText, mergeRawSegments, parseTaskCommand, transcriptText } from './transcript.js'
 import { handleRemoteInput } from './remoteinput.js'
 import { MorningBrief } from './morningBrief.js'
 import { Recordings } from './recordings.js'
+import { SpokenWork } from './spokenWork.js'
+import { legacySpokenInventory } from './spokenWorkImport.js'
 import { remainingPlanSteps } from './planRows.js'
 import { refreshWeatherBrief, weatherRefreshDelayMs } from './sources/weather.js'
 
@@ -140,6 +142,11 @@ const coach = new Coach({
 
 const recordings = new Recordings({
   rootPath: join(DATA_DIR, 'recordings'),
+})
+
+const spokenWork = new SpokenWork({
+  logPath: join(DATA_DIR, 'spoken-work.jsonl'),
+  indexPath: join(DATA_DIR, 'spoken-work.json'),
 })
 
 const morningBrief = new MorningBrief({
@@ -501,13 +508,14 @@ function queuedNoteText(found) {
   return parts.join('\n').slice(0, 4_000)
 }
 
-function latestCoachModelCueForSession(space, sessionId, now = Date.now(), freshOnly = true) {
+function latestCoachModelCueForSession(space, sessionId, now = Date.now(), freshOnly = true, finalOnly = false) {
   if (!sessionId) return null
 
   const freshMs = Math.max(AI_CUE_INTERVAL_MS * 4, 2 * 60_000)
   return [...jobs.jobs.values()]
     .filter(job => job.capability === 'coach.cue' && job.status === JOB.DONE)
     .filter(job => job.input?.space === space && job.input?.sessionId === sessionId)
+    .filter(job => !finalOnly || job.input?.finalNote)
     .filter(job => !freshOnly || job.updatedAt >= now - freshMs)
     .sort((a, b) => b.updatedAt - a.updatedAt)
     .map(job => ({
@@ -630,23 +638,11 @@ function publicCoachModelCue(modelCue) {
 
 function modelNoteSummary(modelResult) {
   const board = modelBoard(modelResult)
-  if (board?.overallTopic) {
-    const sections = board.sections.length > 1 ? `Roadmap: ${board.sections.join(' > ')}` : ''
-    const recapLines = modelResult?.kind === 'recap' && Array.isArray(modelResult.lines)
-      ? modelResult.lines.map(line => String(line || '').trim()).filter(Boolean).slice(0, 3)
-      : []
-    return [board.overallTopic, sections, ...recapLines, ...board.currentSummary]
-      .filter(Boolean)
-      .join('\n')
-      .slice(0, 2_000)
-  }
   const recapLines = modelResult?.kind === 'recap' && Array.isArray(modelResult.lines)
-    ? modelResult.lines.map(line => String(line || '').trim()).filter(Boolean).slice(0, 3)
+    ? modelResult.lines
     : []
-  if (recapLines.length) return recapLines.join('\n').slice(0, 2_000)
   const note = modelRunningNote(modelResult)
-  if (!note?.lines?.length) return null
-  return note.lines.slice(0, 3).join('\n').slice(0, 2_000)
+  return composeListenSummary(board, recapLines, note?.lines)
 }
 
 function applyFinalListenSummary(job, modelResult) {
@@ -668,7 +664,7 @@ function upgradeListenNoteSummaries() {
       const sessionId = note.id.slice(0, -':note'.length)
       const session = coach.session(sessionId)
       if (!session) continue
-      const modelResult = latestCoachModelCueForSession(cueSpace(session.space), sessionId, Date.now(), false)
+      const modelResult = latestCoachModelCueForSession(cueSpace(session.space), sessionId, Date.now(), false, true)
       // A model summary when there is one; otherwise clean up the raw text
       // that was saved while no worker was running. The newline test is what
       // stops this running twice over the same note: a distilled note already
@@ -729,7 +725,10 @@ function createCoachCueJob(session, {
   const safeSpace = cueSpace(session.space)
   const mode = coach.getMode(session.modeId) ?? coach.activeMode(safeSpace)
   const transcriptWindow = finalNote ? undefined : mode.id === 'notes' ? -96 : -32
-  const recentSegments = coalesceTranscriptSegments(session.segments ?? session.recentSegments)
+  const sourceSegments = finalNote
+    ? mergeRawSegments(session.segments, recordings.transcript(session.id))
+    : session.segments ?? session.recentSegments
+  const recentSegments = coalesceTranscriptSegments(sourceSegments)
     .slice(transcriptWindow)
     // Solo Notes is one person thinking aloud. Direction-based speaker guesses
     // can split one sentence into a fake conversation and distort summaries.
@@ -940,11 +939,11 @@ function consolidatedSessionNote(session) {
     : session?.modeId === 'notes'
       ? 8_000
       : 4_000
-  return transcriptText(session?.segments, max)
+  return transcriptText(mergeRawSegments(session?.segments, recordings.transcript(session?.id)), max)
 }
 
 function soundsLikePlan(label) {
-  return /\b(?:build|create|design|organize|sort out|clean out|set up|prepare|plan|project|renovate|move)\b/i.test(label)
+  return /\b(?:build|create|design|organize|sort out|clean out|set up|prepare|plan|project|renovate|move|apply for (?:\w+\s+)?(?:jobs|positions))\b/i.test(label)
 }
 
 function routeCoachSession(session, at = Date.now()) {
@@ -956,7 +955,16 @@ function routeCoachSession(session, at = Date.now()) {
   if (session.context?.taskId === '__day_start__') {
     // Ending the recording creates a durable proposal only. Nothing reaches
     // the real list until the wearer reviews it and confirms Use this list.
-    const result = checklists.draftDay(rawText, space, session.id, at)
+    const result = checklists.draftDay(rawText, space, session.id, at, tasks.list(at).filter(task => task.space === space).map(task => task.label))
+    return { kind: 'day-draft', result }
+  }
+
+  const dayRow = String(session.context?.taskId || '').match(/^__day_(label|note)__:(.+)$/)
+  if (dayRow) {
+    const value = dayRow[1] === 'label'
+      ? rawText.replace(/^(?:no[, ]+|i meant |change (?:it|that) to |call it )/i, '').trim()
+      : rawText
+    const result = checklists.reviseDayDraftItem(space, dayRow[2], { [dayRow[1]]: value }, at)
     return { kind: 'day-draft', result }
   }
 
@@ -982,16 +990,9 @@ function routeCoachSession(session, at = Date.now()) {
     return { kind: 'note', taskId: explicit.task.id, result }
   }
 
-  const modelResult = latestCoachModelCueForSession(space, session.id, at, false)
-  const summaryText = modelNoteSummary(modelResult)
-  // No model result means the Coach worker is not running — out of credit,
-  // not installed, laptop asleep. That used to save the raw transcript, which
-  // is how the Notes list ended up full of rows titled "uhh so I was
-  // thinking". The distiller understands nothing, but it removes what speech
-  // has and writing does not and puts a readable first line on top, which is
-  // the difference between a note you can find and one you never open.
-  const noteText = summaryText || distillNote(rawText) || rawText
-  const noteBy = summaryText ? 'listen-ai' : 'listen'
+  const fullSegments = mergeRawSegments(session.segments, recordings.transcript(session.id))
+  const noteText = fallbackListenSummary(fullSegments) || rawText
+  const noteBy = 'listen'
 
   const contextTaskId = session.context?.taskId
   if (contextTaskId && tasks.has(contextTaskId)) {
@@ -1024,46 +1025,6 @@ function routeCoachSession(session, at = Date.now()) {
     result,
     summaryTarget: { kind: 'task', subjectId: taskId, noteId },
   }
-}
-
-function summaryText(text, max = 88) {
-  return String(text || '')
-    .replace(/^(?:add|create|make)\s+(?:a\s+)?(?:task|to-?do|todo)\s+(?:to\s+)?/i, '')
-    .replace(/^(?:remind me to|remember to|i need to|need to)\s+/i, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, max)
-}
-
-function sessionSummary(session) {
-  const segments = (session?.segments ?? []).filter(segment => segment.final !== false)
-  if (segments.length === 0) return { title: 'Session recap', lines: [] }
-
-  const lines = []
-  const seen = new Set()
-  const add = (prefix, text) => {
-    const body = summaryText(text)
-    const key = normalizeRouteText(`${prefix} ${body}`)
-    if (!body || seen.has(key)) return
-    seen.add(key)
-    lines.push(`${prefix}: ${body}`)
-  }
-
-  for (const segment of segments.slice().reverse()) {
-    const text = segment.text
-    if (/\b(decided|decision|agreed|plan is|we will|we're going to|i will|i'll)\b/i.test(text)) {
-      add('Decision', text)
-    } else if (/\b(remind me to|remember to|need to|have to|should|follow up|call|text|email|send|book|schedule|pay|check|buy|file|finish|ask|tell)\b/i.test(text)) {
-      add('Next', text)
-    }
-    if (lines.length >= 5) break
-  }
-
-  if (lines.length === 0 && session.context?.label) {
-    lines.push(`Filed under: ${session.context.label}`)
-  }
-  if (lines.length === 0) lines.push(`Captured ${segments.length} line${segments.length === 1 ? '' : 's'}.`)
-  return { title: 'Session recap', lines: lines.slice(0, 5) }
 }
 
 if (!INGEST_TOKEN) {
@@ -1199,8 +1160,8 @@ async function drainTranscriptions() {
 
 function cors(res) {
   res.setHeader('Access-Control-Allow-Origin', process.env.ALLOWED_ORIGIN || '*')
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, HEAD, OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, HEAD, OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, If-Match')
   res.setHeader('Access-Control-Max-Age', '86400')
 }
 
@@ -1406,6 +1367,44 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  if (req.method === 'GET' && url.pathname === '/review') {
+    try {
+      const html = readFileSync(join(WEB_DIR, 'review.html'))
+      cors(res)
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
+      return res.end(html)
+    } catch {
+      return json(res, 404, { error: 'not found' })
+    }
+  }
+
+  if (req.method === 'GET' && (url.pathname === '/spoken-work' || url.pathname.startsWith('/spoken-work/'))) {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    const inventory = legacySpokenInventory(DATA_DIR)
+    if (url.pathname === '/spoken-work/inventory') {
+      return json(res, 200, { ok: true, counts: inventory.counts, exceptions: inventory.exceptions })
+    }
+    const canonical = spokenWork.all()
+    const bySource = new Map(inventory.items.map(item => [item.sourceKey, item]))
+    for (const item of canonical) bySource.set(item.sourceKey, item)
+    const all = [...bySource.values()].sort((left, right) => right.capturedAt - left.capturedAt || left.id.localeCompare(right.id))
+    if (url.pathname !== '/spoken-work') {
+      const id = decodeURIComponent(url.pathname.slice('/spoken-work/'.length))
+      const item = all.find(row => row.id === id)
+      return item ? json(res, 200, { ok: true, item, events: spokenWork.history(id) }) : json(res, 404, { error: 'unknown spoken work item' })
+    }
+    const state = url.searchParams.get('state') || 'active'
+    const filtered = all.filter(item => state === 'all' || (state === 'active'
+      ? item.reviewState === 'unreviewed' || item.reviewState === 'needs_clarification'
+      : item.reviewState === state))
+    const cursor = Math.max(0, Number(url.searchParams.get('cursor')) || 0)
+    const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 50))
+    const items = filtered.slice(cursor, cursor + limit)
+    return json(res, 200, { ok: true, items, total: filtered.length,
+      nextCursor: cursor + items.length < filtered.length ? cursor + items.length : null,
+      needsReviewCount: all.filter(item => item.reviewState === 'unreviewed' || item.reviewState === 'needs_clarification').length })
+  }
+
   if (req.method === 'GET' && url.pathname === '/coach') {
     try {
       const html = readFileSync(join(WEB_DIR, 'coach.html'))
@@ -1558,7 +1557,7 @@ const server = http.createServer(async (req, res) => {
     if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
     const session = coach.session(decodeURIComponent(coachSummaryMatch[1]))
     if (!session) return json(res, 404, { error: 'unknown session' })
-    return json(res, 200, sessionSummary(session))
+    return json(res, 200, sessionRecap({ ...session, segments: mergeRawSegments(session.segments, recordings.transcript(session.id)) }))
   }
 
   const coachTranscriptMatch = url.pathname.match(/^\/coach\/session\/([^/]+)\/transcript$/)
@@ -2307,18 +2306,29 @@ const server = http.createServer(async (req, res) => {
     let result
 
     if (body.action === 'stage') {
-      result = checklists.draftDay(String(body.transcript || ''), space, String(body.sessionId || crypto.randomUUID()))
+      result = checklists.draftDay(String(body.transcript || ''), space, String(body.sessionId || crypto.randomUUID()), Date.now(), tasks.list().filter(task => task.space === space).map(task => task.label))
     } else if (body.action === 'toggle') {
       result = checklists.setDayDraftItem(space, String(body.itemId || ''), body.include !== false)
+    } else if (body.action === 'revise') {
+      result = checklists.reviseDayDraftItem(space, String(body.itemId || ''), {
+        ...(body.label !== undefined ? { label: body.label } : {}),
+        ...(body.note !== undefined ? { note: body.note } : {}),
+      })
+    } else if (body.action === 'reparse') {
+      result = checklists.reparseDayDraftItem(space, String(body.itemId || ''))
     } else if (body.action === 'discard') {
       result = checklists.discardDayDraft(space)
     } else if (body.action === 'commit') {
-      result = checklists.commitDayDraft(space)
-      if (result.ok) {
+      const prepared = checklists.prepareDayDraft(space)
+      result = prepared
+      if (prepared.ok) {
         const open = tasks.list().filter(task => task.space === space)
-        const created = result.tasks.map((item, index) => {
+        const resolved = prepared.tasks.map((item, index) => {
           const existing = matchOpenTask(item.label, open)
-          if (existing) return { ok: true, task: existing, existing: true }
+          if (existing) {
+            if (item.note?.trim()) tasks.addNote(existing.id, item.note, 'start-day', `${prepared.draftId}:day-note:${item.id || index}`)
+            return { ok: true, task: existing, existing: true }
+          }
           return tasks.addTask({
             label: item.label,
             space,
@@ -2327,11 +2337,16 @@ const server = http.createServer(async (req, res) => {
             needsPlan: soundsLikePlan(item.label),
             firstNote: item.note || item.label,
             by: 'start-day',
-            clientId: `${result.draftId}:day-task:${item.id || index}`,
+            clientId: `${prepared.draftId}:day-task:${item.id || index}`,
           })
-        }).filter(createdTask => createdTask.ok).map(createdTask => createdTask.task)
-        checklists.commitTasks(space, created.map(task => task.id))
-        result.createdTasks = created
+        })
+        const failed = resolved.find(row => !row.ok)
+        if (failed) result = { ok: false, error: failed.error || 'could not save a task; review is still available' }
+        else {
+          const created = resolved.map(row => row.task)
+          result = checklists.commitDayDraft(space, Date.now(), created.map(task => task.id))
+          if (result.ok) result.createdTasks = created
+        }
       }
     } else {
       result = { ok: false, error: 'unknown draft action' }

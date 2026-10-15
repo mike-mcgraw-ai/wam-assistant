@@ -590,7 +590,7 @@ export async function skipDay(space: 'life' | 'ops' = 'life') {
 
 /** Review actions for the durable Start Day proposal. */
 export async function updateDayDraft(
-  action: 'toggle' | 'discard' | 'commit',
+  action: 'toggle' | 'discard' | 'commit' | 'reparse',
   space: 'life' | 'ops' = 'life',
   itemId?: string,
   include?: boolean,

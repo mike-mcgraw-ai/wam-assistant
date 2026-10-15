@@ -25,6 +25,11 @@ function dayClauses(value) {
     .filter(Boolean)
 }
 
+function sameWork(left, right) {
+  const key = value => normalizeMatchText(value).split(' ').filter(word => !['a', 'an', 'my', 'the'].includes(word)).join(' ')
+  return key(left) === key(right)
+}
+
 function cleanTaskClause(value) {
   const cleaned = String(value ?? '')
     .replace(/^(?:(?:okay|ok|so|today|please)\s+)+/i, '')
@@ -86,8 +91,6 @@ const ACTION_WORDS = new Set([
   'water',
 ])
 
-const STOP_WORDS = new Set(['a', 'an', 'and', 'for', 'my', 'of', 'on', 'or', 'the', 'to'])
-
 function actionSource(value) {
   return normalizeMatchText(value).replace(/^(?:(?:okay|ok|so|today|please)\s+)+/, '')
 }
@@ -100,60 +103,6 @@ function isActionableTaskClause(raw) {
   }
   const [first] = source.split(' ')
   return ACTION_WORDS.has(first)
-}
-
-function editDistanceAtMostOne(a, b) {
-  if (a === b) return true
-  if (Math.abs(a.length - b.length) > 1) return false
-  let i = 0
-  let j = 0
-  let edits = 0
-  while (i < a.length && j < b.length) {
-    if (a[i] === b[j]) {
-      i += 1
-      j += 1
-      continue
-    }
-    edits += 1
-    if (edits > 1) return false
-    if (a.length === b.length) {
-      i += 1
-      j += 1
-    } else if (a.length > b.length) {
-      i += 1
-    } else {
-      j += 1
-    }
-  }
-  return edits + (a.length - i) + (b.length - j) <= 1
-}
-
-function correctionCandidates(raw) {
-  const tokens = normalizeMatchText(raw).split(' ').filter(Boolean)
-  const spelled = tokens.filter(token => token.length === 1).join('')
-  const words = tokens.filter(token => token.length >= 3 && !STOP_WORDS.has(token) && !ACTION_WORDS.has(token))
-  return [...new Set([...(spelled.length >= 3 ? [spelled] : []), ...words])]
-}
-
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
-function matchCase(original, replacement) {
-  return /^[A-Z]/.test(original) ? replacement.charAt(0).toUpperCase() + replacement.slice(1) : replacement
-}
-
-function applyCorrection(label, rawCorrection) {
-  const candidates = correctionCandidates(rawCorrection)
-  if (!candidates.length) return label
-  const words = label.match(/[A-Za-z0-9']+/g) ?? []
-  for (const word of words) {
-    const clean = normalizeMatchText(word)
-    if (clean.length < 3 || STOP_WORDS.has(clean) || ACTION_WORDS.has(clean)) continue
-    const replacement = candidates.find(candidate => candidate !== clean && editDistanceAtMostOne(clean, candidate))
-    if (replacement) return label.replace(new RegExp(`\\b${escapeRegExp(word)}\\b`, 'i'), matchCase(word, replacement))
-  }
-  return label
 }
 
 /**
@@ -386,6 +335,8 @@ export class Checklists {
       .filter(template => template.kind === 'ondemand' && (template.space ?? 'ops') === space)
     const byId = new Map()
     const unmatched = []
+    const unmatchedSources = []
+    const fragments = []
 
     for (const rawClause of dayClauses(transcript)) {
       const clause = normalizeMatchText(rawClause)
@@ -398,14 +349,11 @@ export class Checklists {
         const label = cleanTaskClause(rawClause)
         if (!label) continue
         if (!isActionableTaskClause(rawClause)) {
-          const prior = unmatched[unmatched.length - 1]
-          if (prior) {
-            const corrected = applyCorrection(prior, rawClause)
-            if (corrected !== prior) unmatched[unmatched.length - 1] = corrected
-          }
+          fragments.push({ label, source: rawClause })
           continue
         }
         unmatched.push(label)
+        unmatchedSources.push(rawClause)
         continue
       }
 
@@ -420,20 +368,20 @@ export class Checklists {
           }
         }
         const prior = byId.get(template.id)
-        if (!prior || startIndex < prior.startIndex) byId.set(template.id, { template, startIndex })
+        if (!prior || startIndex < prior.startIndex) byId.set(template.id, { template, startIndex, source: rawClause })
       }
     }
 
-    return { transcript, matches: [...byId.values()], unmatched }
+    return { transcript, matches: [...byId.values()], unmatched, unmatchedSources, fragments }
   }
 
   /** Stage a spoken walk for review without changing any checklist or task. */
-  draftDay(text, space = 'life', sessionId = randomUUID(), now = Date.now()) {
-    const { transcript, matches, unmatched } = this.dayIntent(text, space)
+  draftDay(text, space = 'life', sessionId = randomUUID(), now = Date.now(), openTaskLabels = []) {
+    const { transcript, matches, unmatched, unmatchedSources, fragments } = this.dayIntent(text, space)
     if (!transcript) return { ok: false, error: 'nothing heard' }
 
     const items = [
-      ...matches.map(({ template, startIndex }) => ({
+      ...matches.map(({ template, startIndex, source }) => ({
         id: `checklist:${template.id}`,
         kind: 'checklist',
         label: template.name,
@@ -442,6 +390,7 @@ export class Checklists {
         fromStep: template.items[startIndex]?.label ?? null,
         include: true,
         note: '',
+        source,
       })),
       ...unmatched.map((label, index) => ({
         id: `task:${sessionId}:${index}`,
@@ -449,6 +398,16 @@ export class Checklists {
         label,
         include: true,
         note: '',
+        source: unmatchedSources[index],
+      })),
+      ...fragments.map(({ label, source }, index) => ({
+        id: `task:${sessionId}:${unmatched.length + index}`,
+        kind: 'task',
+        label,
+        include: false,
+        uncertain: true,
+        note: '',
+        source,
       })),
     ]
     const day = this.dayKey(now)
@@ -466,10 +425,21 @@ export class Checklists {
     const priorDraft = prior.draft
     const mergedItems = priorDraft ? priorDraft.items.map(item => ({ ...item })) : []
     for (const item of items) {
+      if (item.kind === 'checklist') {
+        const checklistName = normalizeMatchText(item.label)
+        const conflict = openTaskLabels.find(label => {
+          const taskName = normalizeMatchText(label)
+          return taskName === checklistName || ` ${taskName} `.includes(` ${checklistName} `)
+        })
+        if (conflict) {
+          item.include = false
+          item.conflict = String(conflict)
+        }
+      }
       const existing = mergedItems.find(candidate =>
         item.kind === 'checklist'
           ? candidate.kind === 'checklist' && candidate.checklistId === item.checklistId
-          : candidate.kind === 'task' && normalizeMatchText(candidate.label) === normalizeMatchText(item.label),
+          : candidate.kind === 'task' && sameWork(candidate.label, item.label),
       )
       if (!existing) {
         mergedItems.push(item)
@@ -479,9 +449,11 @@ export class Checklists {
         existing.startIndex = item.startIndex
         existing.fromStep = item.fromStep
       }
+      if (item.conflict) existing.conflict = item.conflict
+      if (!item.uncertain) delete existing.uncertain
       // Naming it again means it belongs in the latest proposal, even if an
       // earlier review had temporarily removed it.
-      existing.include = true
+      existing.include = item.uncertain ? existing.include : item.include
     }
     const draft = {
       id: priorDraft?.id ?? sessionId,
@@ -508,6 +480,59 @@ export class Checklists {
     return { ok: true, draft: saved.draft }
   }
 
+  reviseDayDraftItem(space = 'life', itemId, changes = {}, now = Date.now()) {
+    const saved = this.dayStarts.get(`${space}:${this.dayKey(now)}`)
+    const item = saved?.draft?.items?.find(row => row.id === itemId)
+    if (!item) return { ok: false, error: 'draft item not found' }
+    if (changes.label !== undefined) {
+      const label = String(changes.label).replace(/\s+/g, ' ').trim().slice(0, 80)
+      if (!label) return { ok: false, error: 'empty label' }
+      const parsed = this.dayIntent(label, space)
+      if (parsed.matches.length === 1 && parsed.unmatched.length === 0) {
+        const { template, startIndex } = parsed.matches[0]
+        Object.assign(item, { kind: 'checklist', label: template.name, checklistId: template.id, startIndex, fromStep: template.items[startIndex]?.label ?? null })
+      } else {
+        Object.assign(item, { kind: 'task', label })
+        delete item.checklistId
+        delete item.startIndex
+        delete item.fromStep
+      }
+      delete item.conflict
+      delete item.uncertain
+      item.include = true
+    }
+    if (changes.note !== undefined) item.note = String(changes.note).trim().slice(0, 2_000)
+    saved.updatedAt = now
+    this.#log({ type: 'day_draft_revise', day: saved.day, space, draftId: saved.draft.id, itemId, at: now })
+    this.#persist()
+    return { ok: true, draft: saved.draft }
+  }
+
+  reparseDayDraftItem(space = 'life', itemId, now = Date.now()) {
+    const saved = this.dayStarts.get(`${space}:${this.dayKey(now)}`)
+    const item = saved?.draft?.items?.find(row => row.id === itemId)
+    if (!item) return { ok: false, error: 'draft item not found' }
+    if (!item.source) return { ok: false, error: 'original words unavailable' }
+    const parsed = this.dayIntent(item.source, space)
+    if (parsed.matches.length + parsed.unmatched.length !== 1) {
+      return { ok: false, error: 'original words need a fresh recording' }
+    }
+    if (parsed.matches.length) {
+      const { template, startIndex } = parsed.matches[0]
+      Object.assign(item, { kind: 'checklist', label: template.name, checklistId: template.id, startIndex, fromStep: template.items[startIndex]?.label ?? null })
+    } else {
+      Object.assign(item, { kind: 'task', label: parsed.unmatched[0] })
+      delete item.checklistId
+      delete item.startIndex
+      delete item.fromStep
+      delete item.conflict
+    }
+    delete item.uncertain
+    saved.updatedAt = now
+    this.#persist()
+    return { ok: true, draft: saved.draft }
+  }
+
   /** Throw away only the proposal; no real work was changed yet. */
   discardDayDraft(space = 'life', now = Date.now()) {
     const key = `${space}:${this.dayKey(now)}`
@@ -520,23 +545,40 @@ export class Checklists {
     return { ok: true }
   }
 
-  /** Commit reviewed checklist rows; the server creates the returned task rows. */
-  commitDayDraft(space = 'life', now = Date.now()) {
+  prepareDayDraft(space = 'life', now = Date.now()) {
+    const day = this.dayKey(now)
+    const draft = this.dayStarts.get(`${space}:${day}`)?.draft
+    if (!draft) return { ok: false, error: 'no Start Day draft to use' }
+    const selected = draft.items.filter(item => item.include !== false)
+    const unique = []
+    for (const item of selected) {
+      if (unique.some(prior => item.kind === prior.kind && (item.kind === 'checklist'
+        ? item.checklistId === prior.checklistId
+        : sameWork(item.label, prior.label)))) continue
+      unique.push(item)
+    }
+    const missing = unique.find(item => item.kind === 'checklist' && !this.templates.has(item.checklistId))
+    if (missing) return { ok: false, error: `reviewed checklist no longer exists: ${missing.label}` }
+    return { ok: true, draftId: draft.id, items: unique, tasks: unique.filter(item => item.kind === 'task') }
+  }
+
+  commitDayDraft(space = 'life', now = Date.now(), taskIds = []) {
+    const prepared = this.prepareDayDraft(space, now)
+    if (!prepared.ok) return prepared
     const day = this.dayKey(now)
     const key = `${space}:${day}`
     const prior = this.dayStarts.get(key)
-    const draft = prior?.draft
-    if (!draft) return { ok: false, error: 'no Start Day draft to use' }
-
-    const selected = draft.items.filter(item => item.include !== false)
+    const draft = prior.draft
+    const unique = prepared.items
     const checklistIds = []
     const runIds = []
-    for (const item of selected) {
+    for (const item of unique) {
       if (item.kind !== 'checklist') continue
       const started = this.start(item.checklistId, now, { startIndex: item.startIndex ?? 0 })
       if (!started.ok) continue
       checklistIds.push(item.checklistId)
       runIds.push(started.run.runId)
+      if (item.note?.trim()) this.addNote(item.checklistId, item.note, 'start-day', `${draft.id}:day-note:${item.id}`, now)
     }
 
     const { draft: _discarded, ...base } = prior
@@ -549,7 +591,7 @@ export class Checklists {
       updatedAt: now,
       checklistIds: [...new Set([...(prior.checklistIds ?? []), ...checklistIds])],
       runIds: [...new Set([...(prior.runIds ?? []), ...runIds])],
-      taskIds: Array.isArray(prior.taskIds) ? prior.taskIds : [],
+      taskIds: [...new Set([...(prior.taskIds ?? []), ...taskIds])],
       transcript: [prior.transcript, draft.transcript].filter(Boolean).join('\n').slice(-4_000),
     }
     this.dayStarts.set(key, saved)
@@ -558,7 +600,7 @@ export class Checklists {
     return {
       ok: true,
       draftId: draft.id,
-      tasks: selected.filter(item => item.kind === 'task'),
+      tasks: unique.filter(item => item.kind === 'task'),
       ...saved,
     }
   }

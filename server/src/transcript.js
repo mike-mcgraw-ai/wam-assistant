@@ -54,6 +54,15 @@ function isDisplayNoise(value) {
   return words.length > 1 && words.every(word => DISPLAY_NOISE.has(word))
 }
 
+function removeFillers(value) {
+  return value
+    .replace(/^(?:(?:um+|uh+|erm|er|ah|well|okay|ok|so)[,.]?\s+)+/i, '')
+    .replace(/\s*,?\s+\b(?:um+|uh+|erm)\b(?=[,.!?\s]|$)/gi, '')
+    .replace(/\b([a-z']+)(?:[, ]+\1)\b/gi, '$1')
+    .replace(/\s+([,.!?])/g, '$1')
+    .trim()
+}
+
 /**
  * Remove transport debris and low-information reactions from the face view.
  *
@@ -68,18 +77,14 @@ export function cleanTranscriptForDisplay(value) {
   let prior = ''
 
   for (const thought of thoughts) {
-    const clean = cleanText(thought).replace(/^[-–—]\s*/, '')
+    const clean = removeFillers(cleanText(thought).replace(/^[-–—]\s*/, ''))
     const key = displayKey(clean)
     if (!key || key === prior || isDisplayNoise(clean)) continue
     prior = key
     kept.push(clean)
   }
 
-  const joined = kept.join(' ').replace(/\s+([,.!?])/g, '$1').trim()
-  const intentAt = joined.search(
-    /\b(?:we (?:also )?need to|i need to|i want(?:ed)? to|i was specifically wanting to|(?:a )?better way to|remind me to|the point is)\b/i,
-  )
-  return intentAt > 0 ? joined.slice(intentAt).trim() : joined
+  return kept.join(' ').replace(/\s+([,.!?])/g, '$1').trim()
 }
 
 function appendChunk(left, right) {
@@ -90,7 +95,8 @@ function appendChunk(left, right) {
   // Every two-second Deepgram request is punctuated as if it were complete.
   // A lowercase/connective next chunk is strong evidence that period was a
   // transport boundary, not the end of the speaker's sentence.
-  const continues = /^(?:[a-z]|and\b|or\b|but\b|so\b|to\b|for\b|that\b|of\b|with\b|because\b)/.test(next)
+  const dangling = /\b(?:the|a|an|to|of|and|or|but|with|for|from|my|our|their|is|are|was|were)\.$/i.test(left)
+  const continues = dangling || /^(?:[a-z]|and\b|or\b|but\b|so\b|to\b|for\b|that\b|of\b|with\b|because\b)/.test(next)
   const prior = continues ? left.replace(/\.$/, '') : left
   return `${prior} ${next}`.replace(/\s+([,.!?])/g, '$1')
 }
@@ -103,7 +109,7 @@ function appendChunk(left, right) {
  * Speaker direction is intentionally not a block boundary: the glasses often
  * flips `me`/`someone` halfway through one sentence as the wearer moves.
  */
-export function coalesceTranscriptSegments(segments, { gapMs = 4_500, maxChars = 900 } = {}) {
+export function coalesceTranscriptSegments(segments, { gapMs = 4_500, maxChars = 360 } = {}) {
   const blocks = []
 
   for (const segment of Array.isArray(segments) ? segments : []) {
@@ -114,7 +120,9 @@ export function coalesceTranscriptSegments(segments, { gapMs = 4_500, maxChars =
     const prior = blocks.at(-1)
     const gap = prior ? at - prior.lastAt : Infinity
 
-    if (!prior || gap > gapMs || prior.text.length + text.length + 1 > maxChars) {
+    const closedThought = prior && prior.text.length >= 140 && /[.!?]$/.test(prior.text)
+      && /^[A-Z]/.test(text) && !/^(?:And|But|So|Or|Because|Which|Then|That|To)\b/.test(text)
+    if (!prior || gap > gapMs || prior.text.length + text.length + 1 > maxChars || closedThought) {
       blocks.push({
         id: String(segment?.id || `speech-${at}`),
         clientId: null,
@@ -144,6 +152,19 @@ export function displayTranscriptSegments(segments, { maxBlocks = 24 } = {}) {
     .map(segment => ({ ...segment, text: cleanTranscriptForDisplay(segment.text) }))
     .filter(segment => segment.text)
     .slice(-Math.max(1, Number(maxBlocks) || 24))
+}
+
+export function mergeRawSegments(live, archived) {
+  const seen = new Set()
+  return [...(Array.isArray(archived) ? archived : []), ...(Array.isArray(live) ? live : [])]
+    .filter(segment => {
+      if (!segment?.text || segment.final === false) return false
+      const key = segment.id || segment.clientId || `${segment.at}:${segment.text}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    .sort((left, right) => (Number(left.at) || 0) - (Number(right.at) || 0))
 }
 
 export function transcriptText(segments, max = 2_000) {

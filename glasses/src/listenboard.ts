@@ -226,22 +226,11 @@ export function cleanSpeech(raw: string): string {
 }
 
 function cleanBlocks(segments: CoachSegment[], forceMe = false): { speaker: 'me' | 'other'; text: string }[] {
-  const blocks: { speaker: 'me' | 'other'; text: string }[] = []
-  for (const segment of segments) {
-    const speaker = forceMe || segment.speaker === 'me' ? 'me' : 'other'
-    const text = segment.text.replace(/\s+/g, ' ').trim()
-    if (!text) continue
-    const previous = blocks[blocks.length - 1]
-    // Join the whole run from one speaker BEFORE cleaning, so the periods at
-    // chunk boundaries are visible to the cleaner.
-    if (previous && previous.speaker === speaker && previous.text.length < 600) {
-      previous.text = `${previous.text} ${text}`
-    } else {
-      blocks.push({ speaker, text })
-    }
-  }
-  return blocks
-    .map(block => ({ speaker: block.speaker, text: cleanSpeech(block.text) }))
+  return segments
+    .map(segment => ({
+      speaker: forceMe || segment.speaker === 'me' ? 'me' as const : 'other' as const,
+      text: cleanSpeech(segment.text),
+    }))
     .filter(block => block.text.length > 0)
 }
 
@@ -342,7 +331,7 @@ export function listenBoard(state: UiState): ListenBoard | null {
       transcriptBlock: { title: 'CLEAN TRANSCRIPT', note: scrollBack > 0 ? `back ${scrollBack}` : '' },
       transcript,
       scrollBack,
-      footer: reviewing ? 'click saves - back discards' : null,
+      footer: reviewing ? 'click saves - back saves' : null,
       emptyNote,
     }
   }
@@ -403,7 +392,7 @@ export function listenBoard(state: UiState): ListenBoard | null {
     transcriptBlock: { title: 'TRANSCRIPT', note: scrollBack > 0 ? `back ${scrollBack}` : '' },
     transcript,
     scrollBack,
-    footer: reviewing ? 'click saves - back discards' : null,
+    footer: reviewing ? 'click saves - back saves' : null,
     emptyNote,
   }
 }

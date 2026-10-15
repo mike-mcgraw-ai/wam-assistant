@@ -30,6 +30,7 @@ import { spawn } from 'node:child_process'
 import { hostname } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { keepUsefulCue, reconcileBoard } from './coach-quality.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -186,9 +187,12 @@ Return ONLY a JSON object, no prose:
   }
 }
 
-Use the mode instructions and the recent transcript. Help only when a cue would
+Use the mode instructions and the consolidated transcript. Help only when a cue would
 be useful mid-conversation: a short answer, a tactful correction, a good
 follow-up, concrete supportive advice, a thought worth holding, or a recap.
+Honor the enabled cue types. Offer a lull follow-up only when promptLulls is
+enabled; offer a periodic recap only when periodicRecap is enabled. A short
+transcript fragment by itself is never enough to justify interrupting.
 Do not invent facts, names, times, durations, or estimates. Do not tell the user
 to do anything irreversible without explicit confirmation. If there is no useful
 cue, return {"quiet":true,"title":"Listening","lines":[],"kind":"thought","priority":0}.
@@ -215,6 +219,9 @@ user glances at while talking:
   decided or promised, with the names, numbers and times that were said. Plain
   words, no filler, no commentary, no guesses. Cover roughly the last minute
   or two, newest point last. Rewrite freely as the conversation moves.
+- A model result that only repeats a short utterance such as "I found it" or
+  "look at her" is not a useful cue or summary. Keep the durable thread and
+  concrete details from the complete context. Be quiet if no helpful cue exists.
 - For mode id "notes", also maintain overallTopic, sections, and currentSummary.
   overallTopic is the durable subject of the whole monologue and should not
   change for incidental examples or tangents. sections is a chronological
@@ -365,6 +372,8 @@ ${JSON.stringify({
 Session:
 ${JSON.stringify(input.session ?? {}, null, 2)}
 
+Update reason: ${input.reason || 'poll'}
+
 Previous running note:
 ${JSON.stringify(input.previousRunningNote ?? null, null, 2)}
 
@@ -394,6 +403,13 @@ ideas in runningNote.` : ''}
     const reply = await think(prompt, 90_000)
     const parsed = extractJson(reply)
     const normalized = normalizeCoachCue(parsed, input.constraints)
+    normalized.board = reconcileBoard(input.previousBoard, normalized.board, mode.id, { final: Boolean(input.finalNote) })
+    if (!input.finalNote && !keepUsefulCue(normalized, mode, transcript)) {
+      normalized.title = 'Listening'
+      normalized.lines = []
+      normalized.priority = 0
+      normalized.quiet = true
+    }
     // Solo Notes still uses the model to organize the note, but it never
     // surfaces an interruption on the glasses while the user is thinking.
     return mode.id === 'notes' && !input.finalNote

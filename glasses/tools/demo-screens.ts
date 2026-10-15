@@ -24,7 +24,7 @@ import { agenda, planBlock, reach } from '../../server/src/plan.js'
 import boardsCfg from '../../server/src/boards.config.json'
 import checksCfg from '../../server/src/checklists.config.json'
 import { planRows, render, type UiState } from '../src/render'
-import type { CoachMode } from '../src/types'
+import type { CoachMode, DayDraft } from '../src/types'
 import { newGame, serve, tick as pongTick, nudge } from '../src/pong'
 
 export interface DemoScreen {
@@ -340,6 +340,23 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
     view: { kind: 'daystart', phase: 'recording', scroll: 0 },
     coachSession: { ...listenSession, space: 'life', title: 'Start Day' },
   }))
+  const reviewDraft: DayDraft = {
+    id: 'demo-day', createdAt: now, transcript: 'Apply for three jobs. Clean the cap. Dishes.',
+    items: [
+      { id: 'jobs', kind: 'task', label: 'Apply for three jobs', include: true, source: 'Apply for three jobs', note: 'Choose and track three applications' },
+      { id: 'kitchen', kind: 'task', label: 'Clean the cap', include: true, source: 'Clean the cap', note: '' },
+      { id: 'dishes', kind: 'checklist', label: 'Dishes', include: true, checklistId: 'dishes', source: 'Dishes', note: '' },
+    ],
+  }
+  const reviewPlan = { ...withPlan.plan!, day: { ...withPlan.plan!.day!, draft: reviewDraft } }
+  add('Start Day — merged proposal', render({
+    ...withPlan, space: 'life', plan: reviewPlan,
+    view: { kind: 'daystart', phase: 'draft', cursor: 1 },
+  }))
+  add('Start Day — inspect misheard row', render({
+    ...withPlan, space: 'life', plan: reviewPlan,
+    view: { kind: 'daystart', phase: 'row', itemId: 'kitchen', cursor: 2, returnCursor: 1 },
+  }))
   add('Chat — provider picker', render({
     ...withPlan,
     snapshot: { ...snapshot, assistant: { chatgpt: true, claude: false } },
@@ -379,7 +396,22 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
       updatedAt: now,
       messages: [
         { id: 'u1', role: 'user', text: 'Can you keep working on the glasses chat and tell me what changed?', at: now - 20_000 },
-        { id: 'a1', role: 'assistant', text: 'The voice turn now records on the glasses, waits for transcription, and queues a ChatGPT reply without freezing the display. Your conversation stays here and scrolls backward with the Ring.', at: now - 10_000 },
+        { id: 'a1', role: 'assistant', text: 'The voice turn records on the glasses, waits for transcription, and queues a ChatGPT reply. The latest answer opens at its first line, and scrolling down reads through the answer and earlier turns.', at: now - 10_000 },
+      ],
+    },
+  }))
+  add('ChatGPT — queued, previous answer stays readable', render({
+    ...withPlan,
+    space: 'life',
+    view: { kind: 'assistant', phase: 'chat', provider: 'chatgpt', scroll: 0, replyId: 'a1' },
+    assistantChat: {
+      provider: 'chatgpt', ready: true, busy: true, queued: 0,
+      pending: { id: 'demo-pending', status: 'queued', claimedBy: null, attempts: 0, createdAt: now, updatedAt: now },
+      updatedAt: now,
+      messages: [
+        { id: 'u1', role: 'user', text: 'What changed in the Chat reader?', at: now - 20_000 },
+        { id: 'a1', role: 'assistant', text: 'The reader starts at the first line of my answer and keeps your place while status updates arrive.', at: now - 10_000 },
+        { id: 'u2', role: 'user', text: 'What about voice capture?', at: now },
       ],
     },
   }))

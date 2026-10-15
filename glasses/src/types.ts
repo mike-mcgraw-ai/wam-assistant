@@ -352,6 +352,9 @@ export interface DayDraftItem {
   startIndex?: number
   fromStep?: string | null
   note?: string
+  source?: string
+  conflict?: string
+  uncertain?: boolean
 }
 
 export interface DayDraft {

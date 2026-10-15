@@ -135,7 +135,10 @@ function splitThoughts(text) {
   const clean = normalizeNoteText(text)
   if (!clean) return []
   const parts = clean.match(/[^.!?]+[.!?]?/g) || [clean]
-  return parts.map(part => normalizeNoteText(part)).filter(part => part.length >= 8)
+  return parts.map(part => normalizeNoteText(part)).filter(part => {
+    if (part.length < 8 || /^(?:i found it|look at her|good job|there it is|here we go)[.!?]*$/i.test(part)) return false
+    return part.split(/\s+/).length >= 4 || /\b(?:need to|want to|decided|agreed|remind me|remember to|call|send|ask)\b/i.test(part)
+  })
 }
 
 function looksOpen(text) {
