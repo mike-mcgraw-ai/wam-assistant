@@ -25,6 +25,7 @@ function firstLine(value) {
 }
 
 function sourceType(session) {
+  if (session?.context?.reviewItemId) return 'amendment'
   if (session?.context?.taskId === '__day_start__') return 'start_day'
   if (session?.context?.taskId === '__assistant__') return 'assistant_voice'
   if (session?.context?.taskId || session?.context?.choreId) return 'task_voice_note'
@@ -55,10 +56,12 @@ function mergedSegments(session, archive) {
     })
 }
 
-function audioInfo(recording, segments, now) {
-  if (!recording?.available) return { sessionId: recording?.sessionId || null, state: 'missing', kept: false, expiresAt: null }
+function audioInfo(recording, transcript, now) {
+  if (!recording?.available) return { sessionId: recording?.sessionId || null,
+    state: recording?.expiresAt && recording.expiresAt <= now ? 'expired' : 'missing',
+    kept: false, expiresAt: recording?.expiresAt || null }
   const retained = recording.kept === true || keepPastExpiry({
-    words: wordCount(segments.map(segment => segment.text)),
+    words: wordCount(Array.isArray(transcript) ? transcript : [transcript]),
     seconds: recording.durationSeconds,
   })
   return {
@@ -87,6 +90,7 @@ function recordingFiles(dataDir) {
       manifest: { ...manifest, sessionId: entry.name, bytes, available: bytes > 0,
         durationSeconds: bytes / (sampleRate * channels * 2) },
       segments: readJsonl(join(dir, 'transcript.jsonl')),
+      fullTranscript: String(readJson(join(dir, 'full-transcript.json'), {})?.text || '').trim(),
     })
   }
   return result
@@ -125,18 +129,35 @@ export function legacySpokenInventory(dataDir, now = Date.now()) {
     for (const message of thread.messages || []) {
       if (message.role !== 'user') continue
       const match = String(message.clientId || '').match(/^session:(.+)$/)
-      if (match) assistantTurns.set(match[1], { thread: thread.key, message })
+      if (match) assistantTurns.set(match[1], [...(assistantTurns.get(match[1]) || []), { thread: thread.key, message }])
     }
   }
   const dayRefs = new Map()
+  const addDayRef = (sessionId, ref) => {
+    if (!sessionId) return
+    const rows = dayRefs.get(sessionId) || []
+    if (!rows.some(row => row.draftId === ref.draftId && row.itemId === ref.itemId)) rows.push(ref)
+    dayRefs.set(sessionId, rows)
+  }
   for (const day of Object.values(runs.dayStarts || {})) {
     if (!day || typeof day !== 'object') continue
     const draft = day.draft
-    if (!draft) continue
-    if (draft.id) dayRefs.set(draft.id, { day: day.day, draftId: draft.id })
-    for (const item of draft.items || []) {
-      const match = String(item.id || '').match(/^task:([^:]+):\d+$/)
-      if (match) dayRefs.set(match[1], { day: day.day, draftId: draft.id, itemId: item.id })
+    if (draft?.id) {
+      addDayRef(draft.id, { day: day.day, draftId: draft.id, itemId: null, committed: false })
+      for (const item of draft.items || []) {
+        const fallback = String(item.id || '').match(/^task:([^:]+):\d+$/)?.[1]
+        for (const sessionId of item.sourceSessionIds?.length ? item.sourceSessionIds : fallback ? [fallback] : []) {
+          addDayRef(sessionId, { day: day.day, draftId: draft.id, itemId: item.id, committed: false })
+        }
+      }
+    }
+    for (const commit of day.draftCommits || []) {
+      for (const link of commit.sourceLinks || []) {
+        for (const sessionId of link.sessionIds || []) {
+          addDayRef(sessionId, { day: day.day, draftId: commit.id, itemId: link.itemId,
+            taskId: link.taskId || null, committed: true })
+        }
+      }
     }
   }
   const sessionIds = new Set([...sessions.keys(), ...recordings.keys(), ...notes.keys(), ...assistantTurns.keys()])
@@ -147,13 +168,15 @@ export function legacySpokenInventory(dataDir, now = Date.now()) {
     const recording = recordings.get(id)
     const linkedNotes = notes.get(id) || []
     const linked = linkedNotes[0]
-    const assistantTurn = assistantTurns.get(id)
-    const day = dayRefs.get(id)
+    const linkedTurns = assistantTurns.get(id) || []
+    const assistantTurn = linkedTurns[0]
+    const days = dayRefs.get(id) || []
+    const day = days[0]
     const legacyOnly = id.startsWith('legacy-note:')
     const sourceKey = legacyOnly ? id : `coach:${id}`
     const segments = mergedSegments(session, recording?.segments)
-    const rawText = coalesceTranscriptSegments(segments).map(segment => segment.text).join('\n\n')
-    const summary = String(linked?.note?.text || '').trim()
+    const rawText = recording?.fullTranscript || coalesceTranscriptSegments(segments).map(segment => segment.text).join('\n\n')
+    const summary = String(recording?.fullTranscript || linked?.note?.text || '').trim()
     const spokenText = rawText || (assistantTurn?.message?.text || '')
     const title = firstLine(summary || spokenText) || (recording?.manifest.available ? 'Recording needs transcript' : 'Untitled spoken work')
     const question = /\bclean the (?:cap|wheel room)\b|\borganize drawers\b/i.test(spokenText)
@@ -165,18 +188,31 @@ export function legacySpokenInventory(dataDir, now = Date.now()) {
     const sourceRefs = []
     if (session) sourceRefs.push({ store: 'coach', id })
     if (recording) sourceRefs.push({ store: 'recordings', id })
+    if (session?.context?.taskId && !String(session.context.taskId).startsWith('__')) sourceRefs.push({ store: 'tasks', id: session.context.taskId })
+    if (session?.context?.choreId) sourceRefs.push({ store: 'runs', id: session.context.choreId })
     for (const ref of linkedNotes) sourceRefs.push({ store: ref.kind === 'chore' ? 'runs' : 'tasks', id: `${ref.subjectId}:${ref.note.id}` })
-    if (assistantTurn) sourceRefs.push({ store: 'assistant', id: `${assistantTurn.thread}:${assistantTurn.message.id}` })
-    if (day) sourceRefs.push({ store: 'runs', id: day.draftId })
+    for (const turn of linkedTurns) sourceRefs.push({ store: 'assistant', id: `${turn.thread}:${turn.message.id}` })
+    for (const ref of days) if (!sourceRefs.some(row => row.store === 'runs' && row.id === ref.draftId)) sourceRefs.push({ store: 'runs', id: ref.draftId })
     const destinationRefs = []
     for (const task of tasks.customTasks || []) {
       if (task.clientId === `${id}:task` || linkedNotes.some(ref => task.clientId === `promote:${ref.note.id}`)) {
         destinationRefs.push({ kind: 'task', id: task.id, createdAt: null, syncRevision: 1 })
       }
     }
-    if (day) destinationRefs.push({ kind: 'start_day', id: day.draftId, createdAt: null, syncRevision: 1 })
+    for (const draftId of [...new Set(days.map(ref => ref.draftId))]) {
+      const links = days.filter(ref => ref.draftId === draftId)
+      destinationRefs.push({ kind: 'start_day', id: draftId,
+        itemIds: [...new Set(links.map(ref => ref.itemId).filter(Boolean))],
+        taskIds: [...new Set(links.map(ref => ref.taskId).filter(Boolean))],
+        committed: links.some(ref => ref.committed), createdAt: null, syncRevision: 1 })
+    }
     if (legacyOnly && !session && !recording) exceptions.push({ sourceKey, reason: 'legacy note has no session or audio' })
     if (!rawText && recording?.manifest.available) exceptions.push({ sourceKey, reason: 'recording has no archived transcript' })
+    if (recording && !session && !linkedNotes.length && !assistantTurn && !day) exceptions.push({ sourceKey, reason: 'recording has no matching session or note' })
+    if (linkedTurns.length > 1) exceptions.push({ sourceKey, reason: 'multiple assistant turns share one session ID' })
+    if (new Set(destinationRefs.filter(ref => ref.kind === 'task').map(ref => ref.id)).size > 1) {
+      exceptions.push({ sourceKey, reason: 'multiple exact task destinations need review' })
+    }
     items.push({
       id: stableId(sourceKey), schemaVersion: 1, revision: 1, sourceKey,
       sourceAliases: linkedNotes.map(ref => `${ref.kind}-note:${ref.subjectId}:${ref.note.id}`),
@@ -185,23 +221,40 @@ export function legacySpokenInventory(dataDir, now = Date.now()) {
           : linked ? linked.subjectId === 'captured-notes' ? 'captured_note_legacy' : 'task_voice_note'
             : 'unknown',
       modeId: session?.modeId || null, space: session?.space || 'life', sessionId: legacyOnly ? null : id,
-      sourceRefs, capturedAt: Number(session?.startedAt || recording?.manifest.createdAt || linked?.note?.at || assistantTurn?.message?.at) || now,
+      sourceRefs, capturedAt: Number(session?.startedAt || recording?.manifest.createdAt || linked?.note?.at || assistantTurn?.message?.at) || null,
       endedAt: Number(session?.endedAt || recording?.manifest.endedAt) || null,
       ingestedAt: null, updatedAt: null,
-      rawTranscript: { text: rawText, segments, complete: Boolean(recording?.segments?.length) || Boolean(session?.segments?.length && session.segments.length < 240),
-        source: recording?.segments?.length ? 'recording-transcript' : session ? 'coach' : 'unavailable' },
-      audio: audioInfo(recording?.manifest, recording?.segments || [], now),
+      rawTranscript: { text: rawText, segments, complete: Boolean(recording?.fullTranscript) || Boolean(recording?.segments?.length) || Boolean(session?.segments?.length && session.segments.length < 240),
+        source: recording?.fullTranscript ? 'full-recording' : recording?.segments?.length ? 'recording-transcript' : session ? 'coach' : 'unavailable' },
+      audio: audioInfo(recording?.manifest, recording?.fullTranscript || (recording?.segments || []).map(segment => segment.text), now),
       cleanedTranscript: rawText || spokenText, title: title.slice(0, 80), summary: summary || spokenText.slice(0, 1_200),
       candidates: [], classification: day ? 'mixed' : 'unknown',
       confidence: { score: question ? 0.3 : 0.5, reasons: ['legacy source needs review'] },
       clarificationQuestions,
       reviewState: clarificationQuestions.length ? 'needs_clarification' : destinationRefs.length ? 'reviewed' : 'unreviewed',
       extraction: { state: 'not_processed', error: null, transcriptRevision: 1 },
-      destinationRefs, parentId: null, childIds: [], mergedInto: null,
+      destinationRefs, parentId: session?.context?.reviewItemId || null,
+      amendmentKind: session?.context?.amendmentKind || null,
+      amendmentBaseRevision: session?.context?.reviewRevision ?? null,
+      childIds: [], mergedInto: null,
       provenance: { ingest: 'legacy-preview', extractor: 'deterministic', modelJobId: null, modelVersion: null, humanEditedFields: [] },
     })
   }
   items.sort((left, right) => right.capturedAt - left.capturedAt || left.id.localeCompare(right.id))
   return { items, exceptions, counts: { capturedNotes: noteCounts.captured, coachSessions: sessions.size,
     recordingDirs: recordings.size, assistantVoiceTurns: assistantTurns.size, cards: items.length } }
+}
+
+export function compareSpokenCoverage(inventory, canonicalItems) {
+  const legacyKeys = new Set(inventory.items.map(item => item.sourceKey))
+  const primary = canonicalItems.filter(item => !item.parentId)
+  const canonicalKeys = new Set(canonicalItems.filter(item => !item.parentId || legacyKeys.has(item.sourceKey)).map(item => item.sourceKey))
+  return {
+    legacyCards: legacyKeys.size,
+    canonicalCards: primary.length,
+    derivedCards: canonicalItems.filter(item => item.parentId).length,
+    matchedSources: [...canonicalKeys].filter(key => legacyKeys.has(key)).length,
+    legacyOnly: [...legacyKeys].filter(key => !canonicalKeys.has(key)).sort(),
+    canonicalOnly: primary.map(item => item.sourceKey).filter(key => !legacyKeys.has(key)).sort(),
+  }
 }

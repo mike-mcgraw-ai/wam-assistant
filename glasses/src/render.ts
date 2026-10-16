@@ -63,6 +63,7 @@ export type View =
   | { kind: 'chores'; cursor: number }
   | { kind: 'notes'; cursor: number }
   | { kind: 'capture'; cursor: number }
+  | { kind: 'review'; phase: 'list' | 'card'; index: number; cursor: number; returnTo?: 'capture' | 'notes'; armedAction?: string; armedAt?: number }
   | { kind: 'note'; subjectKind: 'task' | 'chore'; subjectId: string; noteId: string; cursor: number }
   | { kind: 'transcript'; subjectKind: 'task' | 'chore'; subjectId: string; noteId: string; scroll?: number }
   | { kind: 'task'; taskId: string; cursor: number }
@@ -88,6 +89,7 @@ export type View =
 
 export interface UiState {
   view: View
+  spokenReview: { items: SpokenReviewItem[]; total: number; loading: boolean; error: string | null }
   snapshot: Snapshot | null
   error: string | null
   /** true while the first fetch is in flight and there is nothing to show yet */
@@ -395,19 +397,38 @@ export function choreRows(state: UiState): ChoreRow[] {
 }
 
 /**
- * The two things the LIFE line leads to.
+ * The Capture choices the LIFE line leads to.
  *
  * Clicking it used to start recording outright, which made the one row at the
  * top of the running order mean exactly one thing and left the notes you had
- * already captured reachable only through the long-press menu. A two-item
- * stop makes both permanent: talk, or read back what you said. It costs one
- * extra click on capture, which is the right trade for never losing the way
- * back to your own notes.
+ * already captured reachable only through the long-press menu. The Capture
+ * stop keeps Listen, Notes, Review, and Chat reachable without putting a
+ * historical backlog on the running order.
  */
-export type CaptureRow = { kind: 'listen' } | { kind: 'notes' } | { kind: 'chat' }
+export interface SpokenReviewItem {
+  id: string
+  sessionId?: string | null
+  revision: number
+  title: string
+  summary: string
+  sourceType: string
+  capturedAt: number
+  reviewState: string
+  clarificationQuestions: string[]
+  cleanedTranscript: string
+  rawTranscript?: { text: string; complete?: boolean }
+  audio?: { state: string }
+  parentId?: string | null
+  amendmentKind?: 'correction' | 'detail' | null
+  amendmentBaseRevision?: number | null
+  amendmentOriginal?: string | null
+  provenance?: { humanEditedFields?: string[] }
+}
+
+export type CaptureRow = { kind: 'listen' } | { kind: 'notes' } | { kind: 'review' } | { kind: 'chat' }
 
 export function captureRows(): CaptureRow[] {
-  return [{ kind: 'listen' }, { kind: 'notes' }, { kind: 'chat' }]
+  return [{ kind: 'listen' }, { kind: 'notes' }, { kind: 'review' }, { kind: 'chat' }]
 }
 
 function renderCapture(state: UiState, cursor: number): string {
@@ -422,6 +443,8 @@ function renderCapture(state: UiState, cursor: number): string {
       lines.push(clipToWidth(`${point}Listen        ${live ? 'recording now' : 'arm mic'}`))
     } else if (row.kind === 'notes') {
       lines.push(clipToWidth(`${point}Notes         ${notes === 0 ? 'nothing saved' : `${notes} saved`}`))
+    } else if (row.kind === 'review') {
+      lines.push(clipToWidth(`${point}Review        ${state.spokenReview.total} to check`))
     } else {
       const ready = state.snapshot?.assistant?.chatgpt || state.snapshot?.assistant?.claude
       lines.push(clipToWidth(`${point}Chat          ${ready ? 'choose AI' : 'Mac setup needed'}`))
@@ -433,7 +456,50 @@ function renderCapture(state: UiState, cursor: number): string {
     ? live ? 'click to stop recording' : 'click to arm mic'
     : selected === 'notes'
       ? 'click to read them back'
+      : selected === 'review'
+        ? 'click for one card at a time'
       : 'click to choose ChatGPT or Claude')
+  return assemble(lines, config.maxChars, config.maxLines)
+}
+
+export function spokenReviewActions(item?: SpokenReviewItem): string[] {
+  if (item?.parentId) {
+    const clarified = item.reviewState === 'unreviewed' ||
+      item.reviewState === 'needs_clarification' && !item.clarificationQuestions?.length &&
+      item.provenance?.humanEditedFields?.includes('cleanedTranscript')
+    return clarified && (item.rawTranscript?.complete || item.provenance?.humanEditedFields?.includes('cleanedTranscript')) && item.amendmentOriginal != null
+      ? ['Apply words', 'Open on phone', 'Ignore'] : ['Open on phone', 'Ignore']
+  }
+  return ['Task/Home', 'Keep moment', 'Done', 'Ignore', 'Add detail', 'Correct', 'Open on phone']
+}
+
+function renderSpokenReview(state: UiState, view: Extract<View, { kind: 'review' }>): string {
+  const review = state.spokenReview
+  const item = review.items[view.index]
+  const lines = [clockLine(state), ruleCentred(`Review ${review.total}`, false)]
+  if (review.loading) lines.push('', 'Loading spoken work...')
+  else if (!item) lines.push('', review.error ? clipToWidth(review.error) : 'Nothing needs review.')
+  else {
+    const date = new Date(item.capturedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+    lines.push(clipToWidth(`${view.index + 1}/${review.total}  ${item.sourceType}  ${date}`))
+    lines.push(clipToWidth(item.title || 'Untitled capture'))
+    const useful = (item.summary || item.cleanedTranscript || item.rawTranscript?.text || '').replace(/\s+/g, ' ').trim()
+    if (item.parentId) lines.push(clipToWidth(`Was: ${item.amendmentOriginal || 'open on phone'}`))
+    lines.push(clipToWidth(item.parentId ? `Now: ${item.cleanedTranscript || 'Transcript pending'}` : useful || 'Transcript pending'))
+    if (review.error) lines.push(clipToWidth(`! ${review.error}`))
+    else if (item.reviewState === 'needs_clarification' || item.clarificationQuestions?.length) {
+      lines.push(clipToWidth(`? ${item.clarificationQuestions?.[0] || 'Needs your help'}`))
+    } else lines.push(clipToWidth(`Audio: ${item.audio?.state || 'missing'}`))
+    if (view.phase === 'list') lines.push('', 'scroll cards - click to open')
+    else {
+      const actions = spokenReviewActions(item)
+      const action = actions[view.cursor] || actions[0]
+      const armed = view.armedAction === action && Date.now() - (view.armedAt || 0) < 5000
+      lines.push(clipToWidth(`> ${action}`), clipToWidth(armed
+        ? action === 'Task/Home' ? `confirm Home: ${item.title}` : 'click again to confirm'
+        : 'scroll actions - click to arm'))
+    }
+  }
   return assemble(lines, config.maxChars, config.maxLines)
 }
 
@@ -529,16 +595,17 @@ function renderNotes(state: UiState, cursor: number): string {
   const rows = noteRows(state)
   if (rows.length === 0) {
     return assemble(
-      [clockLine(state), ruleCentred('Notes', false), '', 'Nothing written down yet.', '', 'Listen, then talk.'],
+      [clockLine(state), ruleCentred('Notes', false), '', clipToWidth(`${cursor === 0 ? '>' : ' '}Review ${state.spokenReview.total}`), '', 'Nothing written down yet.'],
       config.maxChars,
       config.maxLines,
     )
   }
 
-  const win = windowFollow(cursor, rows.length, config.maxLines - 2, state.scrollTop)
+  const win = windowFollow(cursor, rows.length + 1, config.maxLines - 2, state.scrollTop)
   const lines: string[] = [clockLine(state), ruleCentred(`Notes ${rows.length}`, false)]
-  for (let i = win.start; i < win.end; i += 1) {
-    const { note, subject } = rows[i]
+  if (win.start === 0) lines.push(clipToWidth(`${cursor === 0 ? '>' : ' '}Review ${state.spokenReview.total}`))
+  for (let i = Math.max(1, win.start); i < win.end; i += 1) {
+    const { note, subject } = rows[i - 1]
     const point = i === cursor ? '>' : ' '
 
     // The summary gets the whole row.
@@ -2025,6 +2092,8 @@ function renderView(state: UiState): string {
       return renderNotes(state, state.view.cursor)
     case 'capture':
       return renderCapture(state, state.view.cursor)
+    case 'review':
+      return renderSpokenReview(state, state.view)
     case 'note':
       return renderNoteDetail(
         state,

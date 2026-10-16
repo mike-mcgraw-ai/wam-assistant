@@ -36,3 +36,4 @@ These are the real completion dates of private device builds. The sanitized port
 | v0.30.0 | 2026-10-14 | 0.150.0 | **Spoken work stops falling through:** Extra recordings merge into the pending review, and a captured note can become a Home task. |
 | v0.31.0 | 2026-10-15 | 0.153.0 | **Visible confirm timing:** A 3-2-1 countdown shows when a confirming click will count, and the progress bar becomes one solid line. |
 | v0.32.0 | 2026-10-15 | 0.154.0 | **Integration: reviewable days, chat and Listen quality:** Three parallel branches in one release: Start Day review with Rebuild today, chat reader fixes, and cleaner Listen transcripts. |
+| v0.33.0 | 2026-10-16 | 0.157.0 | **Review Spoken Work:** Every recording becomes one durable review card, with corrections, explicit promotion, and a guarded backlog migration. |

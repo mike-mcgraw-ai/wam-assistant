@@ -26,7 +26,10 @@ import { handleRemoteInput } from './remoteinput.js'
 import { MorningBrief } from './morningBrief.js'
 import { Recordings } from './recordings.js'
 import { SpokenWork } from './spokenWork.js'
-import { legacySpokenInventory } from './spokenWorkImport.js'
+import { compareSpokenCoverage, legacySpokenInventory } from './spokenWorkImport.js'
+import { applySpokenModelResult, scheduleSpokenExtraction } from './spokenWorkExtraction.js'
+import { linkExistingSpokenTask, materializeSpokenWork, previewSpokenTaskUpdate, promoteSpokenResource, promoteSpokenTask, updateSpokenTask } from './spokenWorkReview.js'
+import { transcribeSession } from './sessionTranscript.js'
 import { remainingPlanSteps } from './planRows.js'
 import { refreshWeatherBrief, weatherRefreshDelayMs } from './sources/weather.js'
 
@@ -39,6 +42,7 @@ const READ_TOKEN = process.env.READ_TOKEN || ''
 const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET || ''
 const PERSIST = process.env.PERSIST_PATH || join(HERE, '..', 'data', 'values.json')
 const CONFIG_PATH = process.env.CONFIG_PATH || join(HERE, 'boards.config.json')
+const SPOKEN_RULES_PATH = process.env.SPOKEN_RULES_PATH || join(HERE, 'spoken-work.rules.json')
 
 const CHECKLISTS_PATH = process.env.CHECKLISTS_PATH || join(HERE, 'checklists.config.json')
 const DATA_DIR = process.env.DATA_DIR || join(HERE, '..', 'data')
@@ -148,6 +152,12 @@ const spokenWork = new SpokenWork({
   logPath: join(DATA_DIR, 'spoken-work.jsonl'),
   indexPath: join(DATA_DIR, 'spoken-work.json'),
 })
+for (const day of checklists.dayStarts.values()) {
+  for (const commit of day.draftCommits || []) {
+    try { spokenWork.linkStartDayCommit(commit.id, commit.sourceLinks) }
+    catch (error) { console.warn(`[spoken-work] could not reconcile Start Day ${commit.id}: ${error.message}`) }
+  }
+}
 
 const morningBrief = new MorningBrief({
   storePath: join(DATA_DIR, 'morning-brief.json'),
@@ -718,6 +728,7 @@ function createCoachCueJob(session, {
   reason = 'poll',
   priority = 'normal',
   finalNote = null,
+  fullTranscript = '',
   previousRunningNote = null,
   previousBoard = null,
 } = {}) {
@@ -726,7 +737,9 @@ function createCoachCueJob(session, {
   const mode = coach.getMode(session.modeId) ?? coach.activeMode(safeSpace)
   const transcriptWindow = finalNote ? undefined : mode.id === 'notes' ? -96 : -32
   const sourceSegments = finalNote
-    ? mergeRawSegments(session.segments, recordings.transcript(session.id))
+    ? fullTranscript
+      ? [{ id: `${session.id}:full`, at: session.endedAt || Date.now(), speaker: 'me', text: fullTranscript }]
+      : mergeRawSegments(session.segments, recordings.transcript(session.id))
     : session.segments ?? session.recentSegments
   const recentSegments = coalesceTranscriptSegments(sourceSegments)
     .slice(transcriptWindow)
@@ -933,22 +946,23 @@ function ensureCaptureTask(space, at = Date.now()) {
   )
 }
 
-function consolidatedSessionNote(session) {
+function consolidatedSessionNote(session, fullText = '') {
   const max = session?.context?.taskId === '__day_start__'
     ? 4_000
     : session?.modeId === 'notes'
       ? 8_000
       : 4_000
-  return transcriptText(mergeRawSegments(session?.segments, recordings.transcript(session?.id)), max)
+  return String(fullText || '').trim().slice(0, max) || transcriptText(mergeRawSegments(session?.segments, recordings.transcript(session?.id)), max)
 }
 
 function soundsLikePlan(label) {
   return /\b(?:build|create|design|organize|sort out|clean out|set up|prepare|plan|project|renovate|move|apply for (?:\w+\s+)?(?:jobs|positions))\b/i.test(label)
 }
 
-function routeCoachSession(session, at = Date.now()) {
-  const rawText = consolidatedSessionNote(session)
+function routeCoachSession(session, at = Date.now(), fullText = '') {
+  const rawText = consolidatedSessionNote(session, fullText)
   if (!rawText) return { kind: 'empty', result: { ok: true } }
+  if (session.context?.reviewItemId) return { kind: 'amendment', result: { ok: true } }
   const noteId = `${session.id}:note`
   const space = cueSpace(session.space)
 
@@ -965,7 +979,7 @@ function routeCoachSession(session, at = Date.now()) {
       ? rawText.replace(/^(?:no[, ]+|i meant |change (?:it|that) to |call it )/i, '').trim()
       : rawText
     const result = checklists.reviseDayDraftItem(space, dayRow[2], { [dayRow[1]]: value }, at)
-    return { kind: 'day-draft', result }
+    return { kind: 'day-draft', result: result.ok ? { ...result, sourceItemIds: [dayRow[2]] } : result }
   }
 
   // Classification happens once, after the complete recording exists. A
@@ -991,7 +1005,7 @@ function routeCoachSession(session, at = Date.now()) {
   }
 
   const fullSegments = mergeRawSegments(session.segments, recordings.transcript(session.id))
-  const noteText = fallbackListenSummary(fullSegments) || rawText
+  const noteText = fullText || fallbackListenSummary(fullSegments) || rawText
   const noteBy = 'listen'
 
   const contextTaskId = session.context?.taskId
@@ -1083,10 +1097,20 @@ function transcribeClip(pcm, body = {}) {
   })
 }
 
+function waitForTranscriptions() {
+  return new Promise(resolve => {
+    transcribeQueue.push({ barrier: true, resolve })
+    void drainTranscriptions()
+  })
+}
+
 function enqueueTranscription(sessionId, pcm, body) {
   // A backlog means the model is slower than the speech. Dropping the oldest
   // is better than falling further behind for the rest of the conversation.
-  if (transcribeQueue.length > 8) transcribeQueue.shift()
+  if (transcribeQueue.length > 8) {
+    const oldestChunk = transcribeQueue.findIndex(item => !item.resolve && !item.barrier)
+    if (oldestChunk >= 0) transcribeQueue.splice(oldestChunk, 1)
+  }
   transcribeQueue.push({ sessionId, pcm, body })
   sttStats.queued += 1
   void drainTranscriptions()
@@ -1097,7 +1121,8 @@ async function drainTranscriptions() {
   transcribing = true
   try {
     while (transcribeQueue.length) {
-      const { sessionId, pcm, body, resolve } = transcribeQueue.shift()
+      const { sessionId, pcm, body, resolve, barrier } = transcribeQueue.shift()
+      if (barrier) { resolve(); continue }
       const startedAt = Date.now()
       try {
         const out = await transcribePcm(pcm, {
@@ -1142,7 +1167,7 @@ async function drainTranscriptions() {
         if (result.ok && !result.duplicate) {
           const archived = recordings.addTranscriptSegment(sessionId, result.segment)
           if (!archived.ok) console.warn(`[recording] transcript: ${archived.error}`)
-          if (result.session.context?.taskId !== '__assistant__') {
+          if (result.session.context?.taskId !== '__assistant__' && !result.session.context?.reviewItemId) {
             scheduleCoachCue(result.session)
           }
         }
@@ -1382,27 +1407,136 @@ const server = http.createServer(async (req, res) => {
     if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
     const inventory = legacySpokenInventory(DATA_DIR)
     if (url.pathname === '/spoken-work/inventory') {
-      return json(res, 200, { ok: true, counts: inventory.counts, exceptions: inventory.exceptions })
+      return json(res, 200, { ok: true, counts: inventory.counts,
+        coverage: compareSpokenCoverage(inventory, spokenWork.all()), exceptions: inventory.exceptions })
+    }
+    if (url.pathname === '/spoken-work/resources') {
+      return json(res, 200, { ok: true, resources: spokenWork.allResources(url.searchParams.get('kind')) })
+    }
+    const resourceMatch = url.pathname.match(/^\/spoken-work\/resources\/(.+)$/)
+    if (resourceMatch) {
+      const resource = spokenWork.resource(decodeURIComponent(resourceMatch[1]))
+      return resource ? json(res, 200, { ok: true, resource }) : json(res, 404, { error: 'unknown review destination' })
     }
     const canonical = spokenWork.all()
     const bySource = new Map(inventory.items.map(item => [item.sourceKey, item]))
     for (const item of canonical) bySource.set(item.sourceKey, item)
     const all = [...bySource.values()].sort((left, right) => right.capturedAt - left.capturedAt || left.id.localeCompare(right.id))
     if (url.pathname !== '/spoken-work') {
+      const destinationPreview = url.pathname.match(/^\/spoken-work\/([^/]+)\/destinations\/(task|project|idea|memory)\/preview$/)
+      if (destinationPreview) {
+        const id = decodeURIComponent(destinationPreview[1])
+        const kind = destinationPreview[2]
+        const result = kind === 'task' ? previewSpokenTaskUpdate({ store: spokenWork, tasks, itemId: id })
+          : spokenWork.previewResourceUpdate(id, kind)
+        return json(res, result.ok ? 200 : result.code || 400, result)
+      }
+      const eventMatch = url.pathname.match(/^\/spoken-work\/([^/]+)\/events$/)
+      if (eventMatch) {
+        const id = decodeURIComponent(eventMatch[1])
+        return json(res, 200, { ok: true, events: spokenWork.history(id) })
+      }
       const id = decodeURIComponent(url.pathname.slice('/spoken-work/'.length))
       const item = all.find(row => row.id === id)
       return item ? json(res, 200, { ok: true, item, events: spokenWork.history(id) }) : json(res, 404, { error: 'unknown spoken work item' })
     }
     const state = url.searchParams.get('state') || 'active'
+    const query = String(url.searchParams.get('q') || '').trim().toLocaleLowerCase().slice(0, 120)
     const filtered = all.filter(item => state === 'all' || (state === 'active'
       ? item.reviewState === 'unreviewed' || item.reviewState === 'needs_clarification'
-      : item.reviewState === state))
+      : item.reviewState === state)).filter(item => !query || [item.title, item.summary,
+        item.cleanedTranscript, item.rawTranscript?.text, item.sourceType, item.sourceKey,
+        Number.isFinite(Number(item.capturedAt)) ? new Date(item.capturedAt).toISOString().slice(0, 10) : '']
+        .some(value => String(value || '').toLocaleLowerCase().includes(query)))
     const cursor = Math.max(0, Number(url.searchParams.get('cursor')) || 0)
     const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 50))
     const items = filtered.slice(cursor, cursor + limit)
     return json(res, 200, { ok: true, items, total: filtered.length,
       nextCursor: cursor + items.length < filtered.length ? cursor + items.length : null,
       needsReviewCount: all.filter(item => item.reviewState === 'unreviewed' || item.reviewState === 'needs_clarification').length })
+  }
+
+  const spokenMutation = url.pathname.match(/^\/spoken-work\/([^/]+)(?:\/(actions|split|merge|extract|destination-sync|amend))?$/)
+  if (spokenMutation && (req.method === 'PATCH' || req.method === 'POST')) {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    if (req.method === 'POST' && !spokenMutation[2]) return json(res, 405, { error: 'method not allowed' })
+    if (req.method === 'PATCH' && spokenMutation[2]) return json(res, 405, { error: 'method not allowed' })
+    let body
+    try { body = JSON.parse((await readBody(req)) || '{}') } catch (error) { return json(res, 400, { error: `bad body: ${error.message}` }) }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'object body required' })
+    const commandId = String(body.commandId || '').trim()
+    const revision = Number(String(req.headers['if-match'] || '').replace(/^"|"$/g, ''))
+    if (!commandId || commandId.length > 120 || !Number.isInteger(revision) || revision < 1) {
+      return json(res, 400, { error: 'commandId and If-Match revision required' })
+    }
+    if (req.method === 'PATCH' && (!body.patch || typeof body.patch !== 'object' || Array.isArray(body.patch))) {
+      return json(res, 400, { error: 'patch object required' })
+    }
+    if (spokenMutation[2] === 'actions' && !['task', 'link-task', 'project', 'idea', 'memory', 'restore', 'ignored', 'done', 'reviewed', 'unreviewed', 'needs_clarification'].includes(body.action)) {
+      return json(res, 400, { error: 'unknown review action' })
+    }
+    const id = decodeURIComponent(spokenMutation[1])
+    const current = spokenWork.get(id)
+    const preview = current ? null : legacySpokenInventory(DATA_DIR).items.find(item => item.id === id)
+    if (!current && !preview) return json(res, 404, { error: 'unknown spoken work item' })
+    if (preview && revision !== preview.revision) return json(res, 409, { error: 'item changed', item: preview })
+    const materialized = current ? { ok: true, item: current } : materializeSpokenWork(spokenWork, preview)
+    if (!materialized.ok) return json(res, materialized.code || 400, materialized)
+    let result
+    if (req.method === 'PATCH') {
+      result = spokenWork.update(id, body.patch || {}, { revision, commandId })
+    } else if (spokenMutation[2] === 'amend') {
+      const parentId = materialized.item.parentId
+      if (parentId && !spokenWork.get(parentId)) {
+        const parentPreview = legacySpokenInventory(DATA_DIR).items.find(item => item.id === parentId)
+        if (parentPreview) materializeSpokenWork(spokenWork, parentPreview)
+      }
+      result = spokenWork.applyAmendment(id, { revision, commandId })
+    } else if (spokenMutation[2] === 'destination-sync') {
+      result = body.kind === 'task' ? updateSpokenTask({ store: spokenWork, tasks, itemId: id, revision, commandId })
+        : ['project', 'idea', 'memory'].includes(body.kind)
+          ? spokenWork.updateResource(id, body.kind, { revision, commandId })
+          : { ok: false, code: 400, error: 'invalid destination kind' }
+    } else if (spokenMutation[2] === 'extract') {
+      if (materialized.item.revision !== revision && materialized.item.extraction?.state === 'processing') {
+        result = { ok: true, duplicate: true, item: materialized.item }
+      } else if (materialized.item.revision !== revision) {
+        result = { ok: false, code: 409, error: 'item changed', item: materialized.item }
+      } else {
+        result = scheduleSpokenExtraction({ store: spokenWork, jobs, itemId: id, rulesPath: SPOKEN_RULES_PATH,
+          retry: true, retryToken: commandId })
+      }
+    } else if (spokenMutation[2] === 'split') {
+      result = spokenWork.split(id, body.parts, { revision, commandId })
+    } else if (spokenMutation[2] === 'merge') {
+      const sourceId = String(body.sourceId || '')
+      const sourceRevision = Number(body.sourceRevision)
+      const source = spokenWork.get(sourceId)
+      const sourcePreview = source ? null : legacySpokenInventory(DATA_DIR).items.find(item => item.id === sourceId)
+      if (!source && !sourcePreview) result = { ok: false, code: 404, error: 'unknown source item' }
+      else if (!spokenWork.hasCommand(id, commandId) && (!Number.isInteger(sourceRevision) || sourceRevision !== (source || sourcePreview).revision)) {
+        result = { ok: false, code: 409, error: 'source item changed', item: source || sourcePreview }
+      } else {
+        const sourceReady = source ? { ok: true } : materializeSpokenWork(spokenWork, sourcePreview)
+        result = sourceReady.ok ? spokenWork.merge(id, sourceId, { revision, sourceRevision, commandId }) : sourceReady
+      }
+    } else if (body.action === 'task') {
+      result = promoteSpokenTask({ store: spokenWork, tasks, checklists, itemId: id, revision, commandId, candidateId: body.candidateId || null })
+    } else if (body.action === 'link-task') {
+      result = linkExistingSpokenTask({ store: spokenWork, tasks, itemId: id, taskId: String(body.taskId || ''), revision, commandId })
+    } else if (['project', 'idea', 'memory'].includes(body.action)) {
+      result = promoteSpokenResource({ store: spokenWork, recordings, itemId: id, kind: body.action, revision, commandId,
+        title: String(body.title || '').trim() || null })
+    } else if (body.action === 'restore') {
+      result = ['ignored', 'done'].includes(materialized.item.reviewState)
+        ? spokenWork.action(id, 'unreviewed', { revision, commandId })
+        : { ok: false, code: 400, error: 'only ignored or done items can be restored' }
+    } else if (['ignored', 'done', 'reviewed', 'unreviewed', 'needs_clarification'].includes(body.action)) {
+      result = spokenWork.action(id, body.action, { revision, commandId })
+    } else {
+      result = { ok: false, code: 400, error: 'unknown review action' }
+    }
+    return json(res, result.ok ? 200 : result.code || 400, result)
   }
 
   if (req.method === 'GET' && url.pathname === '/coach') {
@@ -1541,6 +1675,14 @@ const server = http.createServer(async (req, res) => {
       return json(res, 400, { error: `bad body: ${err.message}` })
     }
 
+    let reviewParent = null
+    if (body.context?.reviewItemId) {
+      reviewParent = spokenWork.get(String(body.context.reviewItemId)) ||
+        legacySpokenInventory(DATA_DIR).items.find(item => item.id === body.context.reviewItemId)
+      if (!reviewParent || reviewParent.revision !== body.context.reviewRevision || ['merged', 'split'].includes(reviewParent.reviewState)) {
+        return json(res, 409, { error: 'review item changed; reopen it before recording' })
+      }
+    }
     const result = coach.startSession({
       space: cueSpace(body.space),
       modeId: body.modeId,
@@ -1608,7 +1750,11 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       return json(res, 400, { error: `bad body: ${err.message}` })
     }
-    const result = recordings.setKeep(decodeURIComponent(coachRecordingKeepMatch[1]), body.keep === true)
+    const recordingId = decodeURIComponent(coachRecordingKeepMatch[1])
+    if (body.keep !== true && spokenWork.all().some(item => item.audio?.sessionId === recordingId)) {
+      return json(res, 409, { error: 'review recording stays kept until an explicit source purge' })
+    }
+    const result = recordings.setKeep(recordingId, body.keep === true)
     return json(res, result.ok ? 200 : 404, {
       ...result,
       ...(result.recording ? { recording: recordings.summary(result.recording.sessionId) } : {}),
@@ -1640,16 +1786,75 @@ const server = http.createServer(async (req, res) => {
 
     if (action === 'end') {
       const id = decodeURIComponent(sessionId)
+      await waitForTranscriptions()
       const result = coach.endSession(id, body.at)
       if (result.ok) recordings.finalize(id, result.session?.endedAt || body.at)
       const timer = coachCueTimers.get(id)
       if (timer) clearTimeout(timer)
       coachCueTimers.delete(id)
       const session = result.ok ? coach.session(id) : null
+      let full = null
+      if (session) {
+        const archivedText = recordings.fullTranscript(id)
+        if (archivedText) full = { ok: true, text: archivedText, source: 'full-recording' }
+        else {
+          try { full = await transcribeSession(join(DATA_DIR, 'recordings'), id, transcribeClip) }
+          catch (error) { full = { ok: false, error: String(error.message || error) } }
+          if (full?.ok && full.text) recordings.saveFullTranscript(id, full.text)
+        }
+      }
       const note = session && session.context?.taskId !== '__assistant__'
-        ? routeCoachSession(session, body.at)
+        ? routeCoachSession(session, body.at, full?.ok ? full.text : '')
         : null
       if (session) {
+        const rawSegments = mergeRawSegments(session.segments, recordings.transcript(id))
+        const rawText = full?.ok && full.text ? full.text : coalesceTranscriptSegments(rawSegments).map(segment => segment.text).join('\n\n')
+        let recording = recordings.summary(id)
+        let audioState = recording?.available ? 'available' : 'missing'
+        if (recording?.available && !recording.kept) {
+          const retained = recordings.setKeep(id, true)
+          recording = recordings.summary(id)
+          if (!retained.ok || !recording?.kept) audioState = 'retention_error'
+        }
+        const sourceType = session.context?.reviewItemId ? 'amendment'
+          : session.context?.taskId === '__day_start__' ? 'start_day'
+          : session.context?.taskId === '__assistant__' ? 'assistant_voice'
+            : session.context?.taskId || session.context?.choreId ? 'task_voice_note'
+              : session.modeId === 'notes' ? 'solo_notes' : session.modeId === 'meeting' ? 'meeting'
+                : session.modeId === 'listening' ? 'listening' : 'conversation'
+        const sourceRefs = [{ store: 'coach', id }]
+        if (session.context?.reviewItemId) sourceRefs.push({ store: 'spoken-work', id: session.context.reviewItemId })
+        if (recording) sourceRefs.push({ store: 'recordings', id })
+        if (session.context?.taskId && !String(session.context.taskId).startsWith('__')) {
+          sourceRefs.push({ store: 'tasks', id: session.context.taskId })
+        }
+        if (session.context?.choreId) sourceRefs.push({ store: 'runs', id: session.context.choreId })
+        if (note?.summaryTarget) sourceRefs.push({ store: note.summaryTarget.kind === 'chore' ? 'runs' : 'tasks', id: `${note.summaryTarget.subjectId}:${note.summaryTarget.noteId}` })
+        const destinationRefs = []
+        if (note?.kind === 'task' && note.result?.task?.id) destinationRefs.push({ kind: 'task', id: note.result.task.id, createdAt: Date.now(), syncRevision: 1 })
+        else if (['task', 'note'].includes(note?.kind) && note.taskId) destinationRefs.push({ kind: 'task', id: note.taskId, createdAt: Date.now(), syncRevision: 1 })
+        if (note?.kind === 'day-draft' && note.result?.draft?.id) destinationRefs.push({ kind: 'start_day', id: note.result.draft.id,
+          itemIds: note.result.sourceItemIds || [], createdAt: Date.now(), syncRevision: 1 })
+        if (rawText || recording?.available) {
+          const amendmentParent = session.context?.reviewItemId
+            ? spokenWork.get(session.context.reviewItemId) || legacySpokenInventory(DATA_DIR).items.find(item => item.id === session.context.reviewItemId)
+            : null
+          const captured = spokenWork.ingest({
+            sourceKey: `coach:${id}`, sourceType, modeId: session.modeId, space: session.space,
+            parentId: session.context?.reviewItemId || null,
+            amendmentKind: session.context?.amendmentKind || null,
+            amendmentBaseRevision: session.context?.reviewRevision ?? null,
+            amendmentOriginal: amendmentParent?.revision === session.context?.reviewRevision ? amendmentParent.cleanedTranscript : null,
+            sessionId: id, sourceRefs, capturedAt: session.startedAt, endedAt: session.endedAt,
+            rawSegments, rawText, complete: full?.ok === true && Boolean(full.text),
+            transcriptSource: full?.ok && full.text ? 'full-recording' : 'coach',
+            audio: { sessionId: id, state: audioState, kept: recording?.kept === true, expiresAt: recording?.expiresAt ?? null },
+            destinationRefs,
+          })
+          if (sourceType !== 'amendment' && captured.ok && rawText && (!captured.existing || captured.item.extraction?.state === 'stale')) {
+            scheduleSpokenExtraction({ store: spokenWork, jobs, itemId: captured.item.id, rulesPath: SPOKEN_RULES_PATH })
+          }
+        }
         jobs.discardQueuedCoachCuesForSession(session.id)
         if (note?.result?.ok && note.summaryTarget) {
           const prior = latestCoachModelCueForSession(cueSpace(session.space), session.id, Date.now(), false)
@@ -1657,6 +1862,7 @@ const server = http.createServer(async (req, res) => {
             reason: 'session-end',
             priority: 'now',
             finalNote: note.summaryTarget,
+            fullTranscript: full?.ok ? full.text : '',
             previousRunningNote: modelRunningNote(prior),
             previousBoard: modelBoard(prior),
           })
@@ -1704,7 +1910,7 @@ const server = http.createServer(async (req, res) => {
       at: body.at,
     })
     if (result.ok && !result.duplicate) {
-      if (!['__assistant__', '__day_start__'].includes(result.session.context?.taskId)) {
+      if (!['__assistant__', '__day_start__'].includes(result.session.context?.taskId) && !result.session.context?.reviewItemId) {
         scheduleCoachCue(result.session)
       }
     }
@@ -2070,6 +2276,13 @@ const server = http.createServer(async (req, res) => {
       } else if (action === 'heartbeat') {
         result = jobs.heartbeat(id, agent, body.leaseSeconds)
       } else if (action === 'result') {
+        if (job?.capability === 'spoken.extract') {
+          if (job.claimedBy !== agent) return json(res, 409, { error: 'not your job' })
+          const applied = applySpokenModelResult(spokenWork, job, body.result)
+          if (!applied.ok && !(applied.code === 409 && ['transcript changed before proposal arrived', 'proposal request was superseded'].includes(applied.error))) {
+            return json(res, applied.code || 400, applied)
+          }
+        }
         result = jobs.finish(id, agent, body.result)
         // Triage results are applied here rather than by the agent: the agent
         // should not need to know what an inbox is.
@@ -2084,6 +2297,12 @@ const server = http.createServer(async (req, res) => {
         }
       } else {
         result = jobs.fail(id, agent, body.error, body.retry !== false)
+        if (result.ok && job?.capability === 'spoken.extract' && result.job.status === JOB.FAILED) {
+          const item = spokenWork.get(job.input?.itemId)
+          if (item?.extraction?.jobId === job.id && item.extraction.transcriptRevision === job.input?.transcriptRevision) {
+            spokenWork.markExtraction(job.input.itemId, 'failed', { jobId: job.id, error: result.job.error })
+          }
+        }
       }
 
       if (result.ok && job?.capability === 'assistant.chat') assistant.syncAll(jobs)
@@ -2307,6 +2526,10 @@ const server = http.createServer(async (req, res) => {
 
     if (body.action === 'stage') {
       result = checklists.draftDay(String(body.transcript || ''), space, String(body.sessionId || crypto.randomUUID()), Date.now(), tasks.list().filter(task => task.space === space).map(task => task.label))
+      if (result.ok && body.sessionId && spokenWork.bySource(`coach:${body.sessionId}`)) {
+        spokenWork.ingest({ sourceKey: `coach:${body.sessionId}`, destinationRefs: [{ kind: 'start_day', id: result.draft.id,
+          itemIds: result.sourceItemIds || [], createdAt: Date.now(), syncRevision: 1 }] })
+      }
     } else if (body.action === 'toggle') {
       result = checklists.setDayDraftItem(space, String(body.itemId || ''), body.include !== false)
     } else if (body.action === 'revise') {
@@ -2344,8 +2567,15 @@ const server = http.createServer(async (req, res) => {
         if (failed) result = { ok: false, error: failed.error || 'could not save a task; review is still available' }
         else {
           const created = resolved.map(row => row.task)
-          result = checklists.commitDayDraft(space, Date.now(), created.map(task => task.id))
-          if (result.ok) result.createdTasks = created
+          const taskIdsByItem = new Map(prepared.tasks.map((item, index) => [item.id, created[index]?.id]))
+          const sourceLinks = prepared.items.map(item => ({ itemId: item.id,
+            sessionIds: item.sourceSessionIds || [], taskId: taskIdsByItem.get(item.id) || null }))
+          result = checklists.commitDayDraft(space, Date.now(), created.map(task => task.id), sourceLinks)
+          if (result.ok) {
+            result.createdTasks = created
+            try { result.reviewLinks = spokenWork.linkStartDayCommit(prepared.draftId, sourceLinks) }
+            catch (error) { result.reviewLinkError = String(error.message || error); console.warn(`[spoken-work] Start Day link pending reconciliation: ${error.message}`) }
+          }
         }
       }
     } else {

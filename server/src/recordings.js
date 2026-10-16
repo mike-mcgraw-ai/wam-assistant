@@ -63,6 +63,7 @@ export class Recordings {
       dir,
       pcm: join(dir, 'audio.pcm'),
       transcript: join(dir, 'transcript.jsonl'),
+      fullTranscript: join(dir, 'full-transcript.json'),
       manifest: join(dir, 'manifest.json'),
     }
   }
@@ -215,6 +216,26 @@ export class Recordings {
     }
   }
 
+  saveFullTranscript(sessionId, text) {
+    const paths = this.#paths(sessionId)
+    const value = String(text || '').trim()
+    if (!paths || !existsSync(paths.manifest) || !value) return { ok: false, error: 'recording or transcript missing' }
+    try {
+      const temp = `${paths.fullTranscript}.tmp`
+      writeFileSync(temp, JSON.stringify({ text: value, savedAt: Date.now() }), { mode: 0o600 })
+      renameSync(temp, paths.fullTranscript)
+      return { ok: true, text: value }
+    } catch (error) {
+      return { ok: false, error: String(error.message || error) }
+    }
+  }
+
+  fullTranscript(sessionId) {
+    const paths = this.#paths(sessionId)
+    if (!paths || !existsSync(paths.fullTranscript)) return ''
+    try { return String(JSON.parse(readFileSync(paths.fullTranscript, 'utf8')).text || '').trim() } catch { return '' }
+  }
+
   get(sessionId) {
     return this.#read(sessionId)
   }
@@ -246,7 +267,8 @@ export class Recordings {
   /** Spoken recordings outlive their expiry date in dev retention mode. */
   #retained(recording) {
     if (recording.kept) return false
-    const words = wordCount(this.transcript(recording.sessionId).map(segment => segment.text))
+    const full = this.fullTranscript(recording.sessionId)
+    const words = wordCount(full ? [full] : this.transcript(recording.sessionId).map(segment => segment.text))
     return keepPastExpiry({ words, seconds: recording.durationSeconds })
   }
 

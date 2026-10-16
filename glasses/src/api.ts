@@ -1,4 +1,5 @@
 import { config } from './config'
+import type { SpokenReviewItem } from './render'
 import type {
   AssistantChatResponse,
   AssistantProvider,
@@ -18,6 +19,60 @@ function authHeaders(extra: Record<string, string> = {}): Record<string, string>
   const headers: Record<string, string> = { Accept: 'application/json', ...extra }
   if (config.readToken) headers.Authorization = `Bearer ${config.readToken}`
   return headers
+}
+
+export async function fetchSpokenReview(cursor = 0, limit = 100): Promise<
+  { ok: true; items: SpokenReviewItem[]; total: number; nextCursor: number | null }
+  | { ok: false; error: string }
+> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), config.timeoutMs)
+  try {
+    const response = await fetch(`${config.serverUrl}/spoken-work?state=active&cursor=${cursor}&limit=${limit}`, {
+      headers: authHeaders(), cache: 'no-store', signal: controller.signal,
+    })
+    const payload = await response.json()
+    if (!response.ok || !Array.isArray(payload.items)) return { ok: false, error: payload.error || `server ${response.status}` }
+    return { ok: true, items: payload.items, total: payload.needsReviewCount, nextCursor: payload.nextCursor }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : 'network error' }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+export async function actOnSpokenReview(item: SpokenReviewItem, action: string, commandId: string): Promise<
+  { ok: true; item: SpokenReviewItem } | { ok: false; error: string }
+> {
+  try {
+    const response = await fetch(`${config.serverUrl}/spoken-work/${encodeURIComponent(item.id)}/actions`, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json', 'If-Match': String(item.revision) }),
+      body: JSON.stringify({ action, commandId }),
+    })
+    const payload = await response.json()
+    if (!response.ok || !payload.ok) return { ok: false, error: payload.error || `server ${response.status}` }
+    return { ok: true, item: payload.item }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : 'network error' }
+  }
+}
+
+export async function applySpokenAmendment(item: SpokenReviewItem, commandId: string): Promise<
+  { ok: true; item: SpokenReviewItem } | { ok: false; error: string }
+> {
+  try {
+    const response = await fetch(`${config.serverUrl}/spoken-work/${encodeURIComponent(item.id)}/amend`, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json', 'If-Match': String(item.revision) }),
+      body: JSON.stringify({ commandId }),
+    })
+    const payload = await response.json()
+    if (!response.ok || !payload.ok) return { ok: false, error: payload.error || `server ${response.status}` }
+    return { ok: true, item: payload.item }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : 'network error' }
+  }
 }
 
 /**
@@ -470,7 +525,7 @@ async function postCoach(
  */
 export const startCoachSession = (
   space: string,
-  context: { taskId?: string; choreId?: string; label: string } | null = null,
+  context: { taskId?: string; choreId?: string; reviewItemId?: string; reviewRevision?: number; amendmentKind?: 'correction' | 'detail'; label: string } | null = null,
   modeId: string | null = null,
 ) =>
   postCoach('/coach/session/start', {

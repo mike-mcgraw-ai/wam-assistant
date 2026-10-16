@@ -457,7 +457,7 @@ export interface CoachSessionSummary {
   updatedAt: number
   endedAt: number | null
   active: boolean
-  context?: { taskId?: string; choreId?: string; label: string } | null
+  context?: { taskId?: string; choreId?: string; reviewItemId?: string; reviewRevision?: number; amendmentKind?: 'correction' | 'detail'; label: string } | null
   segmentCount: number
   recentSegments: CoachSegment[]
   runningNote: CoachRunningNote | null

@@ -1,8 +1,8 @@
-# Integration: reviewable days, chat and Listen quality
+# Review Spoken Work
 
-- Public version: `v0.32.0`
-- Face build: `0.154.0`
-- Originally completed: `2026-10-15`
+- Public version: `v0.33.0`
+- Face build: `0.157.0`
+- Originally completed: `2026-10-16`
 - Sanitized and published: `2026-10-17`
 
-Three parallel branches in one release: Start Day review with Rebuild today, chat reader fixes, and cleaner Listen transcripts.
+Every recording becomes one durable review card, with corrections, explicit promotion, and a guarded backlog migration.

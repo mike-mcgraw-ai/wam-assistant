@@ -5,7 +5,7 @@
  * ended Listen sessions are the raw material for building Review Spoken Work,
  * and losing them to a 14-day timer means losing the examples. Only trivial
  * captures — no recognised words, or a few seconds of nothing — still expire
- * after releaseDays. "release" mode is the old plain expiry for everything.
+ * after releaseDays. Kept review recordings remain kept until explicit purge.
  */
 import { readFileSync } from 'node:fs'
 

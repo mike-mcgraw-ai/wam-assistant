@@ -391,6 +391,7 @@ export class Checklists {
         include: true,
         note: '',
         source,
+        sourceSessionIds: [sessionId],
       })),
       ...unmatched.map((label, index) => ({
         id: `task:${sessionId}:${index}`,
@@ -399,6 +400,7 @@ export class Checklists {
         include: true,
         note: '',
         source: unmatchedSources[index],
+        sourceSessionIds: [sessionId],
       })),
       ...fragments.map(({ label, source }, index) => ({
         id: `task:${sessionId}:${unmatched.length + index}`,
@@ -408,6 +410,7 @@ export class Checklists {
         uncertain: true,
         note: '',
         source,
+        sourceSessionIds: [sessionId],
       })),
     ]
     const day = this.dayKey(now)
@@ -450,6 +453,7 @@ export class Checklists {
         existing.fromStep = item.fromStep
       }
       if (item.conflict) existing.conflict = item.conflict
+      existing.sourceSessionIds = [...new Set([...(existing.sourceSessionIds || []), sessionId])]
       if (!item.uncertain) delete existing.uncertain
       // Naming it again means it belongs in the latest proposal, even if an
       // earlier review had temporarily removed it.
@@ -465,7 +469,7 @@ export class Checklists {
     this.dayStarts.set(key, { ...prior, updatedAt: now, draft })
     this.#log({ type: 'day_draft', day, space, draftId: draft.id, itemCount: items.length, at: now })
     this.#persist()
-    return { ok: true, draft }
+    return { ok: true, draft, sourceItemIds: mergedItems.filter(item => item.sourceSessionIds?.includes(sessionId)).map(item => item.id) }
   }
 
   /** Keep or remove one proposed row while reviewing a Start Day draft. */
@@ -562,7 +566,7 @@ export class Checklists {
     return { ok: true, draftId: draft.id, items: unique, tasks: unique.filter(item => item.kind === 'task') }
   }
 
-  commitDayDraft(space = 'life', now = Date.now(), taskIds = []) {
+  commitDayDraft(space = 'life', now = Date.now(), taskIds = [], sourceLinks = []) {
     const prepared = this.prepareDayDraft(space, now)
     if (!prepared.ok) return prepared
     const day = this.dayKey(now)
@@ -592,6 +596,8 @@ export class Checklists {
       checklistIds: [...new Set([...(prior.checklistIds ?? []), ...checklistIds])],
       runIds: [...new Set([...(prior.runIds ?? []), ...runIds])],
       taskIds: [...new Set([...(prior.taskIds ?? []), ...taskIds])],
+      draftCommits: [...(prior.draftCommits || []).filter(commit => commit.id !== draft.id),
+        { id: draft.id, sourceLinks }],
       transcript: [prior.transcript, draft.transcript].filter(Boolean).join('\n').slice(-4_000),
     }
     this.dayStarts.set(key, saved)
@@ -600,6 +606,7 @@ export class Checklists {
     return {
       ok: true,
       draftId: draft.id,
+      sourceLinks,
       tasks: unique.filter(item => item.kind === 'task'),
       ...saved,
     }

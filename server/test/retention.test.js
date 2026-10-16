@@ -43,6 +43,23 @@ test('a spoken recording outlives its expiry date; an empty or tiny one does not
   }
 })
 
+test('whole-recording words retain audio when short chunk transcripts missed them', () => {
+  const rootPath = mkdtempSync(join(tmpdir(), 'wam-full-retention-'))
+  try {
+    const recordings = new Recordings({ rootPath })
+    const old = Date.now() - 30 * DAY
+    recordings.addChunk('full-only', Buffer.concat(Array(5).fill(SECOND_OF_AUDIO)), { at: old })
+    recordings.finalize('full-only', old)
+    assert.equal(recordings.saveFullTranscript('full-only', 'Clean the counters and the living room.').ok, true)
+    recordings.prune()
+    assert.equal(recordings.fullTranscript('full-only'), 'Clean the counters and the living room.')
+    assert.equal(recordings.summary('full-only').retained, true)
+    assert.equal(recordings.summary('full-only').expiresAt, null)
+  } finally {
+    rmSync(rootPath, { recursive: true, force: true })
+  }
+})
+
 test('an ended Listen session with words survives the 14-day cut; a wordless one does not', () => {
   const dir = mkdtempSync(join(tmpdir(), 'wam-retention-coach-'))
   try {

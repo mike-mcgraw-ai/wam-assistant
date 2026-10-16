@@ -259,6 +259,21 @@ plain text, short paragraphs, no tables, and normally under 1,200 characters.
 Conversation:
 `
 
+const SPOKEN_EXTRACT_PROMPT = `Read this complete spoken-work source and return ONLY a JSON object:
+{
+  "title": "short source-backed title",
+  "summary": "what was actually said, without invented facts",
+  "classification": "task|project|idea|memory|product_feedback|mixed|reference|unknown",
+  "candidates": [{"id":"c1","kind":"task|project|idea|memory","title":"...","detail":"...","evidenceSegmentIds":[],"evidenceText":"exact supporting words","confidence":0.0}],
+  "clarificationQuestions": ["one useful question only when meaning changes the action"],
+  "confidence": {"score":0.0,"reasons":["brief evidence-based reason"]},
+  "suggestedDestination": "task|project|idea|memory|null"
+}
+Use the corrected transcript as the working copy when it differs from rawText; preserve rawText as evidence, not a fact to silently rewrite. Cite an exact excerpt in evidenceText and segment IDs only when a chunk actually supports it. Whole-recording text may correct live chunks; never treat a chunk mishearing as a fact. Keep multiple distinct intents as mixed candidates. A model suggestion never creates a task or any destination. Unknown names, objects, or actions should remain questions. Do not guess a duration.
+
+Source:
+`
+
 function trimText(value, max) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max)
 }
@@ -332,6 +347,15 @@ function normalizeCueOnly(parsed, constraints = {}) {
 }
 
 const handlers = {
+  async 'spoken.extract'(job) {
+    const input = job.input ?? {}
+    if (!String(input.rawText || '').trim()) throw new Error('spoken extraction has no transcript')
+    const reply = await think(SPOKEN_EXTRACT_PROMPT + JSON.stringify(input, null, 2), 90_000)
+    const parsed = extractJson(reply)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('expected a proposal object')
+    return parsed
+  },
+
   async triage(job) {
     const items = job.input?.items ?? []
     if (items.length === 0) return []

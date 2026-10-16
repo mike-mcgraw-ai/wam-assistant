@@ -124,6 +124,7 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
 
   const base: UiState = {
     view: { kind: 'index', cursor: 0 },
+    spokenReview: { items: [], total: 0, loading: false, error: null },
     snapshot, error: null, loading: false,
     lastOkAt: now, fromCache: false, alertsOnly: false,
     plan: null, planLoading: false, planError: null,
@@ -445,7 +446,26 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
   add('Life index', render({ ...withPlan, space: 'life', view: { kind: 'index', cursor: 0 } }))
   add('Life index — no auto AI widget', render({ ...withPlan, space: 'life', cue: demoCue, view: { kind: 'index', cursor: 0 } }))
   add('Shared list — Groceries', render({ ...withPlan, space: 'life', view: { kind: 'inbox', group: 'Groceries', cursor: 0 } }))
-  add('Notes — chore note', render({ ...withPlan, space: 'life', view: { kind: 'notes', cursor: 0 } }))
+  add('Notes — chore note', render({ ...withPlan, space: 'life', view: { kind: 'notes', cursor: 1 } }))
+  const reviewItem = {
+    id: 'sw_demo-review', revision: 1, title: 'Call the vet about the dog',
+    summary: 'Ask about the prescription refill and when the dog should be seen.',
+    sourceType: 'solo_notes', capturedAt: now - 30 * M, reviewState: 'unreviewed',
+    clarificationQuestions: [], cleanedTranscript: 'Call the vet about the dog and ask about the prescription refill.',
+    rawTranscript: { text: 'Call the vet about the dog and ask about the prescription refill.', complete: true },
+    audio: { state: 'available' },
+  }
+  const spokenReview = { items: [reviewItem], total: 1, loading: false, error: null }
+  add('Capture — Review count', render({ ...withPlan, space: 'life', spokenReview, view: { kind: 'capture', cursor: 2 } }))
+  add('Review — one card', render({ ...withPlan, space: 'life', spokenReview, view: { kind: 'review', phase: 'list', index: 0, cursor: 0 } }))
+  add('Review — guarded Home action', render({ ...withPlan, space: 'life', spokenReview,
+    view: { kind: 'review', phase: 'card', index: 0, cursor: 0, armedAction: 'Task/Home', armedAt: now } }))
+  const amendment = { ...reviewItem, id: 'sw_demo-amendment', title: 'Clean the kitchen', sourceType: 'amendment',
+    parentId: reviewItem.id, amendmentKind: 'correction' as const, amendmentBaseRevision: 1,
+    amendmentOriginal: 'Clean the cap', cleanedTranscript: 'Clean the kitchen', summary: 'Clean the kitchen' }
+  add('Review — voice correction before apply', render({ ...withPlan, space: 'life',
+    spokenReview: { items: [amendment], total: 1, loading: false, error: null },
+    view: { kind: 'review', phase: 'card', index: 0, cursor: 0 } }))
   const vacuumTranscript = {
     noteId: 's-demo-vacuum:note',
     sessionId: 's-demo-vacuum',

@@ -13,7 +13,7 @@
   main{max-width:760px;margin:auto;padding:14px}
   .sub,.meta,.empty{color:var(--muted)}
   .sub{font-size:13px;margin:4px 0 0}
-  .filters{display:flex;gap:8px;margin:0 0 15px}
+  .filters{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 15px}
   button{border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:10px;padding:9px 12px;font:inherit}
   button.selected{background:var(--accent);color:#092017;border-color:var(--accent);font-weight:700}
   button:disabled{opacity:.55}
@@ -29,10 +29,17 @@
   .detail ul{margin:5px 0;padding-left:22px}
   .detail li{margin:5px 0}
   .transcript{white-space:pre-wrap;overflow-wrap:anywhere;background:#111814;border-radius:9px;padding:12px;color:#e2ede5}
+  pre{white-space:pre-wrap;overflow-wrap:anywhere}
   details{margin:12px 0}
   summary{cursor:pointer;color:var(--accent)}
   audio{display:block;width:100%;margin-top:10px}
   .back{margin-bottom:14px}
+  label{display:block;margin:12px 0 5px;font-weight:700}
+  input,textarea,select{width:100%;border:1px solid var(--line);border-radius:9px;background:#101814;color:var(--text);padding:10px;font:inherit}
+  textarea{min-height:90px;resize:vertical}
+  .actions{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0}
+  .primary{background:var(--accent);color:#092017;border-color:var(--accent);font-weight:700}
+  .error{color:#ffae9e}
   nav{position:fixed;bottom:0;left:0;right:0;display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:#080b09;border-top:1px solid var(--line);padding:7px 8px calc(env(safe-area-inset-bottom) + 7px)}
   nav a{text-align:center;text-decoration:none;padding:8px;border-radius:8px;color:var(--muted);font-weight:700}
   nav a.active{background:var(--accent);color:#092017}
@@ -42,9 +49,13 @@
   <a href="/notes">Notes</a>
 </header>
 <main>
+  <p id="sync-status" class="meta" role="status" hidden></p>
+  <label for="review-search">Search spoken work</label><input id="review-search" type="search" placeholder="Words, source, or YYYY-MM-DD">
   <div class="filters" id="filters">
     <button data-state="active" class="selected">Needs review</button>
     <button data-state="reviewed">Reviewed</button>
+    <button data-state="ignored">Ignored</button>
+    <button data-state="done">Done</button>
     <button data-state="all">All</button>
   </div>
   <div id="content" role="status">Loading spoken work…</div>
@@ -56,20 +67,116 @@ const content = document.getElementById('content')
 const more = document.getElementById('more')
 const count = document.getElementById('count')
 const filters = document.getElementById('filters')
+const search = document.getElementById('review-search')
+const syncStatus = document.getElementById('sync-status')
 let state = 'active'
 let cursor = 0
 let rows = []
 let selectedId = null
+const pendingCommands = new Map()
+let searchTimer = null
+const editQueueKey = 'spoken-work-pending-edits-v1'
+
+function pendingEdits() {
+  try { return JSON.parse(localStorage.getItem(editQueueKey) || '[]') } catch { return [] }
+}
+
+function savePendingEdits(edits) {
+  localStorage.setItem(editQueueKey, JSON.stringify(edits))
+  syncStatus.hidden = !edits.length
+  syncStatus.textContent = edits.length ? edits.length + ' edit' + (edits.length === 1 ? '' : 's') + ' waiting to sync.' : ''
+}
+
+function removePendingEdit(commandId) {
+  savePendingEdits(pendingEdits().filter(edit => edit.commandId !== commandId))
+}
+
+async function flushPendingEdits() {
+  let synced = false
+  for (const edit of pendingEdits()) {
+    if (edit.conflict) continue
+    try {
+      await request(edit.path, { method:'PATCH', headers:{ 'Content-Type':'application/json', 'If-Match':String(edit.revision) },
+        body:JSON.stringify({ patch:edit.patch, commandId:edit.commandId }) })
+      removePendingEdit(edit.commandId)
+      synced = true
+    } catch (error) {
+      if (error.status) {
+        savePendingEdits(pendingEdits().map(row => row.commandId === edit.commandId ? { ...row, conflict:true } : row))
+        syncStatus.textContent = 'An offline edit needs your review. Open that card to compare and save your words.'
+      }
+      if (!error.status) break
+    }
+  }
+  if (synced && !selectedId) await loadList()
+}
 
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]))
 const dateLabel = value => value ? new Date(value).toLocaleString([], { dateStyle:'medium', timeStyle:'short' }) : 'time unknown'
 const sourceLabel = value => ({solo_notes:'Solo Notes',conversation:'Conversation',listening:'Listen',meeting:'Meeting',start_day:'Start Day',assistant_voice:'Assistant voice',task_voice_note:'Task voice note',captured_note_legacy:'Older Captured Note'}[value] || 'Spoken work')
 const statusLabel = value => ({unreviewed:'Needs review',needs_clarification:'Needs clarification',reviewed:'Reviewed',done:'Done',ignored:'Ignored',merged:'Merged',split:'Split'}[value] || value)
 
-async function request(path) {
-  const response = await fetch(path, { cache:'no-store' })
-  if (!response.ok) throw new Error('Could not load review (' + response.status + ')')
-  return response.json()
+async function request(path, options = {}) {
+  const response = await fetch(path, { cache:'no-store', ...options })
+  const result = await response.json()
+  if (!response.ok) {
+    const error = new Error(result.error || 'Could not load review (' + response.status + ')')
+    error.status = response.status
+    error.current = result.item
+    throw error
+  }
+  return result
+}
+
+async function changeItem(item, key, method, path, body) {
+  const pendingTask = item.pendingPromotion?.kind === 'task' &&
+    ((body.action === 'task' && !item.pendingPromotion.destinationId) || (body.action === 'link-task' && item.pendingPromotion.destinationId === body.taskId))
+  const commandId = method === 'PATCH' ? crypto.randomUUID()
+    : pendingCommands.get(key) || (pendingTask ? item.pendingPromotion.commandId : crypto.randomUUID())
+  if (method !== 'PATCH') pendingCommands.set(key, commandId)
+  if (method === 'PATCH') {
+    try {
+      const edits = pendingEdits().filter(edit => edit.itemId !== item.id)
+      savePendingEdits([...edits, { itemId:item.id, path, revision:item.revision, patch:body.patch, commandId }])
+    } catch {
+      document.getElementById('review-message').textContent = 'This device cannot save an offline edit. No changes were sent.'
+      return
+    }
+  }
+  const message = document.getElementById('review-message')
+  message.textContent = 'Saving…'
+  try {
+    await request(path, { method, headers: { 'Content-Type':'application/json', 'If-Match':String(item.revision) }, body: JSON.stringify({ ...body, commandId }) })
+    if (method === 'PATCH') removePendingEdit(commandId)
+    pendingCommands.delete(key)
+    await loadList()
+    if (body.action === 'ignored' || body.action === 'done') await openItem(item.id)
+  } catch (error) {
+    if (error.status === 409 && error.current) {
+      if (method === 'PATCH') {
+        savePendingEdits(pendingEdits().map(edit => edit.commandId === commandId ? { ...edit, conflict:true } : edit))
+      }
+      message.textContent = 'This card changed elsewhere. Your edits are still above.'
+      const saved = document.createElement('details')
+      const heading = document.createElement('summary')
+      heading.textContent = 'Compare saved version (revision ' + error.current.revision + ')'
+      const comparison = document.createElement('pre')
+      comparison.textContent = [error.current.title, error.current.summary, error.current.cleanedTranscript,
+        'Kind: ' + error.current.classification].filter(Boolean).join('\n\n')
+      saved.append(heading, comparison)
+      message.append(' ', saved)
+      const reload = document.createElement('button')
+      reload.textContent = 'Reload saved version'
+      reload.onclick = () => openItem(item.id)
+      message.append(' ', reload)
+      pendingCommands.delete(key)
+    } else if (method === 'PATCH' && !error.status) message.textContent = 'Waiting to sync. This device saved your edit and will retry when connected.'
+    else {
+      if (method === 'PATCH') removePendingEdit(commandId)
+      message.textContent = error.message + ' Your changes are still here; try again.'
+    }
+    message.className = 'error'
+  }
 }
 
 function card(item) {
@@ -91,7 +198,7 @@ function renderList() {
 async function loadList(reset = true) {
   if (reset) { cursor = 0; rows = []; selectedId = null; content.textContent = 'Loading spoken work…' }
   try {
-    const result = await request('/spoken-work?state=' + encodeURIComponent(state) + '&cursor=' + cursor + '&limit=50')
+    const result = await request('/spoken-work?state=' + encodeURIComponent(state) + '&cursor=' + cursor + '&limit=50&q=' + encodeURIComponent(search.value.trim()))
     rows = rows.concat(result.items || [])
     cursor = result.nextCursor
     count.textContent = result.needsReviewCount + ' need review · ' + result.total + ' in this view'
@@ -109,6 +216,17 @@ function sourceLinks(item) {
   return links.length ? '<ul>' + links.map(link => '<li>' + link + '</li>').join('') + '</ul>' : '<p class="empty">Original source is unavailable.</p>'
 }
 
+async function mergeChoices(item) {
+  const choices = []
+  let next = 0
+  while (next != null && choices.length < 1000) {
+    const page = await request('/spoken-work?state=all&cursor=' + next + '&limit=100')
+    choices.push(...(page.items || []).filter(row => row.id !== item.id && row.space === item.space && !['merged','split'].includes(row.reviewState)))
+    next = page.nextCursor
+  }
+  return choices
+}
+
 async function openItem(id) {
   selectedId = id
   more.hidden = true
@@ -117,28 +235,192 @@ async function openItem(id) {
     const result = await request('/spoken-work/' + encodeURIComponent(id))
     if (selectedId !== id) return
     const item = result.item
+    const queuedEdit = pendingEdits().find(edit => edit.itemId === id)
+    const editable = queuedEdit?.patch || item
     const raw = item.rawTranscript || {}
     const audio = item.audio || {}
+    const extraction = item.extraction || { state:'not_processed' }
     const audioHtml = audio.state === 'available' && audio.sessionId
       ? '<audio controls preload="none" src="/coach/session/' + encodeURIComponent(audio.sessionId) + '/recording.wav"></audio>'
       : '<p class="empty">' + escapeHtml(audio.state === 'expiring' ? 'Audio may no longer be available.' : 'Audio was not retained for this source.') + '</p>'
     const questions = (item.clarificationQuestions || []).map(question => '<li>' + escapeHtml(question) + '</li>').join('')
     const candidates = (item.candidates || []).map(candidate => '<li>' + escapeHtml(candidate.kind + ': ' + candidate.title) + '</li>').join('')
-    const destinations = (item.destinationRefs || []).map(ref => '<li>' + escapeHtml(ref.kind + ': ' + ref.id) + '</li>').join('')
+    const candidateFields = (editable.candidates || []).map((candidate, index) =>
+      '<label for="candidate-title-' + index + '">Possible ' + escapeHtml(candidate.kind) + ' title</label>' +
+      '<input id="candidate-title-' + index + '" data-candidate-title="' + index + '" maxlength="80" value="' + escapeHtml(candidate.title || '') + '">' +
+      '<label for="candidate-detail-' + index + '">Possible work detail</label>' +
+      '<textarea id="candidate-detail-' + index + '" data-candidate-detail="' + index + '">' + escapeHtml(candidate.detail || '') + '</textarea>').join('')
+    const destinations = (item.destinationRefs || []).map(ref => '<li>' + escapeHtml(ref.kind + ': ' + ref.id) +
+      (['task','project','idea','memory'].includes(ref.kind) && item.revision > (ref.syncRevision || 0)
+        ? ' <button type="button" data-preview-kind="' + escapeHtml(ref.kind) + '">Preview update</button>' : '') + '</li>').join('')
+    const history = (result.events || []).map(event => '<li>' + escapeHtml(event.type.replaceAll('_', ' ') + ' · ' + dateLabel(event.at)) + '</li>').join('')
     const segments = (raw.segments || []).map((segment, index) => (index + 1) + '. ' + (segment.speaker || '?') + ': ' + segment.text).join('\n')
+    const classifications = ['unknown','task','project','idea','memory','product_feedback','mixed','reference']
+    const choices = classifications.map(value => '<option value="' + value + '"' + (editable.classification === value ? ' selected' : '') + '>' + escapeHtml(value.replace('_',' ')) + '</option>').join('')
+    const superseded = item.reviewState === 'merged' || item.reviewState === 'split'
+    const related = item.mergedInto ? '<p>Merged into <a href="#" data-open-item="' + escapeHtml(item.mergedInto) + '">the retained card</a>.</p>'
+      : item.childIds?.length ? '<p>' + (item.reviewState === 'split' ? 'Split into ' : 'Voice amendments: ') + item.childIds.map((childId, index) => '<a href="#" data-open-item="' + escapeHtml(childId) + '">' + (item.reviewState === 'split' ? 'part ' : 'recording ') + (index + 1) + '</a>').join(' and ') + '.</p>'
+        : item.mergedSourceIds?.length ? '<p>Includes ' + item.mergedSourceIds.map((sourceId, index) => '<a href="#" data-open-item="' + escapeHtml(sourceId) + '">original ' + (index + 1) + '</a>').join(' and ') + '.</p>' : ''
+    const splittable = !superseded && (raw.segments || []).length >= 2 && (raw.segments || []).every(segment => segment.id) && new Set((raw.segments || []).map(segment => segment.id)).size === raw.segments.length
+    const splitRows = splittable ? raw.segments.map((segment, index) => '<label for="split-' + index + '">Chunk ' + (index + 1) + ': ' + escapeHtml(segment.text) + '</label>' +
+      '<select id="split-' + index + '" data-split-id="' + escapeHtml(segment.id) + '"><option value="1"' + (index < Math.ceil(raw.segments.length / 2) ? ' selected' : '') + '>Part 1</option><option value="2"' + (index >= Math.ceil(raw.segments.length / 2) ? ' selected' : '') + '>Part 2</option></select>').join('') : ''
+    const taskLinked = (item.destinationRefs || []).some(ref => ref.kind === 'task')
+    const resourceButtons = ['project','idea','memory'].filter(kind => !(item.destinationRefs || []).some(ref => ref.kind === kind))
+      .map(kind => '<button data-action="' + kind + '">Save ' + (kind === 'memory' ? 'kept moment' : kind) + '</button>').join('')
+    const actionButtons = item.parentId
+      ? ((item.reviewState === 'unreviewed' || item.reviewState === 'needs_clarification' && !item.clarificationQuestions?.length && item.provenance?.humanEditedFields?.includes('cleanedTranscript')) &&
+          (raw.complete || item.provenance?.humanEditedFields?.includes('cleanedTranscript')) && item.amendmentOriginal != null
+        ? '<button class="primary" id="apply-amendment" type="button">Apply reviewed words</button>' :
+          '<p>Keep the original words until both cards are reviewed. Correct this transcript here, then use the phone to resolve any uncertainty.</p>') +
+        '<button data-action="ignored">Ignore amendment</button>'
+      : item.reviewState === 'ignored' || item.reviewState === 'done'
+      ? '<button data-action="restore">Restore to review</button>'
+      : (taskLinked ? '' : '<button class="primary" data-action="task">Make Home task</button><button id="load-task" type="button">Link existing Home task</button>') +
+        resourceButtons +
+        '<button data-action="reviewed">Mark reviewed</button>' +
+        (item.reviewState === 'reviewed' ? '<button data-action="unreviewed">Return to review</button>' : '') +
+        '<button data-action="done">Done</button><button data-action="ignored">Ignore</button>'
     content.innerHTML = '<button class="back" id="back">← Back to list</button><article class="detail">' +
       '<h2>' + escapeHtml(item.title) + '</h2><div class="meta">' + escapeHtml(sourceLabel(item.sourceType) + ' · ' + dateLabel(item.capturedAt) + ' · ' + statusLabel(item.reviewState)) + '</div>' +
       '<section><h3>Summary</h3><p>' + escapeHtml(item.summary || 'No summary yet. The original words are below.') + '</p></section>' +
       (questions ? '<section><h3>Needs clarification</h3><ul>' + questions + '</ul></section>' : '') +
       (candidates ? '<section><h3>Possible work</h3><ul>' + candidates + '</ul></section>' : '') +
       '<section><h3>Cleaned transcript</h3><div class="transcript">' + escapeHtml(item.cleanedTranscript || 'No transcript available.') + '</div></section>' +
+      (item.parentId ? '<section><h3>Voice amendment</h3><p>' + escapeHtml(item.amendmentKind === 'correction' ? 'Replace the corrected words on the original card, after confirmation.' : 'Add these words to the original card, after confirmation.') + '</p>' +
+        '<p>Original at recording time:</p><div class="transcript">' + escapeHtml(item.amendmentOriginal || 'Original needs phone review.') + '</div>' +
+        '<a href="/review?item=' + encodeURIComponent(item.parentId) + '">Open original card</a></section>' : '') +
+      '<section><h3>Suggested meaning</h3><p>' + escapeHtml(extraction.state === 'processing' ? 'Thinking from the complete transcript. You can review the original words now.'
+        : extraction.state === 'failed' ? 'The model is unavailable; this card remains reviewable.'
+          : extraction.state === 'stale' ? 'The transcript changed; the earlier suggestion is stale.'
+            : extraction.state === 'ready' ? 'A proposal is ready for your review.' : 'No proposal has been processed yet.') + '</p>' +
+      (extraction.error ? '<p class="error">' + escapeHtml(extraction.error) + '</p>' : '') +
+      (!superseded && ['failed','stale','not_processed'].includes(extraction.state) && raw.text
+        ? '<button id="retry-extraction" type="button">Try suggestion again</button>' : '') + '</section>' +
       '<section><h3>Original audio</h3>' + audioHtml + '</section>' +
       '<details><summary>Full raw transcript and STT chunks</summary><div class="transcript">' + escapeHtml(raw.text || 'Raw transcript unavailable.') + '</div>' +
       '<h3>Raw chunks</h3><div class="transcript">' + escapeHtml(segments || 'No raw chunks saved.') + '</div></details>' +
       '<section><h3>Source</h3>' + sourceLinks(item) + '</section>' +
-      (destinations ? '<section><h3>Already linked</h3><ul>' + destinations + '</ul></section>' : '') +
-      '<p class="empty">Review actions arrive in the next phase. This page is read-only while the backlog is checked.</p></article>'
+      (destinations ? '<section><h3>Already linked</h3><ul>' + destinations + '</ul><div id="destination-preview" hidden></div></section>' : '') +
+      (related ? '<section><h3>Related review cards</h3>' + related + '</section>' : '') +
+      (history ? '<details><summary>Review history</summary><ul>' + history + '</ul></details>' : '') +
+      (superseded ? '<p class="meta">This original card remains in history. Edit its retained card or split parts instead.</p>' :
+      '<section><h3>Correct what was heard</h3><p class="meta">The original words and recording stay unchanged.</p>' +
+      (queuedEdit ? '<p class="meta">Your unsynced edit is shown below. Saved title: “' + escapeHtml(item.title) + '” (revision ' + item.revision + ').</p>' : '') +
+      '<form id="review-edit"><label for="review-title">Title</label><input id="review-title" maxlength="80" value="' + escapeHtml(editable.title || '') + '">' +
+      '<label for="review-summary">Summary</label><textarea id="review-summary">' + escapeHtml(editable.summary || '') + '</textarea>' +
+      '<label for="review-transcript">Corrected transcript</label><textarea id="review-transcript">' + escapeHtml(editable.cleanedTranscript || '') + '</textarea>' +
+      '<label for="review-questions">Clarification questions, one per line</label><textarea id="review-questions">' + escapeHtml((editable.clarificationQuestions || []).join('\n')) + '</textarea>' +
+      '<label for="review-kind">Kind</label><select id="review-kind">' + choices + '</select>' +
+      candidateFields +
+      '<div class="actions"><button class="primary" type="submit">Save corrections</button></div></form></section>' +
+      '<section><h3>Decide what happens</h3><div class="actions" id="review-actions">' + actionButtons + '</div>' +
+      (!taskLinked && !['ignored','done'].includes(item.reviewState) ? '<div id="task-picker" hidden><label for="existing-task">Open task to link</label><select id="existing-task"></select>' +
+        '<div class="actions"><button id="link-task" type="button">Link selected task</button></div></div>' : '') +
+      '<p class="meta">A Home task is created only after you confirm it. Ignore and Done can be restored.</p></section>' +
+      (splittable ? '<details><summary>Split into two review cards</summary><p class="meta">Assign every original chunk to one part. The whole recording remains on this original card; check corrected words on each new card.</p>' +
+        '<form id="review-split">' + splitRows + '<label for="split-title-1">Part 1 title</label><input id="split-title-1" maxlength="80">' +
+        '<label for="split-title-2">Part 2 title</label><input id="split-title-2" maxlength="80">' +
+        '<div class="actions"><button type="submit">Split and review both parts</button></div></form></details>' : '') +
+      '<details><summary>Merge another card into this one</summary><p class="meta">Both original sources remain in history. Nothing is deleted.</p>' +
+      '<button id="load-merge" type="button">Choose another card</button><div id="merge-picker" hidden><label for="merge-source">Card to merge</label><select id="merge-source"></select>' +
+      '<div class="actions"><button id="merge-submit" type="button">Merge cards</button></div></div></details>') +
+      '<p id="review-message" role="status"></p></article>'
     document.getElementById('back').onclick = () => { selectedId = null; more.hidden = cursor == null; renderList() }
+    for (const link of content.querySelectorAll('[data-open-item]')) link.onclick = event => { event.preventDefault(); openItem(link.dataset.openItem) }
+    if (superseded) return
+    const applyAmendment = document.getElementById('apply-amendment')
+    if (applyAmendment) applyAmendment.onclick = () => {
+      if (!confirm('Apply these reviewed words to the original card? The raw recording and old words stay in history.')) return
+      changeItem(item, 'amend:' + id, 'POST', '/spoken-work/' + encodeURIComponent(id) + '/amend', {})
+    }
+    for (const button of content.querySelectorAll('[data-preview-kind]')) button.onclick = async () => {
+      const kind = button.dataset.previewKind
+      const panel = document.getElementById('destination-preview')
+      try {
+        const preview = await request('/spoken-work/' + encodeURIComponent(id) + '/destinations/' + kind + '/preview')
+        if (selectedId !== id) return
+        const body = kind === 'task' ? 'Existing task: ' + preview.taskLabel + '\n\nAdd this context note:\n' + preview.proposedNote
+          : Object.entries(preview.changes || {}).map(([field, change]) => field + ':\nSaved: ' + JSON.stringify(change.before) + '\nProposed: ' + JSON.stringify(change.after)).join('\n\n') || 'No destination fields changed; mark this revision synchronized.'
+        panel.hidden = false
+        panel.innerHTML = '<p>Linked destination may need updating. Nothing changes until you confirm.</p><pre>' + escapeHtml(body) + '</pre><button id="apply-destination-update" type="button">Update linked ' + escapeHtml(kind) + '</button>'
+        document.getElementById('apply-destination-update').onclick = () => {
+          if (!confirm('Apply this ' + kind + ' update?')) return
+          changeItem(item, 'sync:' + kind + ':' + id, 'POST', '/spoken-work/' + encodeURIComponent(id) + '/destination-sync', { kind })
+        }
+      } catch (error) { panel.hidden = false; panel.textContent = error.message }
+    }
+    const retryExtraction = document.getElementById('retry-extraction')
+    if (retryExtraction) retryExtraction.onclick = () => changeItem(item, 'extract:' + id, 'POST',
+      '/spoken-work/' + encodeURIComponent(id) + '/extract', {})
+    document.getElementById('review-edit').onsubmit = event => {
+      event.preventDefault()
+      const editedCandidates = (editable.candidates || []).map((candidate, index) => ({ ...candidate,
+        title:document.getElementById('candidate-title-' + index).value,
+        detail:document.getElementById('candidate-detail-' + index).value }))
+      const patch = { title:document.getElementById('review-title').value, summary:document.getElementById('review-summary').value,
+        cleanedTranscript:document.getElementById('review-transcript').value, classification:document.getElementById('review-kind').value,
+        clarificationQuestions:document.getElementById('review-questions').value.split('\n').map(value => value.trim()).filter(Boolean),
+        candidates:editedCandidates }
+      changeItem(item, 'edit:' + id, 'PATCH', '/spoken-work/' + encodeURIComponent(id), { patch })
+    }
+    document.getElementById('review-actions').onclick = event => {
+      const button = event.target.closest('[data-action]')
+      if (!button) return
+      const action = button.dataset.action
+      if (action === 'task' && !confirm('Make “' + item.title + '” a Home task?')) return
+      if (['project','idea','memory'].includes(action) && !confirm('Save “' + item.title + '” as a ' + action + '? This does not create a Home task.')) return
+      if (action === 'ignored' && !confirm('Ignore this spoken work? You can restore it later.')) return
+      changeItem(item, action + ':' + id, 'POST', '/spoken-work/' + encodeURIComponent(id) + '/actions', { action, title:item.title })
+    }
+    const taskLoader = document.getElementById('load-task')
+    if (taskLoader) taskLoader.onclick = async () => {
+      taskLoader.disabled = true
+      try {
+        const result = await request('/tasks')
+        if (selectedId !== id) return
+        const available = (result.tasks || []).filter(task => task.space === item.space && task.id !== 'captured-notes')
+        const select = document.getElementById('existing-task')
+        select.innerHTML = available.map(task => '<option value="' + escapeHtml(task.id) + '">' + escapeHtml(task.label) + '</option>').join('')
+        document.getElementById('task-picker').hidden = !available.length
+        if (!available.length) document.getElementById('review-message').textContent = 'No open Home tasks are available to link.'
+      } catch (error) { document.getElementById('review-message').textContent = error.message }
+      finally { taskLoader.disabled = false }
+    }
+    const taskLink = document.getElementById('link-task')
+    if (taskLink) taskLink.onclick = () => {
+      const source = document.getElementById('existing-task').selectedOptions[0]
+      if (!source || !confirm('Link this spoken work to “' + source.textContent + '”? No new task will be created.')) return
+      changeItem(item, 'link-task:' + id + ':' + source.value, 'POST', '/spoken-work/' + encodeURIComponent(id) + '/actions', { action:'link-task', taskId:source.value })
+    }
+    if (splittable) document.getElementById('review-split').onsubmit = event => {
+      event.preventDefault()
+      const parts = [1,2].map(number => ({ segmentIds:[...document.querySelectorAll('[data-split-id]')].filter(select => select.value === String(number)).map(select => select.dataset.splitId),
+        title:document.getElementById('split-title-' + number).value }))
+      if (parts.some(part => !part.segmentIds.length)) return alert('Each part needs at least one original chunk.')
+      if (!confirm('Split into two review cards? The original stays in history.')) return
+      changeItem(item, 'split:' + id, 'POST', '/spoken-work/' + encodeURIComponent(id) + '/split', { parts })
+    }
+    document.getElementById('load-merge').onclick = async () => {
+      const picker = document.getElementById('merge-picker')
+      const button = document.getElementById('load-merge')
+      button.disabled = true
+      try {
+        const alternatives = await mergeChoices(item)
+        if (selectedId !== id) return
+        const select = document.getElementById('merge-source')
+        select.innerHTML = alternatives.map(row => '<option value="' + escapeHtml(row.id) + '" data-revision="' + row.revision + '">' + escapeHtml(row.title + ' · ' + dateLabel(row.capturedAt)) + '</option>').join('')
+        picker.hidden = !alternatives.length
+        if (!alternatives.length) document.getElementById('review-message').textContent = 'No other review cards are available to merge.'
+      } catch (error) { document.getElementById('review-message').textContent = error.message }
+      finally { button.disabled = false }
+    }
+    document.getElementById('merge-submit').onclick = () => {
+      const select = document.getElementById('merge-source')
+      const source = select.selectedOptions[0]
+      if (!source || !confirm('Merge “' + source.textContent + '” into this card? Both sources remain in history.')) return
+      changeItem(item, 'merge:' + id + ':' + source.value, 'POST', '/spoken-work/' + encodeURIComponent(id) + '/merge',
+        { sourceId:source.value, sourceRevision:Number(source.dataset.revision) })
+    }
   } catch (error) { content.textContent = error.message }
 }
 
@@ -150,5 +432,9 @@ filters.onclick = event => {
   loadList()
 }
 more.onclick = () => { if (cursor != null) loadList(false) }
-loadList()
+search.oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => loadList(), 220) }
+window.addEventListener('online', () => { void flushPendingEdits() })
+const linkedItem = new URLSearchParams(location.search).get('item')
+try { savePendingEdits(pendingEdits()) } catch { syncStatus.hidden = true }
+loadList().then(async () => { await flushPendingEdits(); if (linkedItem) openItem(linkedItem) })
 </script>

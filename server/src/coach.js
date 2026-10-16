@@ -222,9 +222,13 @@ function contextDefaults(context) {
   if (!context || typeof context !== 'object') return null
   const taskId = str(context.taskId, 80)
   const choreId = str(context.choreId, 80)
+  const reviewItemId = str(context.reviewItemId, 120)
   const label = str(context.label, 120)
-  if ((!taskId && !choreId) || !label) return null
-  return { ...(taskId ? { taskId } : {}), ...(choreId ? { choreId } : {}), label }
+  if ((!taskId && !choreId && !reviewItemId) || !label) return null
+  const reviewRevision = Number(context.reviewRevision)
+  return { ...(taskId ? { taskId } : {}), ...(choreId ? { choreId } : {}),
+    ...(reviewItemId ? { reviewItemId, reviewRevision: Number.isInteger(reviewRevision) ? reviewRevision : 0,
+      amendmentKind: context.amendmentKind === 'correction' ? 'correction' : 'detail' } : {}), label }
 }
 
 function bool(value, fallback = false) {

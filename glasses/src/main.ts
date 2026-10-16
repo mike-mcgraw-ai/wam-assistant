@@ -23,6 +23,8 @@ import { TILES, TILE_H, TILE_W, hashTile, listenFrame, splitTiles, textFrame } f
 import { listenBoard } from './listenboard'
 import {
   activateCoachMode,
+  actOnSpokenReview,
+  applySpokenAmendment,
   beginStep,
   resetActiveTimers,
   resetStep,
@@ -40,6 +42,7 @@ import {
   fetchCoachSession,
   fetchPlan,
   fetchSnapshot,
+  fetchSpokenReview,
   promoteNote,
   sendCoachAudio,
   sendAssistantSession,
@@ -57,6 +60,7 @@ import {
   noteDetailActions,
   noteRows,
   captureRows,
+  spokenReviewActions,
   assistantCaptureHasWords,
   assistantLatestReplyId,
   assistantViewAfterRefresh,
@@ -164,6 +168,7 @@ const state: UiState = {
   // moment later, which made it read as a glitch rather than a wrong default.
   view: lastSpace() === 'life' ? { kind: 'plan', cursor: 0 } : { kind: 'index', cursor: 0 },
   snapshot: cached,
+  spokenReview: { items: [], total: 0, loading: false, error: null },
   error: null,
   loading: cached === null,
   lastOkAt: null,
@@ -717,6 +722,38 @@ async function openNotes(cursor = 0): Promise<void> {
   else state.error = plan.error
   clampCursor()
   await paint()
+  await loadSpokenReview(false)
+}
+
+async function loadSpokenReview(all: boolean): Promise<void> {
+  state.spokenReview.loading = true
+  const first = await fetchSpokenReview()
+  if (!first.ok) {
+    state.spokenReview.error = first.error
+  } else {
+    const items = [...first.items]
+    let nextCursor = all ? first.nextCursor : null
+    while (nextCursor !== null) {
+      const page = await fetchSpokenReview(nextCursor)
+      if (!page.ok) {
+        state.spokenReview.error = page.error
+        break
+      }
+      items.push(...page.items)
+      nextCursor = page.nextCursor
+    }
+    state.spokenReview.items = items
+    state.spokenReview.total = first.total
+    if (nextCursor === null) state.spokenReview.error = null
+  }
+  state.spokenReview.loading = false
+  await paint()
+}
+
+async function openSpokenReview(returnTo: 'capture' | 'notes' = 'capture'): Promise<void> {
+  state.view = { kind: 'review', phase: 'list', index: 0, cursor: 0, returnTo }
+  await paint()
+  await loadSpokenReview(true)
 }
 
 function dismissCue(): void {
@@ -1052,7 +1089,7 @@ async function openListening(context: ListenContext = null): Promise<void> {
  * must not silently file a car note under Dishes just because that row was
  * selected.
  */
-type ListenContext = { taskId?: string; choreId?: string; label: string } | null
+type ListenContext = { taskId?: string; choreId?: string; reviewItemId?: string; reviewRevision?: number; amendmentKind?: 'correction' | 'detail'; label: string } | null
 
 let listenContext: ListenContext = null
 
@@ -1304,6 +1341,16 @@ async function saveReviewedListeningSession(): Promise<void> {
   else state.error = stopped.error
   await paint()
 
+  if (stopped.ok && listenContext?.reviewItemId) {
+    await loadSpokenReview(true)
+    const index = state.spokenReview.items.findIndex(item => item.sessionId === sessionId)
+    state.view = { kind: 'review', phase: index >= 0 ? 'card' : 'list', index: Math.max(0, index), cursor: 0,
+      returnTo: state.cueReturn?.kind === 'review' ? state.cueReturn.returnTo : 'capture' }
+    if (index < 0) state.error = 'Recording saved; review it on phone'
+    await paint()
+    return
+  }
+
   const summary = await fetchSessionSummary(sessionId)
   if (summary && state.view.kind === 'cue') {
     localCoachCue(summary.title, summary.lines)
@@ -1552,9 +1599,11 @@ function rowCount(): number {
     case 'inbox':
       return inboxItems(state, state.view.group).length
     case 'notes':
-      return noteRows(state).length
+      return noteRows(state).length + 1
     case 'capture':
       return captureRows().length
+    case 'review':
+      return state.view.phase === 'list' ? state.spokenReview.items.length : spokenReviewActions(state.spokenReview.items[state.view.index]).length
     case 'note':
       return noteDetailActions(
         state,
@@ -1689,6 +1738,14 @@ function move(delta: number): void {
       view.scroll = assistantScrollBy(view.scroll ?? 0, max, delta)
     }
     state.armedTaskId = null
+    return
+  }
+
+  if (view.kind === 'review') {
+    view.armedAction = undefined
+    view.armedAt = undefined
+    if (view.phase === 'list') view.index = Math.max(0, Math.min(state.spokenReview.items.length - 1, view.index + delta))
+    else view.cursor = Math.max(0, Math.min(spokenReviewActions(state.spokenReview.items[view.index]).length - 1, view.cursor + delta))
     return
   }
 
@@ -2177,7 +2234,59 @@ async function activate(): Promise<void> {
       return
     }
     if (row?.kind === 'notes') await openNotes()
+    else if (row?.kind === 'review') await openSpokenReview()
     else await openAssistant()
+    return
+  }
+
+  if (view.kind === 'review') {
+    const item = state.spokenReview.items[view.index]
+    if (!item) return
+    if (view.phase === 'list') {
+      view.phase = 'card'
+      view.cursor = 0
+      await paint()
+      return
+    }
+    const label = spokenReviewActions(item)[view.cursor]
+    if (label === 'Open on phone') {
+      window.open(`${config.serverUrl}/review?item=${encodeURIComponent(item.id)}`, '_blank')
+      return
+    }
+    if (label === 'Add detail' || label === 'Correct') {
+      await talkAbout({ reviewItemId: item.id, reviewRevision: item.revision, label: item.title, amendmentKind: label === 'Correct' ? 'correction' : 'detail' })
+      return
+    }
+    if (view.armedAction !== label || Date.now() - (view.armedAt || 0) > 5000) {
+      view.armedAction = label
+      view.armedAt = Date.now()
+      setTimeout(() => {
+        if (state.view === view && view.armedAction === label && Date.now() - (view.armedAt || 0) >= 5000) {
+          view.armedAction = undefined
+          view.armedAt = undefined
+          void paint()
+        }
+      }, 5100)
+      await paint()
+      return
+    }
+    view.armedAction = undefined
+    view.armedAt = undefined
+    const action = label === 'Task/Home' ? 'task' : label === 'Keep moment' ? 'memory' : label.toLowerCase()
+    const commandId = `glasses:${item.id}:${item.revision}:${action}`
+    const result = label === 'Apply words'
+      ? await applySpokenAmendment(item, commandId)
+      : await actOnSpokenReview(item, action, commandId)
+    if (!result.ok) state.spokenReview.error = result.error
+    else {
+      state.spokenReview.error = null
+      await loadSpokenReview(true)
+      if (state.view.kind === 'review') {
+        state.view.index = Math.max(0, Math.min(view.index, state.spokenReview.items.length - 1))
+        state.view.phase = 'list'
+      }
+    }
+    await paint()
     return
   }
 
@@ -2194,7 +2303,11 @@ async function activate(): Promise<void> {
   }
 
   if (view.kind === 'notes') {
-    const row = noteRows(state)[view.cursor]
+    if (view.cursor === 0) {
+      await openSpokenReview('notes')
+      return
+    }
+    const row = noteRows(state)[view.cursor - 1]
     if (!row) return
     await openNote(row)
     return
@@ -2446,6 +2559,7 @@ async function activate(): Promise<void> {
       state.scrollTop = 0
       clampCursor()
       await paint()
+      await loadSpokenReview(false)
       return
     }
 
@@ -2693,13 +2807,26 @@ async function back(): Promise<void> {
     return
   }
 
+  if (state.view.kind === 'review') {
+    if (state.view.phase === 'card') {
+      state.view.phase = 'list'
+      state.view.armedAction = undefined
+      state.view.armedAt = undefined
+    } else if (state.view.returnTo === 'notes') {
+      await openNotes()
+      return
+    } else state.view = { kind: 'capture', cursor: 2 }
+    await paint()
+    return
+  }
+
   if (state.view.kind === 'note') {
     const { subjectKind, subjectId, noteId } = state.view
     const cursor = noteRows(state).findIndex(row =>
       row.subject.kind === subjectKind && row.subject.id === subjectId && row.note.id === noteId,
     )
-    state.view = { kind: 'notes', cursor: Math.max(0, cursor) }
-    state.scrollTop = Math.max(0, cursor)
+    state.view = { kind: 'notes', cursor: Math.max(0, cursor + 1) }
+    state.scrollTop = Math.max(0, cursor + 1)
     clampCursor()
     await paint()
     return
