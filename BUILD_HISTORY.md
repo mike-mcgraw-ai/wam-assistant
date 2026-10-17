@@ -1,6 +1,6 @@
 # Device Build History
 
-WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 35 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
+WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 36 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
 
 | Face build | Attribution / status | Change |
 |---|---|---|
@@ -160,3 +160,6 @@ WAM used rapid numbered device builds for hardware testing. These entries are do
 | v0.163.0 | Codex (in the v0.165.0 package; was `codex/spoken-backlog-v163`) | Make post-migration captures canonical and make the review backlog safe to process newest-first. |
 | v0.164.0 | Codex (full-width dashboard timers) | Give live timers their own useful right-side column instead of clipping a running value into an artificial ... suffix. |
 | v0.165.0 | Claude (integration package; ready for EvenHub) | One glasses package for four branches Codex and Claude finished on 2026-10-17, merged by Claude on claude/integrate-0.165 on top of v0.164.0. Their own entries follow, newest first. v0.164.0 was already tagged, so none of the lower numbers could ship on their own. |
+| v0.166.0 | Codex (phone mirror presentation; no glasses package) | Make the rear-camera mirror landscape-first for showing the live green WAM screen to another person. |
+| v0.167.0 | Claude (Start Day errands; server only, live) | Spoken errands like "two gallons of milk from the store" become Start Day tasks. |
+| v0.168.0 | Codex (glasses prompt wording) | Remove repeated “click twice” instructions from the on-glasses task and Start Day prompts. |

@@ -1337,7 +1337,7 @@ function planTip(state: UiState, rows: PlanRow[], cursor: number): string {
   }
   if (row.kind === 'task-done') return state.armedTaskId === `undo:task:${row.task.taskId}`
     ? 'Click again to reopen task'
-    : '[x] Done - click twice to reopen'
+    : '[x] Done - reopen task'
   if (row.kind === 'listen') {
     return state.coachSession?.active ? 'Recording - click to open Listen' : 'Capture - talk, or read your notes'
   }
@@ -1560,7 +1560,8 @@ function renderDayStart(
         message ? clipToWidth(`! ${message}`) : clockLine(state),
         `REVIEW TODAY  ${kept}/${items.length} kept`,
         ...shown,
-        selected < items.length ? 'click to inspect row' : selected === items.length ? 'click to record more' : 'click twice to confirm',
+        selected < items.length ? 'click to inspect row' : selected === items.length ? 'click to record more'
+          : selected === items.length + 1 ? 'start today\'s review over' : 'add kept work to your list',
       ],
       config.maxChars,
       config.maxLines,
@@ -1646,7 +1647,7 @@ function renderTaskDetail(state: UiState, taskId: string, cursor: number): strin
       lines.push(clip(`${point}${live ? '[*] Stop listening' : `[~] ${stoppedLabel}`}`, LINE_CHARS))
     } else if (row.kind === 'done') {
       const armed = state.armedTaskId === taskId
-      lines.push(clip(`${point}${armed ? '[?] Confirm task done?' : '[ ] Mark done - click twice'}`, LINE_CHARS))
+      lines.push(clip(`${point}${armed ? '[?] Confirm task done?' : '[ ] Mark done'}`, LINE_CHARS))
     } else {
       lines.push(clip(`${point}${row.first ? '- ' : '  '}${row.text}`, LINE_CHARS))
     }

@@ -20,9 +20,26 @@ function dayClauses(value) {
   return String(value ?? '')
     .replace(/\b(?:and then|after that|then|also)\b/gi, '|')
     .replace(/[.!?;,]+/g, '|')
-    .split(/\||\band\b/gi)
+    .split('|')
+    .flatMap(part => (isShoppingList(part) ? [part] : part.split(/\band\b/gi)))
     .map(part => part.trim())
     .filter(Boolean)
+}
+
+/**
+ * "Milk and eggs from the store" is one errand, not "Milk" + "eggs from the
+ * store". Kept whole only when it names a store and none of its "and" parts is
+ * an action of its own — "text my doctor and get bread from the store" still
+ * splits into two.
+ */
+function isShoppingList(part) {
+  const pieces = String(part).split(/\band\b/i).map(piece => actionSource(piece)).filter(Boolean)
+  if (pieces.length < 2) return false
+  if (!new RegExp(`\\b${ERRAND_PLACE}`).test(pieces[pieces.length - 1])) return false
+  return pieces.every(piece => {
+    const [first] = piece.split(' ')
+    return !ACTION_WORDS.has(first) && !NOT_AN_ERRAND_START.has(first)
+  })
 }
 
 function sameWork(left, right) {
@@ -60,6 +77,8 @@ const ACTION_WORDS = new Set([
   'empty',
   'feed',
   'fill',
+  'get',
+  'grab',
   'find',
   'finish',
   'fix',
@@ -95,9 +114,45 @@ function actionSource(value) {
   return normalizeMatchText(value).replace(/^(?:(?:okay|ok|so|today|please)\s+)+/, '')
 }
 
+/**
+ * Errands said without a verb: "two gallons of milk from the store".
+ *
+ * Mike's Start Day walk heard exactly that on 2026-10-17 and the milk never
+ * reached the list: only clauses starting with an action word became tasks,
+ * so it stayed an excluded fragment. Fixed rules, no model — a clause is an
+ * errand when it starts with a quantity and a unit ("two gallons", "2 dozen",
+ * "a loaf"), or names a store ("from the store", "at the market") and opens
+ * with the thing to get rather than with "back", "I", "we"...
+ */
+const ERRAND_QUANTITY = '(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|a couple of|couple of|some|\\d+)'
+const ERRAND_UNIT = '(?:gallons?|half gallons?|quarts?|pints?|liters?|litres?|pounds?|lbs?|ounces?|oz|dozen|bags?|boxes?|packs?|packages?|cans?|bottles?|cartons?|jugs?|jars?|loaf|loaves|rolls?|bunch(?:es)?|cases?|sticks?|heads?|bars?)'
+const ERRAND_PLACE = '(?:from|at)\\s+(?:the\\s+)?(?:store|grocery(?:\\s+store)?|groceries|market|supermarket|pharmacy|drug\\s*store|hardware\\s+store|gas\\s+station|costco|walmart|target|aldi|wegmans|shoprite|cvs|walgreens|home\\s+depot|lowes|sams(?:\\s+club)?|trader\\s+joes|whole\\s+foods|price\\s+chopper|hannaford)\\b'
+const NOT_AN_ERRAND_START = new Set([
+  'back', 'came', 'come', 'coming', 'just', 'already', 'still', 'i', 'im', 'we', 'you', 'he', 'she', 'they',
+  'it', 'this', 'that', 'there', 'was', 'were', 'been', 'got', 'home', 'went', 'go', 'going',
+])
+
+function isErrandClause(raw) {
+  const source = actionSource(raw)
+  if (!source) return false
+  if (new RegExp(`^${ERRAND_QUANTITY}\\s+${ERRAND_UNIT}\\b`).test(source)) return true
+  const [first] = source.split(' ')
+  return new RegExp(`\\b${ERRAND_PLACE}`).test(source) && !NOT_AN_ERRAND_START.has(first) && source.split(' ').length <= 10
+}
+
+/** "Two gallons of milk from the store" → "Get two gallons of milk from the store". */
+function errandLabel(raw) {
+  const label = cleanTaskClause(raw)
+  if (!label) return ''
+  const [first] = actionSource(raw).split(' ')
+  if (ACTION_WORDS.has(first)) return label
+  return `Get ${label.charAt(0).toLowerCase()}${label.slice(1)}`
+}
+
 function isActionableTaskClause(raw) {
   const source = actionSource(raw)
   if (!source) return false
+  if (isErrandClause(raw)) return true
   if (/^(?:(?:i|we)\s+(?:need|want|have|got|gotta|should|must)\s+(?:to\s+)?|(?:need|remember)\s+to\s+)/.test(source)) {
     return true
   }
@@ -346,7 +401,7 @@ export class Checklists {
       })
 
       if (found.length === 0) {
-        const label = cleanTaskClause(rawClause)
+        const label = isErrandClause(rawClause) ? errandLabel(rawClause) : cleanTaskClause(rawClause)
         if (!label) continue
         if (!isActionableTaskClause(rawClause)) {
           fragments.push({ label, source: rawClause })

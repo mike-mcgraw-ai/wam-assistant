@@ -6,7 +6,7 @@ import test from 'node:test'
 const html = readFileSync(new URL('../src/web/mirror.html', import.meta.url), 'utf8')
 const script = html.match(/<script>([\s\S]*?)<\/script>/)?.[1]
 
-function mirrorHarness() {
+function mirrorHarness({ fullscreenSupported = true, standalone = false } = {}) {
   const listeners = new Map()
   const elements = new Map()
   const classes = new Set()
@@ -15,6 +15,7 @@ function mirrorHarness() {
   const stream = { getTracks: () => [track] }
   const frame = { text: 'LIFE\n> Next task', at: Date.now() }
   const constraints = []
+  const orientationLocks = []
   let cameraRequests = 0
 
   function element(id) {
@@ -37,18 +38,32 @@ function mirrorHarness() {
     return elements.get(id)
   }
 
-  const context = {
-    document: {
-      getElementById: element,
-      body: { classList: { add: name => classes.add(name), remove: name => classes.delete(name) } },
-      addEventListener: (type, listener) => listeners.set(`document:${type}`, listener),
-      hidden: false,
+  const document = {
+    getElementById: element,
+    body: { classList: { add: name => classes.add(name), remove: name => classes.delete(name) } },
+    addEventListener: (type, listener) => listeners.set(`document:${type}`, listener),
+    hidden: false,
+    fullscreenElement: null,
+    documentElement: {},
+    async exitFullscreen() {
+      this.fullscreenElement = null
+      listeners.get('document:fullscreenchange')()
     },
+  }
+  if (fullscreenSupported) document.documentElement.requestFullscreen = async () => {
+    document.fullscreenElement = document.documentElement
+    listeners.get('document:fullscreenchange')()
+  }
+
+  const context = {
+    document,
     window: {
       isSecureContext: true,
+      screen: { orientation: { async lock(value) { orientationLocks.push(value) } } },
       addEventListener: (type, listener) => listeners.set(`window:${type}`, listener),
     },
     navigator: {
+      standalone,
       mediaDevices: {
         async getUserMedia(request) {
           cameraRequests += 1
@@ -63,7 +78,7 @@ function mirrorHarness() {
     clearTimeout: () => {},
   }
   runInNewContext(script, context)
-  return { document: context.document, navigator: context.navigator, element, listeners, intervals, track, frame, constraints, get cameraRequests() { return cameraRequests } }
+  return { document: context.document, navigator: context.navigator, element, listeners, intervals, track, frame, constraints, orientationLocks, get cameraRequests() { return cameraRequests } }
 }
 
 test('phone mirror starts the rear camera only on tap and clears stale overlays', async () => {
@@ -121,4 +136,34 @@ test('a camera permission result cannot reopen a hidden page', async () => {
   await opening
   assert.equal(mirror.track.stopped, true)
   assert.equal(mirror.element('camera').hidden, true)
+})
+
+test('full-screen control hides browser chrome where supported and can exit', async () => {
+  const mirror = mirrorHarness()
+  await mirror.listeners.get('camera-toggle:click')()
+  await mirror.listeners.get('fullscreen-toggle:click')()
+  assert.equal(mirror.element('fullscreen-toggle').textContent, 'Exit full screen')
+  assert.equal(mirror.element('fullscreen-toggle')['aria-pressed'], 'true')
+  assert.equal(mirror.element('fullscreen-help').hidden, true)
+  assert.deepEqual(mirror.orientationLocks, ['landscape'])
+  assert.equal(mirror.element('camera').hidden, false)
+  assert.equal(mirror.track.stopped, false)
+
+  await mirror.listeners.get('fullscreen-toggle:click')()
+  assert.equal(mirror.element('fullscreen-toggle').textContent, 'Full screen')
+  assert.equal(mirror.element('fullscreen-toggle')['aria-pressed'], 'false')
+  assert.equal(mirror.element('camera').hidden, false)
+})
+
+test('iPhone without element fullscreen shows home-screen instructions', async () => {
+  const mirror = mirrorHarness({ fullscreenSupported: false })
+  await mirror.listeners.get('fullscreen-toggle:click')()
+  assert.equal(mirror.element('fullscreen-help').hidden, false)
+  assert.match(html, /Add to Home Screen → Open as Web App/)
+  assert.equal(mirror.element('fullscreen-toggle')['aria-pressed'], 'false')
+})
+
+test('standalone mirror hides the unneeded full-screen button', () => {
+  const mirror = mirrorHarness({ standalone: true })
+  assert.equal(mirror.element('fullscreen-toggle').hidden, true)
 })

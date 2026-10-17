@@ -12,14 +12,37 @@
     object-fit:cover; background:#000;
   }
   #camera[hidden]{display:none}
-  #camera-toggle{
+  #controls{
     position:fixed; z-index:2; top:calc(env(safe-area-inset-top) + 14px);
     right:calc(env(safe-area-inset-right) + 14px);
+    display:flex; gap:8px;
+  }
+  #controls button{
     padding:10px 14px; border:1px solid #8fd9a8; border-radius:8px;
     background:rgba(0,0,0,.82); color:#d8ffe1;
     font:600 14px ui-sans-serif,system-ui,sans-serif;
   }
-  #camera-toggle:disabled{opacity:.6}
+  #controls button:disabled{opacity:.6}
+  #fullscreen-help{
+    position:fixed; z-index:2; left:14px; right:14px;
+    bottom:calc(env(safe-area-inset-bottom) + 54px);
+    margin:0 auto; max-width:420px; padding:10px 12px;
+    border:1px solid #8fd9a8; border-radius:8px;
+    background:rgba(0,0,0,.9); color:#d8ffe1;
+    font:14px/1.4 ui-sans-serif,system-ui,sans-serif;
+  }
+  #fullscreen-help[hidden]{display:none}
+  #turn-hint{
+    display:none; position:fixed; z-index:2; left:50%;
+    bottom:calc(env(safe-area-inset-bottom) + 54px);
+    transform:translateX(-50%); margin:0; padding:8px 12px;
+    border-radius:8px; background:rgba(0,0,0,.82); color:#d8ffe1;
+    font:13px ui-sans-serif,system-ui,sans-serif; white-space:nowrap;
+  }
+  @media (orientation:portrait){
+    body.camera-on #turn-hint{display:block}
+  }
+  #fullscreen-help:not([hidden]) ~ #turn-hint{display:none}
   #camera-status{
     position:fixed; z-index:2; left:50%; bottom:calc(env(safe-area-inset-bottom) + 14px);
     transform:translateX(-50%); margin:0; padding:8px 12px;
@@ -69,7 +92,12 @@
 </style>
 
 <video id="camera" autoplay muted playsinline hidden></video>
-<button id="camera-toggle" type="button" aria-pressed="false">Camera view</button>
+<div id="controls">
+  <button id="camera-toggle" type="button" aria-pressed="false">Camera view</button>
+  <button id="fullscreen-toggle" type="button" aria-pressed="false">Full screen</button>
+</div>
+<p id="fullscreen-help" role="status" hidden>On iPhone: Safari Share → Add to Home Screen → Open as Web App, then open WAM from its icon to hide the browser bar. Turn the phone sideways for landscape.</p>
+<p id="turn-hint">Turn phone sideways for landscape</p>
 <p id="camera-status" role="status" hidden>Open WAM on the glasses</p>
 <div id="panel"><pre id="screen">connecting…</pre><div id="stale"></div><p id="sent"></p><p id="keys"></p></div>
 
@@ -86,10 +114,43 @@ const dot = document.getElementById('stale')
 const camera = document.getElementById('camera')
 const cameraToggle = document.getElementById('camera-toggle')
 const cameraStatus = document.getElementById('camera-status')
+const fullscreenToggle = document.getElementById('fullscreen-toggle')
+const fullscreenHelp = document.getElementById('fullscreen-help')
 let lastAt = 0
 let lastText = ''
 let freshFrame = false
 let cameraStream = null
+
+function showFullscreenState() {
+  const fullscreen = Boolean(document.fullscreenElement)
+  fullscreenToggle.textContent = fullscreen ? 'Exit full screen' : 'Full screen'
+  fullscreenToggle.setAttribute('aria-pressed', String(fullscreen))
+  if (fullscreen || navigator.standalone) fullscreenHelp.hidden = true
+}
+
+fullscreenToggle.addEventListener('click', async () => {
+  if (document.fullscreenElement) {
+    await document.exitFullscreen()
+    return
+  }
+  if (!document.documentElement.requestFullscreen) {
+    fullscreenHelp.hidden = false
+    return
+  }
+  try {
+    await document.documentElement.requestFullscreen()
+    try {
+      await window.screen?.orientation?.lock?.('landscape')
+    } catch {
+      note('Turn the phone sideways for landscape', true)
+    }
+  } catch {
+    fullscreenHelp.hidden = false
+  }
+})
+document.addEventListener('fullscreenchange', showFullscreenState)
+if (navigator.standalone) fullscreenToggle.hidden = true
+showFullscreenState()
 
 function showFrame() {
   dot.className = freshFrame ? '' : 'off'

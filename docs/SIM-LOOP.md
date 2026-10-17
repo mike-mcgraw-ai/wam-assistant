@@ -243,7 +243,11 @@ That page would have caught every layout bug this month before it shipped.
   green text over the rear-camera scene. Tap **Stop camera** or leave the page
   to release the camera. Camera video stays on the phone; the hub receives
   only the existing glasses text frame. This is a text mirror, not a bitmap
-  capture of the glasses optics.
+  capture of the glasses optics. The camera view is landscape-first: turn the
+  phone sideways if prompted. **Full screen** hides browser chrome and requests
+  landscape where supported. On iPhone Safari, use Share → Add to Home Screen
+  → Open as Web App, then launch the WAM icon instead; the page's Full screen
+  control shows these steps if the API is unavailable.
 
 ---
 

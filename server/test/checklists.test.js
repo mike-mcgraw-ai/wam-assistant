@@ -219,6 +219,45 @@ test('unclear spoken fragments remain visible in the proposal but do not commit 
   assert.deepEqual(checklists.commitDayDraft('life', 2000).tasks.map(item => item.label), ['Text my doctor'])
 })
 
+test('spoken errands become Start Day tasks without an action word (Mike, 2026-10-17)', () => {
+  const checklists = new Checklists({ checklists: [] }, { runsPath: null, logPath: null, summaryPath: null })
+  // The exact walk that lost the milk: a quantity and a store, no verb.
+  const milk = checklists.draftDay('Two gallons of milk from the store.', 'life', 'milk', 1000)
+  assert.deepEqual(milk.draft.items.map(item => [item.label, item.include]), [
+    ['Get two gallons of milk from the store', true],
+  ])
+  assert.deepEqual(checklists.commitDayDraft('life', 2000).tasks.map(item => item.label), ['Get two gallons of milk from the store'])
+
+  const variants = new Checklists({ checklists: [] }, { runsPath: null, logPath: null, summaryPath: null })
+  const more = variants.draftDay('2 dozen eggs. A loaf of bread at the market. Get bananas. Grab coffee filters.', 'life', 'more', 1000)
+  assert.deepEqual(more.draft.items.map(item => [item.label, item.include]), [
+    ['Get 2 dozen eggs', true],
+    ['Get a loaf of bread at the market', true],
+    ['Get bananas', true],
+    ['Grab coffee filters', true],
+  ])
+})
+
+test('a spoken shopping list stays one errand; real actions still split', () => {
+  const checklists = new Checklists({ checklists: [] }, { runsPath: null, logPath: null, summaryPath: null })
+  const result = checklists.draftDay('Milk and eggs from the store. Text my doctor and get bread from the store.', 'life', 'list', 1000)
+  assert.deepEqual(result.draft.items.map(item => [item.label, item.include]), [
+    ['Get milk and eggs from the store', true],
+    ['Text my doctor', true],
+    ['Get bread from the store', true],
+  ])
+})
+
+test('the errand rule does not turn every noun phrase into a task', () => {
+  const checklists = new Checklists({ checklists: [] }, { runsPath: null, logPath: null, summaryPath: null })
+  const result = checklists.draftDay('Doctor appointment. Two of them were broken. Back from the store already.', 'life', 'plain', 1000)
+  assert.deepEqual(result.draft.items.map(item => [item.label, item.include]), [
+    ['Doctor appointment', false],
+    ['Two of them were broken', false],
+    ['Back from the store already', false],
+  ])
+})
+
 test('Start Day from a named step commits only that step onward', () => {
   const checklists = new Checklists(
     {
