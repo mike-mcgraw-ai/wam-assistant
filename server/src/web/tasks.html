@@ -51,6 +51,16 @@
   .date-review .evidence{white-space:pre-wrap;font-size:13px;padding:8px 0}
   .date-review .preview{border-top:1px solid var(--line);padding-top:8px}
   input[type=date]{width:100%;color-scheme:dark}
+  .quick #followupForm{grid-template-columns:1fr 9.5em auto}
+  .fu-row{border-bottom:1px solid var(--line);padding:10px 16px}
+  .fu-row.done .fu-label{text-decoration:line-through;color:var(--dim)}
+  .fu-row form{display:grid;grid-template-columns:1fr 9.5em;gap:8px;margin-top:6px}
+  .fu-actions{display:flex;gap:8px;margin-top:8px}
+  .fu-when{color:var(--dim);font-size:12px}
+  .fu-when.soon{color:var(--warn)}
+  details.fu{margin-top:8px}
+  details.fu summary{color:var(--dim);font-size:13px;cursor:pointer}
+  details.fu form{display:grid;grid-template-columns:1fr 9.5em auto;gap:8px}
   .phone-nav{position:fixed;left:0;right:0;bottom:0;z-index:5;
              display:grid;grid-template-columns:repeat(5,1fr);gap:1px;
              padding:8px 8px calc(env(safe-area-inset-bottom) + 8px);
@@ -82,6 +92,16 @@
 </section>
 <div id="status"></div>
 <div id="tasks"></div>
+<div class="completed-title">Follow-ups</div>
+<section class="quick">
+  <form id="followupForm" autocomplete="off">
+    <input id="followupLabel" placeholder="Doctor appointment, vet checkup…" autocapitalize="sentences">
+    <input id="followupDue" type="date" aria-label="Follow-up date">
+    <button type="submit">Add</button>
+  </form>
+  <div class="meta">Shows on the glasses' Home 7 days before; phone reminder then and on the day.</div>
+</section>
+<div id="followups"></div>
 <div class="completed-title">Completed one-offs</div>
 <div id="completedTasks"></div>
 
@@ -188,13 +208,114 @@ function render() {
       (t.pending ? '' : '<form data-id="' + esc(t.id) + '">' +
         '<input placeholder="what do you need to know first?" enterkeyhint="done" autocapitalize="sentences">' +
         '<button type="submit">Add</button>' +
-      '</form>') + '</div>'
+      '</form>' +
+      '<details class="fu"><summary>Done, follow up later…</summary>' +
+        '<form class="fuFromTask" data-task="' + esc(t.id) + '">' +
+          '<input name="label" placeholder="Follow up: ' + esc(t.label) + '" autocapitalize="sentences">' +
+          '<input name="due" type="date" required>' +
+          '<button type="submit">Save</button>' +
+        '</form></details>') + '</div>'
   }).join('') || '<div class="task">No open tasks.</div>'
 
   for (const form of document.querySelectorAll('.task form[data-id]')) form.onsubmit = onAdd
+  for (const form of document.querySelectorAll('form.fuFromTask')) form.onsubmit = onFollowupFromTask
   for (const button of document.querySelectorAll('.keepRecording')) button.onclick = onKeepRecording
   for (const details of document.querySelectorAll('details.transcript')) details.ontoggle = onTranscriptToggle
   renderCompleted()
+  renderFollowups()
+}
+
+/*
+ * Dated follow-ups (v0.170.0). Online actions: each one is a single request
+ * the hub applies or rejects, and the list re-reads from the hub afterwards.
+ */
+let followups = []
+
+function followupWhen(days) {
+  if (days === 0) return 'today'
+  if (days === 1) return 'tomorrow'
+  return days < 0 ? (-days) + ' days late' : 'in ' + days + ' days'
+}
+
+function renderFollowups() {
+  const open = followups.filter(f => !f.doneAt)
+  const done = followups.filter(f => f.doneAt).slice(-5)
+  $('followups').innerHTML = [...open, ...done].map(f =>
+    '<div class="fu-row' + (f.doneAt ? ' done' : '') + '" data-id="' + esc(f.id) + '">' +
+      '<div class="name"><span class="fu-label">' + esc(f.label) + '</span>' +
+      '<span class="fu-when' + (!f.doneAt && f.daysLeft <= 7 ? ' soon' : '') + '">' +
+        esc(f.doneAt ? 'done' : followupWhen(f.daysLeft) + (f.daysLeft <= 7 ? ' - on Home' : '')) + '</span></div>' +
+      (f.doneAt ? '' : '<form class="fuEdit"><input name="label" value="' + esc(f.label) + '" autocapitalize="sentences">' +
+        '<input name="due" type="date" value="' + esc(f.dueDay) + '" required></form>') +
+      '<div class="fu-actions">' +
+        (f.doneAt ? '<button data-act="undo">Undo</button>'
+          : '<button data-act="save">Save</button><button data-act="done">Done</button>') +
+        '<button data-act="delete">Delete</button>' +
+      '</div></div>').join('') || '<div class="task meta">No follow-ups.</div>'
+  for (const button of document.querySelectorAll('.fu-row button')) button.onclick = onFollowupAction
+}
+
+async function followupPost(path, body) {
+  try {
+    const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) })
+    const payload = await res.json().catch(() => null)
+    if (!res.ok) { say((payload && payload.error) || 'could not save follow-up', true); return false }
+    if (payload && payload.items) followups = payload.items
+    return true
+  } catch {
+    say('offline - follow-up not saved', true)
+    return false
+  }
+}
+
+async function onFollowupAction(e) {
+  const button = e.currentTarget
+  const row = button.closest('.fu-row')
+  const id = encodeURIComponent(row.dataset.id)
+  const act = button.dataset.act
+  if (act === 'delete' && button.dataset.armed !== '1') {
+    // Two taps, no dialog: the first only arms it.
+    button.dataset.armed = '1'
+    button.textContent = 'Sure? Delete'
+    setTimeout(() => { button.dataset.armed = ''; button.textContent = 'Delete' }, 4000)
+    return
+  }
+  let ok = false
+  if (act === 'save') {
+    const form = row.querySelector('form.fuEdit')
+    ok = await followupPost('/followups/' + id, { label: form.label.value.trim(), dueDay: form.due.value })
+  } else if (act === 'done' || act === 'undo') {
+    ok = await followupPost('/followups/' + id + '/done', { done: act === 'done' })
+  } else if (act === 'delete') {
+    ok = await followupPost('/followups/' + id + '/delete', {})
+  }
+  if (ok) say('')
+  renderFollowups()
+}
+
+async function onFollowupFromTask(e) {
+  e.preventDefault()
+  const form = e.target
+  const label = form.label.value.trim()
+  const ok = await followupPost('/task/' + encodeURIComponent(form.dataset.task) + '/followup', {
+    dueDay: form.due.value,
+    label: label || undefined,
+    clientId: 'phone-' + uid(),
+  })
+  if (ok) { say('task done - follow-up saved'); await sync() }
+}
+
+$('followupForm').onsubmit = async e => {
+  e.preventDefault()
+  const label = $('followupLabel').value.trim()
+  const due = $('followupDue').value
+  if (!label || !due) { say('follow-up needs a name and a date', true); return }
+  if (await followupPost('/followups', { label, dueDay: due, clientId: 'phone-' + uid() })) {
+    $('followupLabel').value = ''
+    $('followupDue').value = ''
+    say('')
+    renderFollowups()
+  }
 }
 
 function renderCompleted() {
@@ -375,10 +496,12 @@ async function flushTasks() {
 async function sync() {
   const drained = await flush()
   try {
-    const [taskRes, recordingRes] = await Promise.all([
+    const [taskRes, recordingRes, followupRes] = await Promise.all([
       fetch('/tasks?includeDone=1', { cache: 'no-store' }),
       fetch('/recordings', { cache: 'no-store' }),
+      fetch('/followups', { cache: 'no-store' }),
     ])
+    if (followupRes.ok) followups = (await followupRes.json()).items || []
     if (taskRes.ok) {
       const payload = await taskRes.json()
       tasks = payload.tasks || []

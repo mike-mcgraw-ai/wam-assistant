@@ -364,6 +364,20 @@ export interface DayDraft {
   items: DayDraftItem[]
 }
 
+/** A dated follow-up (v0.170.0): on Home from 7 days before its day. */
+export interface Followup {
+  id: string
+  label: string
+  /** operational day key, YYYY-MM-DD */
+  dueDay: string
+  /** days from today to dueDay; negative when overdue */
+  daysLeft: number
+  taskId: string | null
+  /** ticked today — kept on screen until you leave Home, so it can be undone */
+  done: boolean
+  doneAt: number | null
+}
+
 export interface BlockPlan {
   minutes: number
   budgetMs: number
@@ -374,6 +388,8 @@ export interface BlockPlan {
   reach: PlanReach[]
   agenda: (AgendaRow | DoneRow)[]
   tasks: TaskRow[]
+  /** dated follow-ups due within the week, or overdue; absent on older hubs */
+  followups?: Followup[]
   day?: {
     day: string
     startHour: number

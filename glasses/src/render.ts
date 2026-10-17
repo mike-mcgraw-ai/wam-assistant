@@ -28,6 +28,7 @@ import type {
   NoteTranscript,
   DoneRow,
   DayDraftItem,
+  Followup,
 } from './types'
 import {
   assemble,
@@ -68,6 +69,8 @@ export type View =
   | { kind: 'note'; subjectKind: 'task' | 'chore'; subjectId: string; noteId: string; cursor: number }
   | { kind: 'transcript'; subjectKind: 'task' | 'chore'; subjectId: string; noteId: string; scroll?: number }
   | { kind: 'task'; taskId: string; cursor: number }
+  /** "Done, follow up later": scroll picks the day, click arms, click saves. */
+  | { kind: 'followupDate'; taskId: string; days: number }
   /**
    * The Listen screen.
    *
@@ -253,6 +256,7 @@ export type PlanRow =
   | { kind: 'daily'; runId: string; listName: string; item: ChecklistItem }
   | { kind: 'task'; task: TaskRow }
   | { kind: 'task-done'; task: TaskRow }
+  | { kind: 'followup'; followup: Followup }
   | { kind: 'chores' }
   | { kind: 'agenda'; row: AgendaRow | DoneRow }
 
@@ -291,11 +295,17 @@ export function planRows(state: UiState): PlanRow[] {
     .filter(task => committedTaskIds.has(task.taskId) && !state.hiddenDone.has(`task:${task.taskId}`))
     .map(task => ({ kind: 'task-done', task }))
 
+  // Dated follow-ups in their 7-day window (or overdue): one-click rows like
+  // Shower. A ticked one stays for the rest of the visit so it can be undone.
+  const followRows: PlanRow[] = (plan.followups ?? [])
+    .filter(f => !f.done || (state.stickyDone.has(`fu:${f.id}`) && !state.hiddenDone.has(`fu:${f.id}`)))
+    .map(followup => ({ kind: 'followup', followup }))
+
   // Before the morning walk-through, Home is intentionally just the Life
   // doorway and one Start Day action. Preset lists exist, but none of them is
   // today's work until Mike names it.
   if (state.space === 'life' && plan.day?.started !== true && plan.day?.skipped !== true) {
-    return [{ kind: 'listen' }, ...committedTasks, ...completedTasks, { kind: 'start-day' }, { kind: 'skip-day' }]
+    return [{ kind: 'listen' }, ...followRows, ...committedTasks, ...completedTasks, { kind: 'start-day' }, { kind: 'skip-day' }]
   }
 
   // The hub files a Listen capture with no obvious home onto a task called
@@ -355,7 +365,7 @@ export function planRows(state: UiState): PlanRow[] {
     ? [{ kind: 'start-day' }, ...(plan.day?.started ? [{ kind: 'rebuild-day' as const }] : [])]
     : []
 
-  return [{ kind: 'listen' }, ...required, ...committedTasks, ...completedTasks, ...agenda, ...walk]
+  return [{ kind: 'listen' }, ...required, ...followRows, ...committedTasks, ...completedTasks, ...agenda, ...walk]
 }
 
 function planPageWindow(rows: PlanRow[], cursor: number) {
@@ -374,6 +384,7 @@ export function visiblePlanDoneKeys(state: UiState, cursor: number): string[] {
     if (row.kind === 'daily' && row.item.done) keys.push(`${row.runId}:${row.item.id}`)
     if (row.kind === 'agenda' && row.row.kind === 'done') keys.push(`${row.row.runId}:${row.row.stepId}`)
     if (row.kind === 'task-done') keys.push(`task:${row.task.taskId}`)
+    if (row.kind === 'followup' && row.followup.done) keys.push(`fu:${row.followup.id}`)
   }
   return keys
 }
@@ -1361,6 +1372,14 @@ function planTip(state: UiState, rows: PlanRow[], cursor: number): string {
     return state.coachSession?.active ? 'Recording - click to open Listen' : 'Capture - talk, or read your notes'
   }
 
+  if (row.kind === 'followup') {
+    const f = row.followup
+    if (f.done && state.armedTaskId === `undo:fu:${f.id}`) return 'Click again to undo'
+    if (f.done) return 'Follow-up done - click to undo'
+    if (state.armedTaskId === `fu:${f.id}`) return 'Click again to check it off'
+    return `Follow-up ${dayLabel(f.dueDay)} (${followupWhen(f.daysLeft)}) - click to check off`
+  }
+
   if (row.kind === 'daily') {
     if (row.item.done && state.armedTaskId === `undo:${row.runId}:${row.item.id}`) return 'Click again to undo'
     if (row.item.done) return `${row.listName} - done ${clockShort(row.item.at)} - click to undo`
@@ -1487,6 +1506,12 @@ function renderPlan(state: UiState, cursor: number): string {
         // you meet it — no duration column, because there is no duration.
         lines.push(checklistItemRow(row.item, selected))
       }
+    } else if (row.kind === 'followup') {
+      const f = row.followup
+      const selected = i === bodyCursor && cursor > 0
+      if (selected && state.armedTaskId === `fu:${f.id}`) lines.push(clipToWidth(`>[?] Check off ${f.label}?`))
+      else if (selected && state.armedTaskId === `undo:fu:${f.id}`) lines.push(clipToWidth(`>[?] Undo ${f.label}?`))
+      else lines.push(followupRow(f, selected))
     } else if (row.kind === 'task') {
       lines.push(clip(`${point}${taskRow(row.task)}`, LINE_CHARS))
     } else if (row.kind === 'task-done') {
@@ -1621,12 +1646,14 @@ export type TaskDetailRow =
   | { kind: 'space' }
   | { kind: 'listen' }
   | { kind: 'done' }
+  | { kind: 'later' }
 
 export function taskDetailRows(state: UiState, taskId: string): TaskDetailRow[] {
     const task = findTask(state, taskId)
   if (!task) return []
 
-  const rows: TaskDetailRow[] = [{ kind: 'done' }, { kind: 'listen' }]
+  // Done, or done with a dated step still to come (v0.170.0 follow-ups).
+  const rows: TaskDetailRow[] = [{ kind: 'done' }, { kind: 'later' }, { kind: 'listen' }]
   if (task.notes?.length) rows.push({ kind: 'space' })
   for (const note of task.notes ?? []) {
     // Two characters of indent on continuation lines so a three-line note
@@ -1640,6 +1667,60 @@ export function taskDetailRows(state: UiState, taskId: string): TaskDetailRow[] 
 
 export function findTask(state: UiState, taskId: string): TaskRow | undefined {
   return state.plan?.tasks?.find(t => t.taskId === taskId)
+}
+
+/** "today" / "tomorrow" / "in 5d" / "2d late". */
+export function followupWhen(daysLeft: number): string {
+  if (daysLeft === 0) return 'today'
+  if (daysLeft === 1) return 'tomorrow'
+  return daysLeft < 0 ? `${-daysLeft}d late` : `in ${daysLeft}d`
+}
+
+/** `YYYY-MM-DD` plus n calendar days (UTC arithmetic: no DST drift). */
+export function dayPlus(day: string, n: number): string {
+  const [y, m, d] = day.split('-').map(Number)
+  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10)
+}
+
+/** "Wed Oct 28" for a `YYYY-MM-DD` day. */
+export function dayLabel(day: string): string {
+  const [y, m, d] = day.split('-').map(Number)
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })
+}
+
+/** A follow-up on Home: "[ ] Doctor appointment ... in 5d", when right-aligned. */
+function followupRow(f: Followup, selected: boolean): string {
+  const left = `${selected ? '>' : ' '}${f.done ? '[x]' : '[ ]'} `
+  const when = `  ${followupWhen(f.daysLeft)}`
+  let label = f.label
+  while (label.length > 1 && measure(`${left}${label}${when}`) > USABLE_PX) label = label.slice(0, -1)
+  let line = `${left}${label}`
+  while (measure(`${line} ${when}`) <= USABLE_PX) line += ' '
+  return clipToWidth(`${line}${when}`)
+}
+
+/**
+ * Picking the follow-up day for "Done, follow up later". One scroll = one
+ * day, starting a week out; click arms, click again saves (the task is ticked
+ * and the follow-up kept in one request). The label defaults to
+ * "Follow up: <task>" and is renamed on the phone.
+ */
+function renderFollowupDate(state: UiState, view: Extract<View, { kind: 'followupDate' }>): string {
+  const task = findTask(state, view.taskId)
+  const today = state.plan?.day?.day
+  if (!task || !today) return assemble(['Follow up later', '', 'That task is gone.'], config.maxChars, config.maxLines)
+  const due = dayPlus(today, view.days)
+  const armed = state.armedTaskId === `followup-date:${view.taskId}`
+  const lines = [
+    clipToWidth(task.label),
+    'Done now - follow up on:',
+    '',
+    clipToWidth(`${armed ? '>[?] Save ' : '>    '}${dayLabel(due)}  (${followupWhen(view.days)})`),
+    '',
+    armed ? 'Click again to save' : 'scroll: day earlier / later - click to save',
+    'On Home 7 days before; phone reminder on the day',
+  ]
+  return assemble(lines, config.maxChars, config.maxLines)
 }
 
 function renderTaskDetail(state: UiState, taskId: string, cursor: number): string {
@@ -1667,6 +1748,8 @@ function renderTaskDetail(state: UiState, taskId: string, cursor: number): strin
     } else if (row.kind === 'done') {
       const armed = state.armedTaskId === taskId
       lines.push(clip(`${point}${armed ? '[?] Confirm task done?' : '[ ] Mark done'}`, LINE_CHARS))
+    } else if (row.kind === 'later') {
+      lines.push(clip(`${point}[>] Done, follow up later`, LINE_CHARS))
     } else {
       lines.push(clip(`${point}${row.first ? '- ' : '  '}${row.text}`, LINE_CHARS))
     }
@@ -2190,6 +2273,8 @@ function renderView(state: UiState): string {
       return renderBoard(state, state.view.boardId, state.view.cursor)
     case 'task':
       return renderTaskDetail(state, state.view.taskId, state.view.cursor)
+    case 'followupDate':
+      return renderFollowupDate(state, state.view)
     case 'chores':
       return renderChores(state, state.view.cursor)
     case 'notes':

@@ -677,3 +677,37 @@ export async function updateDayDraft(
     return { ok: false, error: err instanceof Error ? err.message.slice(0, 40) : 'network error' }
   }
 }
+
+/** Tick or untick a dated follow-up. */
+export async function setFollowupDone(id: string, done: boolean): Promise<boolean> {
+  try {
+    const res = await fetch(`${config.serverUrl}/followups/${encodeURIComponent(id)}/done`, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ done }),
+      signal: AbortSignal.timeout(config.timeoutMs),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Done with a task, but a dated step remains: the hub ticks the task and keeps
+ * a follow-up for `dueDay` in one request (idempotent on `clientId`).
+ */
+export async function followupFromTask(taskId: string, dueDay: string, clientId: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(`${config.serverUrl}/task/${encodeURIComponent(taskId)}/followup`, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ dueDay, clientId }),
+      signal: AbortSignal.timeout(config.timeoutMs),
+    })
+    const payload = await res.json().catch(() => null)
+    return res.ok ? { ok: true } : { ok: false, error: payload?.error ?? `server ${res.status}` }
+  } catch {
+    return { ok: false, error: 'network error' }
+  }
+}

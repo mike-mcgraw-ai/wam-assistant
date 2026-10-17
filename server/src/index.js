@@ -10,6 +10,7 @@ import { Checklists } from './checklists.js'
 import { agenda, planBlock, reach } from './plan.js'
 import { Inbox } from './inbox.js'
 import { Tasks, matchOpenTask, linkedCompletionEvidence } from './tasks.js'
+import { Followups, daysBetween, reminderText } from './followups.js'
 import { Triage, sweepInbox } from './triage.js'
 import { Jobs, JOB } from './jobs.js'
 import { composeListenSummary, fallbackListenSummary, sessionRecap } from './listenSummary.js'
@@ -144,6 +145,12 @@ const assistant = new AssistantChat({
 const coach = new Coach({
   storePath: join(DATA_DIR, 'coach.json'),
   logPath: join(DATA_DIR, 'coach.jsonl'),
+})
+
+// Dated follow-ups (v0.170.0): shown on Home from 7 days before their day.
+const followups = new Followups({
+  storePath: join(DATA_DIR, 'followups.json'),
+  logPath: join(DATA_DIR, 'followups.jsonl'),
 })
 
 const recordings = new Recordings({
@@ -481,6 +488,8 @@ function buildPlan(minutes, requestedIds, space) {
     // than as rows in it. Scheduling by efficiency would bury every one of
     // them behind a dishwasher; folding them into the total corrupts it.
     tasks: taskRows(space),
+    // Dated follow-ups due within the week (or overdue): one-click rows on Home.
+    followups: space ? followups.visible(checklists.dayKey(), space) : [],
     agenda: withDoneInline(withRunningTotal(agenda(plan, unestimated)), doneRows(space)),
     // Solo reach per chore, so the "what fits" screen can answer
     // "how far do I get with just this one" without a second request.
@@ -1993,6 +2002,56 @@ const server = http.createServer(async (req, res) => {
     return json(res, result.ok ? 200 : 400, result)
   }
 
+  // ---- dated follow-ups (v0.170.0) ---------------------------------------
+  if (url.pathname === '/followups' || url.pathname.startsWith('/followups/') || /^\/task\/[^/]+\/followup$/.test(url.pathname)) {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    const today = checklists.dayKey()
+    const listing = () => followups.list().map(item => ({ ...item, daysLeft: daysBetween(today, item.dueDay) }))
+    if (req.method === 'GET' && url.pathname === '/followups') return json(res, 200, { ok: true, today, items: listing() })
+    if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+
+    let body = {}
+    try {
+      const raw = await readBody(req)
+      if (raw) body = JSON.parse(raw)
+    } catch (err) {
+      return json(res, 400, { error: `bad body: ${err.message}` })
+    }
+
+    // Done with the task, but a dated step remains: tick the task and keep
+    // the follow-up, in one request so a retry cannot do half of it.
+    const fromTask = url.pathname.match(/^\/task\/([^/]+)\/followup$/)
+    if (fromTask) {
+      const taskId = decodeURIComponent(fromTask[1])
+      const task = tasks.taskDefs().find(row => row.id === taskId)
+      if (!task) return json(res, 404, { error: 'unknown task' })
+      const added = followups.add({
+        label: body.label || `Follow up: ${task.label}`,
+        dueDay: body.dueDay,
+        taskId,
+        space: task.space === 'ops' ? 'ops' : 'life',
+        clientId: body.clientId,
+      })
+      if (!added.ok) return json(res, 400, added)
+      const done = tasks.complete(taskId, true)
+      return json(res, 200, { ...added, taskDone: done.ok, tasks: tasks.list(), items: listing() })
+    }
+
+    if (url.pathname === '/followups') {
+      const added = followups.add({ label: body.label, dueDay: body.dueDay, space: body.space, clientId: body.clientId })
+      return json(res, added.ok ? 200 : 400, { ...added, items: listing() })
+    }
+    const one = url.pathname.match(/^\/followups\/([^/]+)(?:\/(done|delete))?$/)
+    if (!one) return json(res, 404, { error: 'not found' })
+    const id = decodeURIComponent(one[1])
+    const result = one[2] === 'done'
+      ? followups.setDone(id, body.done !== false, today)
+      : one[2] === 'delete'
+        ? followups.remove(id)
+        : followups.update(id, { label: body.label, dueDay: body.dueDay })
+    return json(res, result.ok ? 200 : 404, { ...result, items: listing() })
+  }
+
   const taskMatch = url.pathname.match(/^\/task\/([^/]+)\/(done|reopen|note)$/)
   if (req.method === 'POST' && taskMatch) {
     const id = decodeURIComponent(taskMatch[1])
@@ -2642,6 +2701,24 @@ server.listen(PORT, HOST, () => {
  * five minutes rather than scheduled for an exact time, so a restart or a
  * missed window still catches up instead of skipping a day silently.
  */
+/**
+ * Follow-up reminders through the same phone notifier as wait steps: once when
+ * a follow-up comes into its 7-day view, once on its day. Not before 08:00
+ * local, and only marked sent once ntfy accepted it, so a failed send retries
+ * on the next minute.
+ */
+const FOLLOWUP_REMIND_HOUR = 8
+setInterval(() => {
+  const hour = Number(new Intl.DateTimeFormat('en-US', { timeZone: checklists.timezone, hour: 'numeric', hourCycle: 'h23' }).format(new Date()))
+  if (hour < FOLLOWUP_REMIND_HOUR) return
+  for (const owed of followups.remindersDue(checklists.dayKey())) {
+    notifier
+      .send(owed.kind === 'due' ? 'WAM follow-up' : 'WAM coming up', reminderText(owed))
+      .then(sent => { if (sent) followups.markReminded(owed.id, owed.kind) })
+      .catch(err => console.warn(`[followups] reminder: ${err.message}`))
+  }
+}, 60_000)
+
 /**
  * Wait steps come due on their own schedule, so sweep often. Thirty seconds is
  * fine granularity for a wash cycle and costs nothing.

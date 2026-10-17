@@ -481,6 +481,19 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
   }
   const spokenReview = { items: [reviewItem], total: 1, loading: false, error: null }
   add('Capture — Review count', render({ ...withPlan, space: 'life', spokenReview, view: { kind: 'capture', cursor: 2 } }))
+  // v0.170.0 dated follow-ups: on Home from 7 days before their day.
+  const followups = [
+    { id: 'fu-doc', label: 'Doctor appointment', dueDay: '2026-10-16', daysLeft: 5, taskId: 'text-my-doctor', done: false, doneAt: null },
+    { id: 'fu-vet', label: "Vet: checkup", dueDay: '2026-10-11', daysLeft: 0, taskId: 'call-the-vet', done: false, doneAt: null },
+    { id: 'fu-lib', label: 'Return library books', dueDay: '2026-10-09', daysLeft: -2, taskId: null, done: false, doneAt: null },
+  ]
+  const withFollowups = { ...withPlan, space: 'life' as const, plan: { ...withPlan.plan, followups } }
+  const firstFollowup = planRows({ ...withFollowups, view: { kind: 'plan', cursor: 0 } }).findIndex(row => row.kind === 'followup')
+  add('Life — follow-ups on Home', render({ ...withFollowups, view: { kind: 'plan', cursor: firstFollowup } }))
+  add('Life — follow-up armed (3-2-1 then confirm)', render({ ...withFollowups, armedTaskId: 'fu:fu-doc', view: { kind: 'plan', cursor: firstFollowup } }))
+  add('Task — Done, follow up later: pick the day', render({ ...withPlan, space: 'life', view: { kind: 'followupDate', taskId: 'clean-garage', days: 7 } }))
+  add('Task — follow-up day armed', render({ ...withPlan, space: 'life', armedTaskId: 'followup-date:clean-garage', view: { kind: 'followupDate', taskId: 'clean-garage', days: 12 } }))
+
   add('Review — one card', render({ ...withPlan, space: 'life', spokenReview, view: { kind: 'review', phase: 'list', index: 0, cursor: 0 } }))
   add('Review — guarded Home action', render({ ...withPlan, space: 'life', spokenReview,
     // The cursor sits on the armed action: the card's text lines come first.

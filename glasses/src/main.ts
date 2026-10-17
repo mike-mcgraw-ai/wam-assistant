@@ -52,6 +52,8 @@ import {
   startCoachSession,
   skipDay,
   updateDayDraft,
+  setFollowupDone,
+  followupFromTask,
 } from './api'
 import { loadPlan, loadSnapshot, savePlan, saveSnapshot } from './storage'
 import {
@@ -60,6 +62,7 @@ import {
   indexRows,
   noteDetailStops,
   armCountdown,
+  dayPlus,
   noteRows,
   captureRows,
   spokenReviewCardStops,
@@ -1625,6 +1628,7 @@ function rowCount(): number {
     case 'timerReset':
     case 'cue':
     case 'transcript':
+    case 'followupDate':
     case 'pong':
     case 'fonttest':
       return 0
@@ -1640,6 +1644,7 @@ function clampCursor(): void {
     view.kind === 'daystart' ||
     view.kind === 'cue' ||
     view.kind === 'transcript' ||
+    view.kind === 'followupDate' ||
     (view.kind === 'assistant' && view.phase === 'chat')
   ) return
   const count = rowCount()
@@ -1775,6 +1780,13 @@ function move(delta: number): void {
   if (view.kind === 'transcript') {
     const max = noteTranscriptScrollMax(state)
     view.scroll = Math.max(0, Math.min(max, (view.scroll ?? 0) + delta))
+    return
+  }
+
+  if (view.kind === 'followupDate') {
+    // One scroll = one day. A week out to start; never today or the past.
+    view.days = Math.max(1, Math.min(365, view.days + delta))
+    state.armedTaskId = null
     return
   }
 
@@ -2511,11 +2523,47 @@ async function activate(): Promise<void> {
     return
   }
 
+  if (view.kind === 'followupDate') {
+    // Arm, then confirm: this ticks the task and keeps a dated follow-up.
+    const key = `followup-date:${view.taskId}`
+    const gate = confirmGate(key)
+    if (gate !== 'confirmed') {
+      if (gate === 'armed') await paint()
+      return
+    }
+    const today = state.plan?.day?.day
+    if (!today) return
+    const dueDay = dayPlus(today, view.days)
+    const task = state.plan?.tasks.find(item => item.taskId === view.taskId)
+    const saved = await followupFromTask(view.taskId, dueDay, `glasses:${view.taskId}:${dueDay}`)
+    if (!saved.ok) {
+      state.error = saved.error ?? 'could not save'
+      await paint()
+      return
+    }
+    if (task) {
+      // The same Home treatment as Mark done: a done row with its undo chance.
+      const doneKey = `task:${task.taskId}`
+      state.recentTaskDone.set(task.taskId, task)
+      state.stickyDone.add(doneKey)
+      state.donePageAways.set(doneKey, 0)
+      state.hiddenDone.delete(doneKey)
+      await openPlan({ skipAgeKey: doneKey, selectTaskKey: task.taskId })
+    } else await openPlan()
+    return
+  }
+
   if (view.kind === 'task') {
     const row = taskDetailRows(state, view.taskId)[view.cursor]
     if (row?.kind === 'listen') {
       const task = state.plan?.tasks?.find(t => t.taskId === view.taskId)
       await talkAbout(task ? { taskId: task.taskId, label: task.label } : null)
+      return
+    }
+    if (row?.kind === 'later') {
+      state.armedTaskId = null
+      state.view = { kind: 'followupDate', taskId: view.taskId, days: 7 }
+      await paint()
       return
     }
     if (row?.kind !== 'done') {
@@ -2649,6 +2697,50 @@ async function activate(): Promise<void> {
     // under your finger the same instant — no confirmation, no evidence, and
     // no way back from a misclick. Ticking something off is cheap to ask twice
     // for and expensive to get wrong.
+    if (row?.kind === 'followup') {
+      // One click like Shower: arm (3-2-1), confirm; kept on screen until you
+      // leave Home so a wrong tick can be undone the same way.
+      const f = row.followup
+      const key = `fu:${f.id}`
+      if (f.done) {
+        const undo = confirmGate(`undo:${key}`)
+        if (undo !== 'confirmed') {
+          if (undo === 'armed') await paint()
+          return
+        }
+        state.stickyDone.delete(key)
+        state.donePageAways.delete(key)
+        state.hiddenDone.delete(key)
+        f.done = false
+        f.doneAt = null
+        await paint()
+        if (!(await setFollowupDone(f.id, false))) {
+          f.done = true
+          state.error = 'could not save'
+        }
+        await paint()
+        return
+      }
+      const gate = confirmGate(key)
+      if (gate !== 'confirmed') {
+        if (gate === 'armed') await paint()
+        return
+      }
+      state.stickyDone.add(key)
+      state.donePageAways.set(key, 0)
+      state.hiddenDone.delete(key)
+      f.done = true
+      f.doneAt = Date.now()
+      await paint()
+      if (!(await setFollowupDone(f.id, true))) {
+        f.done = false
+        f.doneAt = null
+        state.stickyDone.delete(key)
+        state.error = 'could not save'
+      }
+      await paint()
+      return
+    }
     if (row?.kind === 'daily') {
       const key = `${row.runId}:${row.item.id}`
       if (row.item.done) {
@@ -2864,6 +2956,15 @@ async function back(): Promise<void> {
     return
   }
 
+  if (state.view.kind === 'followupDate') {
+    const { taskId } = state.view
+    state.armedTaskId = null
+    const at = taskDetailRows(state, taskId).findIndex(row => row.kind === 'later')
+    state.view = { kind: 'task', taskId, cursor: Math.max(0, at) }
+    await paint()
+    return
+  }
+
   if (state.view.kind === 'transcript') {
     const { subjectKind, subjectId, noteId } = state.view
     // Back where you left: on the Full transcript row, not the top of the note.
@@ -3052,6 +3153,7 @@ async function onMenu(itemID: number): Promise<void> {
         state.view.kind !== 'daystart' &&
         state.view.kind !== 'cue' &&
         state.view.kind !== 'transcript' &&
+        state.view.kind !== 'followupDate' &&
         state.view.kind !== 'assistant'
       ) {
         state.view.cursor = 0
