@@ -996,6 +996,25 @@ function plainHeader(state: UiState, right: string): string {
 }
 
 /**
+ * The confirm gate's countdown, applied to a finished frame.
+ *
+ * While a second click would still be ignored, the prompt counts 3, 2, 1:
+ * "Click again" reads "Wait N", and the armed row's own [?] / [!] marker reads
+ * [N]. The marker matters most: most armed prompts never said "click again"
+ * ("[?] Mark done?", "[?] Confirm task done?", "[?] Rebuild today"), so a
+ * countdown keyed only to those words was silently missing from them — and a
+ * rewording (v0.168.0) could drop it from the rest. The armed row is the
+ * cursor row: arming always happens on the row under the cursor.
+ */
+export function armCountdown(content: string, left: number): string {
+  const lines = content.split('\n').map(line =>
+    line.replace(/Click again/g, `Wait ${left}`).replace(/click again/g, `wait ${left}`))
+  const at = lines.findIndex(line => line.startsWith('>') && /\[[?!]\]/.test(line))
+  if (at >= 0) lines[at] = lines[at].replace(/\[[?!]\]/, `[${left}]`)
+  return lines.join('\n')
+}
+
+/**
  * How many list rows fit under the lines already on screen.
  *
  * Every list used to size its window from a fixed setting (`rowsPerPage`)

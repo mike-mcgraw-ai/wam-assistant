@@ -40,3 +40,4 @@ These are the real completion dates of private device builds. The sanitized port
 | v0.34.0 | 2026-10-17 | 0.164.0 | **Full-width live timers:** Active clocks get their own aligned right-hand column instead of a clipped suffix. |
 | v0.35.0 | 2026-10-17 | 0.165.0 | **Integration: completion, scrolling and capture:** Mark done with correctable dates, Ring scrolling that stays inside long content, and new captures straight into review. |
 | v0.36.0 | 2026-10-17 | 0.168.0 | **Fewer words on confirm prompts:** Repeated click instructions removed from on-glasses prompts. |
+| v0.37.0 | 2026-10-17 | 0.169.0 | **A countdown on every confirm:** The armed row itself counts down, so no prompt wording can drop it. |

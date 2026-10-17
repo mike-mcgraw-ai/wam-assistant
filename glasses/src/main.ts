@@ -59,6 +59,7 @@ import {
   findNoteRow,
   indexRows,
   noteDetailStops,
+  armCountdown,
   noteRows,
   captureRows,
   spokenReviewCardStops,
@@ -636,8 +637,7 @@ function withArmCountdown(content: string): string {
   if (!state.armedTaskId) return content
   const age = Date.now() - armedAt
   if (age >= CONFIRM_MIN_MS) return content
-  const left = ARM_STEPS - Math.floor(age / ARM_STEP_MS)
-  return content.replace(/Click again/g, `Wait ${left}`).replace(/click again/g, `wait ${left}`)
+  return armCountdown(content, ARM_STEPS - Math.floor(age / ARM_STEP_MS))
 }
 
 async function sleepDisplay(): Promise<void> {
