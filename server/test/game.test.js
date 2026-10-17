@@ -164,6 +164,22 @@ test('a committed task costs every day it stays open, and nothing from the day i
   assert.equal(pen['2026-10-16'] ?? 0, 0)
 })
 
+test('a reviewed earlier completion date rescales vet XP without changing doctor', () => {
+  const game = computeGame({
+    runs: [], templates: laundryT, config: cfg, today: '2026-10-18',
+    commitments: [{ day: '2026-10-14', runIds: [], taskIds: ['doctor', 'vet'] }],
+    taskInfo: {
+      doctor: { label: 'Text my doctor', doneAt: null },
+      vet: { label: 'Call the vet', doneAt: dayAt('2026-10-17'), completedOn: '2026-10-15' },
+    },
+    dayKeyOf: utcDay,
+  })
+  const penalties = Object.fromEntries(game.days.map(day => [day.day, day.penalty]))
+  assert.equal(penalties['2026-10-14'], -20)
+  assert.equal(penalties['2026-10-15'], -10)
+  assert.equal(penalties['2026-10-16'], -10)
+})
+
 test('commitments before startDay and on today are never charged', () => {
   const g = computeGame({
     runs: [], templates: laundryT, config: cfg, today: '2026-10-15',

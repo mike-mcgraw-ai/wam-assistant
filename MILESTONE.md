@@ -1,8 +1,8 @@
-# Full-width live timers
+# Integration: completion, scrolling and capture
 
-- Public version: `v0.34.0`
-- Face build: `0.164.0`
+- Public version: `v0.35.0`
+- Face build: `0.165.0`
 - Originally completed: `2026-10-17`
 - Sanitized and published: `2026-10-17`
 
-Active clocks get their own aligned right-hand column instead of a clipped suffix.
+Mark done with correctable dates, Ring scrolling that stays inside long content, and new captures straight into review.

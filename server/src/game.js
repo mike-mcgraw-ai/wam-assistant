@@ -166,7 +166,7 @@ export function computeGame({
   for (const [taskId, from] of firstTask) {
     const info = taskInfo[taskId]
     if (!info || !commit.taskPenalty) continue
-    const doneDay = info.doneAt ? dayKeyOf(info.doneAt) : null
+    const doneDay = info.completedOn ?? (info.doneAt ? dayKeyOf(info.doneAt) : null)
     for (let day = later(from, start); day < today; day = addDays(day, 1)) {
       if (doneDay && doneDay <= day) break
       const b = bucket(day)

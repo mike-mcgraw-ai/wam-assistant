@@ -1,4 +1,4 @@
-import { layout, measure, charWidth, USABLE_PX } from './metrics'
+import { layout, measure, charWidth, DEFAULT_WIDTH, USABLE_PX } from './metrics'
 import type { AgendaRow, DoneRow, Board, ChecklistItem, ChecklistRun, ChecklistStats, InboxGroup, InboxItem, Metric, Status, TaskRow } from './types'
 
 /**
@@ -74,6 +74,12 @@ export function clipToWidth(text: string, maxPx = USABLE_PX): string {
 }
 
 export function clip(text: string, width: number): string {
+  // A full line is bounded by pixels, not characters. Counting characters let
+  // wide glyphs run past the edge (the firmware then wraps the line onto a row
+  // nobody counted, pushing the page off the bottom) and cut lines of narrow
+  // glyphs mid-word that actually fit. Narrower field clips keep their
+  // character meaning.
+  if (width >= LINE_CHARS) return clipToWidth(text)
   return text.length > width ? text.slice(0, width) : text
 }
 
@@ -133,7 +139,11 @@ export function assemble(lines: string[], maxChars: number, maxLines: number): s
   for (const line of lines) {
     const cost = line.length + 1
     if (total + cost > maxChars || kept.length >= maxLines) {
-      kept.push('...')
+      // The marker takes the last line rather than adding one: text past the
+      // line budget is not on the glasses at all, so an appended '...' was
+      // itself the line that fell off the bottom.
+      if (kept.length >= maxLines) kept[kept.length - 1] = '...'
+      else kept.push('...')
       break
     }
     kept.push(line)
@@ -346,17 +356,30 @@ export function agendaRow(row: AgendaRow | DoneRow, running = false, liveClock =
  * longer than the line is cut, because the alternative is an empty line.
  */
 export function wrap(text: string, width = LINE_CHARS): string[] {
+  // Wrapped by pixels, not characters. `width` keeps its old meaning — the
+  // characters a caller leaves room for — so a caller that reserves two for a
+  // "- " prefix gets two characters' worth of pixels less. Wrapping by count
+  // let lines of wide glyphs run past the edge; the firmware then wrapped them
+  // again onto rows nobody counted, and the bottom of the page fell off.
+  const budget = Math.max(DEFAULT_WIDTH * 4, USABLE_PX - Math.max(0, LINE_CHARS - width) * DEFAULT_WIDTH)
+  const fits = (value: string) => measure(value) <= budget
+  const cut = (word: string) => {
+    let out = word
+    while (out.length > 1 && !fits(out)) out = out.slice(0, -1)
+    return out
+  }
+
   const words = text.split(/\s+/).filter(Boolean)
   if (words.length === 0) return []
 
   const lines: string[] = []
   let line = ''
   for (const word of words) {
-    if (line === '') line = word.length > width ? word.slice(0, width) : word
-    else if (line.length + 1 + word.length <= width) line += ` ${word}`
+    if (line === '') line = fits(word) ? word : cut(word)
+    else if (fits(`${line} ${word}`)) line += ` ${word}`
     else {
       lines.push(line)
-      line = word.length > width ? word.slice(0, width) : word
+      line = fits(word) ? word : cut(word)
     }
   }
   if (line) lines.push(line)

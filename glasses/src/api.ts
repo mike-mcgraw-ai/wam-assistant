@@ -214,6 +214,19 @@ export async function completeTask(id: string): Promise<boolean> {
   }
 }
 
+export async function reopenTask(id: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${config.serverUrl}/task/${encodeURIComponent(id)}/reopen`, {
+      method: 'POST',
+      headers: authHeaders(),
+      signal: AbortSignal.timeout(config.timeoutMs),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
 /** Permanently remove one user-created task or chore note. */
 export async function deleteNote(
   kind: 'task' | 'chore',

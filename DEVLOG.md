@@ -38,3 +38,4 @@ These are the real completion dates of private device builds. The sanitized port
 | v0.32.0 | 2026-10-15 | 0.154.0 | **Integration: reviewable days, chat and Listen quality:** Three parallel branches in one release: Start Day review with Rebuild today, chat reader fixes, and cleaner Listen transcripts. |
 | v0.33.0 | 2026-10-16 | 0.157.0 | **Review Spoken Work:** Every recording becomes one durable review card, with corrections, explicit promotion, and a guarded backlog migration. |
 | v0.34.0 | 2026-10-17 | 0.164.0 | **Full-width live timers:** Active clocks get their own aligned right-hand column instead of a clipped suffix. |
+| v0.35.0 | 2026-10-17 | 0.165.0 | **Integration: completion, scrolling and capture:** Mark done with correctable dates, Ring scrolling that stays inside long content, and new captures straight into review. |

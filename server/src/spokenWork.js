@@ -8,6 +8,16 @@ const CLASSIFICATIONS = new Set(['task', 'project', 'idea', 'memory', 'product_f
 const DESTINATIONS = new Set(['project', 'idea', 'memory'])
 const ACTIVE_STATES = new Set(['unreviewed', 'needs_clarification'])
 
+export function spokenWorkProgress(items) {
+  const progress = { total: items.length, needsReview: 0, reviewed: 0, ignored: 0, done: 0, other: 0 }
+  for (const item of items) {
+    if (ACTIVE_STATES.has(item.reviewState)) progress.needsReview += 1
+    else if (['reviewed', 'ignored', 'done'].includes(item.reviewState)) progress[item.reviewState] += 1
+    else progress.other += 1
+  }
+  return progress
+}
+
 function clean(value, max = 12_000) {
   return String(value ?? '').replace(/\r/g, '').trim().slice(0, max)
 }
@@ -212,7 +222,7 @@ export class SpokenWork {
         sourceRefs.length !== previous.sourceRefs.length || destinationRefs.length !== previous.destinationRefs.length ||
         JSON.stringify(destinationRefs) !== JSON.stringify(previous.destinationRefs) ||
         transcriptChanged || (input.complete === true && previous.rawTranscript?.complete !== true) ||
-        (audio.state === 'available' && previous.audio?.state !== 'available')
+        (audio.state === 'available' && (previous.audio?.state !== 'available' || audio.kept && !previous.audio?.kept))
       if (!changed) return { ok: true, existing: true, item: this.get(known) }
       const next = { ...previous, revision: previous.revision + 1, updatedAt: Date.now(), sourceAliases,
         sourceRefs, destinationRefs,

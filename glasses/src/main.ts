@@ -31,6 +31,7 @@ import {
   checkItem,
   completeInboxItem,
   completeTask,
+  reopenTask,
   deleteNote,
   discardCoachSession,
   fetchAssistantChat,
@@ -57,10 +58,10 @@ import {
   findRun,
   findNoteRow,
   indexRows,
-  noteDetailActions,
+  noteDetailStops,
   noteRows,
   captureRows,
-  spokenReviewActions,
+  spokenReviewCardStops,
   assistantCaptureHasWords,
   assistantLatestReplyId,
   assistantViewAfterRefresh,
@@ -83,7 +84,7 @@ import {
 } from './render'
 import { newGame, nudge, serve, tick as pongTick } from './pong'
 import { startRemoteInput } from './remoteinput'
-import type { AssistantProvider } from './types'
+import type { AssistantProvider, TaskRow } from './types'
 
 /**
  * Ops Board — a check-on-demand view of building metrics on the Even G2.
@@ -199,6 +200,7 @@ const state: UiState = {
   scrollTop: 0,
   armedTaskId: null,
   stickyDone: new Set<string>(),
+  recentTaskDone: new Map<string, TaskRow>(),
   donePageAways: new Map<string, number>(),
   hiddenDone: new Set<string>(),
   armedNoteId: null,
@@ -688,6 +690,7 @@ async function refresh(): Promise<void> {
       const plan = await fetchPlan(state.space)
       if (plan.ok) {
         state.plan = plan.plan
+        reconcileRecentTaskDone(plan.plan.tasks)
         state.planError = null
         savePlan(state.space, plan.plan)
       } else if (state.view.kind === 'plan') {
@@ -1566,13 +1569,23 @@ async function confirmResetTimers(): Promise<void> {
     state.planError = plan.error
   }
   state.error = null
-  state.stickyDone.clear()
+  for (const key of state.stickyDone) if (!key.startsWith('task:')) state.stickyDone.delete(key)
   state.armedTaskId = null
   state.view = { kind: 'timerReset', done: true, count }
   await paint()
 }
 
 // ---- navigation ------------------------------------------------------------
+
+function noteStopCount(subjectKind: 'task' | 'chore', subjectId: string, noteId: string): number {
+  const stops = noteDetailStops(state, findNoteRow(state, subjectKind, subjectId, noteId))
+  return stops.text.length + stops.actions.length
+}
+
+function reviewCardStopCount(index: number): number {
+  const stops = spokenReviewCardStops(state.spokenReview.items[index])
+  return stops.text.length + stops.actions.length
+}
 
 function rowCount(): number {
   switch (state.view.kind) {
@@ -1603,12 +1616,9 @@ function rowCount(): number {
     case 'capture':
       return captureRows().length
     case 'review':
-      return state.view.phase === 'list' ? state.spokenReview.items.length : spokenReviewActions(state.spokenReview.items[state.view.index]).length
+      return state.view.phase === 'list' ? state.spokenReview.items.length : reviewCardStopCount(state.view.index)
     case 'note':
-      return noteDetailActions(
-        state,
-        findNoteRow(state, state.view.subjectKind, state.view.subjectId, state.view.noteId),
-      ).length
+      return noteStopCount(state.view.subjectKind, state.view.subjectId, state.view.noteId)
     case 'assistant':
       return state.view.phase === 'providers' ? 2 : 0
     case 'daystart':
@@ -1662,9 +1672,21 @@ function ageCompletedRows(keys: Iterable<string>): boolean {
     if (count < 2) continue
     state.hiddenDone.add(key)
     state.stickyDone.delete(key)
+    if (key.startsWith('task:')) state.recentTaskDone.delete(key.slice(5))
     hidOne = true
   }
   return hidOne
+}
+
+function reconcileRecentTaskDone(tasks: TaskRow[]): void {
+  for (const task of tasks) {
+    if (!state.recentTaskDone.has(task.taskId)) continue
+    const key = `task:${task.taskId}`
+    state.recentTaskDone.delete(task.taskId)
+    state.stickyDone.delete(key)
+    state.donePageAways.delete(key)
+    state.hiddenDone.delete(key)
+  }
 }
 
 function move(delta: number): void {
@@ -1745,7 +1767,8 @@ function move(delta: number): void {
     view.armedAction = undefined
     view.armedAt = undefined
     if (view.phase === 'list') view.index = Math.max(0, Math.min(state.spokenReview.items.length - 1, view.index + delta))
-    else view.cursor = Math.max(0, Math.min(spokenReviewActions(state.spokenReview.items[view.index]).length - 1, view.cursor + delta))
+    else view.cursor = Math.max(0, Math.min(reviewCardStopCount(view.index) - 1, view.cursor + delta))
+    followCursor()
     return
   }
 
@@ -1936,7 +1959,7 @@ async function stepFromPlan(choreId: string, stepId: string): Promise<void> {
   await paint()
 }
 
-async function openPlan(): Promise<void> {
+async function openPlan(options: { skipAgeKey?: string; selectTaskKey?: string } = {}): Promise<void> {
   const returningToPlan = state.view.kind !== 'plan'
   // Completed rows have their own two-page-away lifetime. Reopening Home must
   // not erase either undo chance or resurrect a row already paged away twice.
@@ -1948,6 +1971,7 @@ async function openPlan(): Promise<void> {
   state.planLoading = false
   if (result.ok) {
     state.plan = result.plan
+    reconcileRecentTaskDone(result.plan.tasks)
     // On a short Home list a completed row can never physically leave the
     // viewport, so the old page-window counter left it there forever. A trip
     // into any detail screen and back is also a page-away: keep the first two
@@ -1956,13 +1980,17 @@ async function openPlan(): Promise<void> {
       const doneKeys = result.plan.agenda
         .filter(row => row.kind === 'done')
         .map(row => `${row.runId}:${row.stepId}`)
-      ageCompletedRows([...doneKeys, ...state.stickyDone])
+      ageCompletedRows([...doneKeys, ...state.stickyDone].filter(key => key !== options.skipAgeKey))
     }
     state.planError = null
     state.error = null
     savePlan(state.space, result.plan)
     if (state.view.kind === 'plan' && state.space === 'life' && result.plan.day?.started !== true) {
       state.view.cursor = 1
+    }
+    if (state.view.kind === 'plan' && options.selectTaskKey) {
+      const index = planRows(state).findIndex(row => row.kind === 'task-done' && row.task.taskId === options.selectTaskKey)
+      if (index >= 0) state.view.cursor = index
     }
   } else {
     state.planError = result.error
@@ -2248,7 +2276,10 @@ async function activate(): Promise<void> {
       await paint()
       return
     }
-    const label = spokenReviewActions(item)[view.cursor]
+    const card = spokenReviewCardStops(item)
+    const label = card.actions[view.cursor - card.text.length]
+    // A line of the capture is for reading; only the action rows act.
+    if (!label) return
     if (label === 'Open on phone') {
       window.open(`${config.serverUrl}/review?item=${encodeURIComponent(item.id)}`, '_blank')
       return
@@ -2315,7 +2346,9 @@ async function activate(): Promise<void> {
 
   if (view.kind === 'note') {
     const row = findNoteRow(state, view.subjectKind, view.subjectId, view.noteId)
-    const action = noteDetailActions(state, row)[view.cursor]
+    const stops = noteDetailStops(state, row)
+    const action = stops.actions[view.cursor - stops.text.length]
+    // A line of the note is for reading; only the action rows act.
     if (!row || !action) return
 
     if (action === 'transcript') {
@@ -2498,13 +2531,21 @@ async function activate(): Promise<void> {
       if (gate === 'armed') await paint()
       return
     }
+    const task = state.plan?.tasks.find(item => item.taskId === view.taskId)
     const ok = await completeTask(view.taskId)
     if (!ok) {
       state.error = 'could not save'
       await paint()
       return
     }
-    await openPlan()
+    if (task) {
+      const key = `task:${task.taskId}`
+      state.recentTaskDone.set(task.taskId, task)
+      state.stickyDone.add(key)
+      state.donePageAways.set(key, 0)
+      state.hiddenDone.delete(key)
+      await openPlan({ skipAgeKey: key, selectTaskKey: task.taskId })
+    } else await openPlan()
     return
   }
 
@@ -2636,6 +2677,30 @@ async function activate(): Promise<void> {
       return
     }
 
+    if (row?.kind === 'task-done') {
+      const key = `task:${row.task.taskId}`
+      const gate = confirmGate(`undo:${key}`)
+      if (gate !== 'confirmed') {
+        if (gate === 'armed') await paint()
+        return
+      }
+      const reopened = await reopenTask(row.task.taskId)
+      if (!reopened) {
+        state.error = 'could not reopen task'
+        await paint()
+        return
+      }
+      state.recentTaskDone.delete(row.task.taskId)
+      state.stickyDone.delete(key)
+      state.donePageAways.delete(key)
+      state.hiddenDone.delete(key)
+      await openPlan()
+      const reopenedIndex = planRows(state).findIndex(item => item.kind === 'task' && item.task.taskId === row.task.taskId)
+      if (state.view.kind === 'plan' && reopenedIndex >= 0) state.view.cursor = reopenedIndex
+      await paint()
+      return
+    }
+
     if (row?.kind === 'task') {
       // Captured notes is the same collection exposed by the Notes menu, not
       // an ordinary task with a competing detail screen.
@@ -2763,6 +2828,7 @@ async function activate(): Promise<void> {
   state.scrollTop = 0
       break
   }
+
   await paint()
 }
 
@@ -2800,7 +2866,10 @@ async function back(): Promise<void> {
 
   if (state.view.kind === 'transcript') {
     const { subjectKind, subjectId, noteId } = state.view
-    state.view = { kind: 'note', subjectKind, subjectId, noteId, cursor: 0 }
+    // Back where you left: on the Full transcript row, not the top of the note.
+    const stops = noteDetailStops(state, findNoteRow(state, subjectKind, subjectId, noteId))
+    const at = stops.actions.indexOf('transcript')
+    state.view = { kind: 'note', subjectKind, subjectId, noteId, cursor: at < 0 ? 0 : stops.text.length + at }
     state.scrollTop = 0
     clampCursor()
     await paint()

@@ -163,6 +163,7 @@ export interface UiState {
    * and the only way to undo it. These stay until you leave the page.
    */
   stickyDone: Set<string>
+  recentTaskDone: Map<string, TaskRow>
   /** Number of times each completed row has paged fully out of view. */
   donePageAways: Map<string, number>
   /** Completed rows stay saved, but disappear locally after two page-aways. */
@@ -251,6 +252,7 @@ export type PlanRow =
   | { kind: 'skip-day' }
   | { kind: 'daily'; runId: string; listName: string; item: ChecklistItem }
   | { kind: 'task'; task: TaskRow }
+  | { kind: 'task-done'; task: TaskRow }
   | { kind: 'chores' }
   | { kind: 'agenda'; row: AgendaRow | DoneRow }
 
@@ -281,11 +283,19 @@ export function planRows(state: UiState): PlanRow[] {
   const plan = state.plan
   if (!plan) return []
 
+  const committedTaskIds = new Set(plan.day?.taskIds ?? [])
+  const committedTasks: PlanRow[] = plan.tasks
+    .filter(task => task.taskId !== CAPTURE_TASK_ID && committedTaskIds.has(task.taskId) && !state.recentTaskDone.has(task.taskId))
+    .map(task => ({ kind: 'task', task }))
+  const completedTasks: PlanRow[] = [...state.recentTaskDone.values()]
+    .filter(task => committedTaskIds.has(task.taskId) && !state.hiddenDone.has(`task:${task.taskId}`))
+    .map(task => ({ kind: 'task-done', task }))
+
   // Before the morning walk-through, Home is intentionally just the Life
   // doorway and one Start Day action. Preset lists exist, but none of them is
   // today's work until Mike names it.
   if (state.space === 'life' && plan.day?.started !== true && plan.day?.skipped !== true) {
-    return [{ kind: 'listen' }, { kind: 'start-day' }, { kind: 'skip-day' }]
+    return [{ kind: 'listen' }, ...committedTasks, ...completedTasks, { kind: 'start-day' }, { kind: 'skip-day' }]
   }
 
   // The hub files a Listen capture with no obvious home onto a task called
@@ -308,10 +318,6 @@ export function planRows(state: UiState): PlanRow[] {
   // Start Day commitments belong on today's Home screen, but only the exact
   // task IDs committed by today's walk. That keeps the historical backlog and
   // catch-all notes task from flooding the running order.
-  const committedTaskIds = new Set(plan.day?.taskIds ?? [])
-  const committedTasks: PlanRow[] = plan.tasks
-    .filter(task => task.taskId !== CAPTURE_TASK_ID && committedTaskIds.has(task.taskId))
-    .map(task => ({ kind: 'task', task }))
 
   // The LIFE line, made selectable. Scrolling up off the first body row lands
   // on it, and a click opens the voice-note path — general capture, no subject,
@@ -349,7 +355,7 @@ export function planRows(state: UiState): PlanRow[] {
     ? [{ kind: 'start-day' }, ...(plan.day?.started ? [{ kind: 'rebuild-day' as const }] : [])]
     : []
 
-  return [{ kind: 'listen' }, ...required, ...committedTasks, ...agenda, ...walk]
+  return [{ kind: 'listen' }, ...required, ...committedTasks, ...completedTasks, ...agenda, ...walk]
 }
 
 function planPageWindow(rows: PlanRow[], cursor: number) {
@@ -367,6 +373,7 @@ export function visiblePlanDoneKeys(state: UiState, cursor: number): string[] {
   for (const row of planPageWindow(planRows(state), cursor)) {
     if (row.kind === 'daily' && row.item.done) keys.push(`${row.runId}:${row.item.id}`)
     if (row.kind === 'agenda' && row.row.kind === 'done') keys.push(`${row.row.runId}:${row.row.stepId}`)
+    if (row.kind === 'task-done') keys.push(`task:${row.task.taskId}`)
   }
   return keys
 }
@@ -489,6 +496,29 @@ export function spokenReviewActions(item?: SpokenReviewItem): string[] {
   return ['Task/Home', 'Keep moment', 'Done', 'Ignore', 'Add detail', 'Correct', 'Open on phone']
 }
 
+/**
+ * A review card as scroll stops: what was heard (title, summary, the open
+ * question), then each action on its own row.
+ *
+ * The card used to show one clipped line of the capture and a single action
+ * line that the Ring cycled through, so a long capture could not be read on
+ * the glasses at all. Like note detail, one scroll now moves one line through
+ * the card and on into the actions.
+ */
+export function spokenReviewCardStops(item?: SpokenReviewItem): { text: string[]; actions: string[] } {
+  if (!item) return { text: [], actions: [] }
+  const useful = (item.summary || item.cleanedTranscript || item.rawTranscript?.text || '').replace(/\s+/g, ' ').trim()
+  const text: string[] = [...wrap(item.title || 'Untitled capture', LINE_CHARS - 1)]
+  if (item.parentId) {
+    text.push(...wrap(`Was: ${item.amendmentOriginal || 'open on phone'}`, LINE_CHARS - 1))
+    text.push(...wrap(`Now: ${item.cleanedTranscript || 'Transcript pending'}`, LINE_CHARS - 1))
+  } else text.push(...wrap(useful || 'Transcript pending', LINE_CHARS - 1))
+  if (item.reviewState === 'needs_clarification' || item.clarificationQuestions?.length) {
+    text.push(...wrap(`? ${item.clarificationQuestions?.[0] || 'Needs your help'}`, LINE_CHARS - 1))
+  } else text.push(`Audio: ${item.audio?.state || 'missing'}`)
+  return { text, actions: spokenReviewActions(item) }
+}
+
 function renderSpokenReview(state: UiState, view: Extract<View, { kind: 'review' }>): string {
   const review = state.spokenReview
   const item = review.items[view.index]
@@ -498,22 +528,28 @@ function renderSpokenReview(state: UiState, view: Extract<View, { kind: 'review'
   else {
     const date = new Date(item.capturedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
     lines.push(clipToWidth(`${view.index + 1}/${review.total}  ${item.sourceType}  ${date}`))
-    lines.push(clipToWidth(item.title || 'Untitled capture'))
-    const useful = (item.summary || item.cleanedTranscript || item.rawTranscript?.text || '').replace(/\s+/g, ' ').trim()
-    if (item.parentId) lines.push(clipToWidth(`Was: ${item.amendmentOriginal || 'open on phone'}`))
-    lines.push(clipToWidth(item.parentId ? `Now: ${item.cleanedTranscript || 'Transcript pending'}` : useful || 'Transcript pending'))
     if (review.error) lines.push(clipToWidth(`! ${review.error}`))
-    else if (item.reviewState === 'needs_clarification' || item.clarificationQuestions?.length) {
-      lines.push(clipToWidth(`? ${item.clarificationQuestions?.[0] || 'Needs your help'}`))
-    } else lines.push(clipToWidth(`Audio: ${item.audio?.state || 'missing'}`))
-    if (view.phase === 'list') lines.push('', 'scroll cards - click to open')
-    else {
-      const actions = spokenReviewActions(item)
-      const action = actions[view.cursor] || actions[0]
-      const armed = view.armedAction === action && Date.now() - (view.armedAt || 0) < 5000
-      lines.push(clipToWidth(`> ${action}`), clipToWidth(armed
-        ? action === 'Task/Home' ? `confirm Home: ${item.title}` : 'click again to confirm'
-        : 'scroll actions - click to arm'))
+    const { text, actions } = spokenReviewCardStops(item)
+    if (view.phase === 'list') {
+      // One card per scroll: a preview of what was heard, not its whole text.
+      const room = roomBelow(lines, 2)
+      for (const line of text.slice(0, room)) lines.push(clipToWidth(` ${line}`))
+      lines.push('', 'scroll cards - click to open')
+    } else {
+      const total = text.length + actions.length
+      const win = windowFollow(view.cursor, total, roomBelow(lines), state.scrollTop)
+      for (let i = win.start; i < win.end; i += 1) {
+        const point = i === view.cursor ? '>' : ' '
+        if (i < text.length) {
+          lines.push(clipToWidth(`${point}${text[i]}`))
+          continue
+        }
+        const action = actions[i - text.length]
+        const armed = view.armedAction === action && Date.now() - (view.armedAt || 0) < 5000
+        lines.push(clipToWidth(armed
+          ? `${point}[!] ${action === 'Task/Home' ? `confirm Home: ${item.title}` : `click again: ${action}`}`
+          : `${point}[ ] ${action}`))
+      }
     }
   }
   return assemble(lines, config.maxChars, config.maxLines)
@@ -654,6 +690,22 @@ export function noteDetailActions(_state: UiState, row: NoteRow | undefined): No
   return actions
 }
 
+/**
+ * Note detail as one list of scroll stops: every line of the note, then each
+ * action.
+ *
+ * The note used to be cut to whatever room the actions left, and the Ring only
+ * moved between the actions — so a long note could never be read past its
+ * first few lines: the cursor stayed on the actions outside the text while the
+ * rest of it ran off the bottom (Mike, 2026-10-17). Now one scroll moves one
+ * line through the note and on into the actions, and the page flips only at
+ * its edge.
+ */
+export function noteDetailStops(state: UiState, row: NoteRow | undefined): { text: string[]; actions: NoteDetailAction[] } {
+  if (!row) return { text: [], actions: [] }
+  return { text: wrap(row.note.text, LINE_CHARS - 1), actions: noteDetailActions(state, row) }
+}
+
 function renderNoteDetail(
   state: UiState,
   subjectKind: 'task' | 'chore',
@@ -664,43 +716,43 @@ function renderNoteDetail(
   const row = findNoteRow(state, subjectKind, subjectId, noteId)
   if (!row) return assemble(['Note', '', 'That note is gone.'], config.maxChars, config.maxLines)
 
-  const actions = noteDetailActions(state, row)
-  const lines = [clipToWidth(`Note · ${row.subject.label} · ${ago(row.note.at)} ago`), 'Summary']
-  const summaryRoom = Math.max(1, config.maxLines - lines.length - actions.length)
-  const summary = wrap(row.note.text, LINE_CHARS)
-  for (const line of summary.slice(0, summaryRoom)) lines.push(clipToWidth(line))
+  const { text, actions } = noteDetailStops(state, row)
+  const lines = [clipToWidth(`Note · ${row.subject.label} · ${ago(row.note.at)} ago`)]
+  const total = text.length + actions.length
+  const win = windowFollow(cursor, total, roomBelow(lines), state.scrollTop)
 
   const key = `${row.subject.kind}:${row.subject.id}:${row.note.id}`
-  actions.forEach((action, index) => {
-    const point = index === cursor ? '>' : ' '
+  for (let i = win.start; i < win.end; i += 1) {
+    const point = i === cursor ? '>' : ' '
+    if (i < text.length) {
+      lines.push(clipToWidth(`${point}${text[i]}`))
+      continue
+    }
+    const action = actions[i - text.length]
+    const actionKey = `${key}:${action}`
     if (action === 'transcript') lines.push(`${point}[=] Full transcript`)
     else if (action === 'make-task') {
-      const actionKey = `${key}:${action}`
       lines.push(
         state.armedNoteId === actionKey
           ? `${point}[!] Click again: add Home`
           : `${point}[+] Make Home task`,
       )
-    }
-    else if (action === 'queue-chatgpt') {
-      const actionKey = `${key}:${action}`
+    } else if (action === 'queue-chatgpt') {
       lines.push(
         state.armedNoteId === `queued:${actionKey}` ? `${point}[G] ChatGPT queued`
           : state.armedNoteId === actionKey ? `${point}[!] Click again: queue GPT`
             : `${point}[G] Queue ChatGPT`,
       )
     } else if (action === 'queue-claude') {
-      const actionKey = `${key}:${action}`
       lines.push(
         state.armedNoteId === `queued:${actionKey}` ? `${point}[C] Claude queued`
           : state.armedNoteId === actionKey ? `${point}[!] Click again: queue Claude`
             : `${point}[C] Queue Claude`,
       )
     } else {
-      const actionKey = `${key}:${action}`
       lines.push(state.armedNoteId === actionKey ? `${point}[!] Click again: delete` : `${point}[x] Delete note`)
     }
-  })
+  }
   return assemble(lines, config.maxChars, config.maxLines)
 }
 
@@ -944,6 +996,20 @@ function plainHeader(state: UiState, right: string): string {
 }
 
 /**
+ * How many list rows fit under the lines already on screen.
+ *
+ * Every list used to size its window from a fixed setting (`rowsPerPage`)
+ * instead of from what was left after its own header. On the native text
+ * screen the budget is 10 lines, 9 under the clock — so the last rows of each
+ * page were drawn past the bottom of the glasses, and a cursor that landed on
+ * one of them was off-screen while the list around it stood still. Sizing from
+ * the real remainder keeps the cursor on a line that exists.
+ */
+export function roomBelow(lines: readonly string[], reserve = 0): number {
+  return Math.max(1, config.maxLines - lines.length - reserve)
+}
+
+/**
  * Page-aligned window. The cursor moves against a fixed page; the viewport
  * changes only after the cursor crosses a page edge.
  */
@@ -1074,7 +1140,8 @@ function renderBoard(state: UiState, boardId: string, cursor: number): string {
   // Cursor, not paging: every other screen moves a selector, and the same
   // gesture behaving differently depending on where you are is the fastest way
   // to make a thing feel broken.
-  const win = windowFollow(cursor, board.metrics.length, config.rowsPerPage, state.scrollTop)
+  const noteRoom = board.metrics.some(metric => metric.note) ? 2 : 0
+  const win = windowFollow(cursor, board.metrics.length, roomBelow(['header'], noteRoom), state.scrollTop)
   const { start, end } = win
   const more = win.more ? `${win.atTop ? '' : '^'}${win.atEnd ? '' : 'v'}` : ''
 
@@ -1111,7 +1178,7 @@ function renderChecklist(state: UiState, runId: string, cursor: number): string 
   // screen — capture started from inside a list already knows what it is about,
   // so nothing downstream has to guess which chore the note belongs to.
   const total = run.items.length + 1
-  const win = windowFollow(cursor, total, config.rowsPerPage, state.scrollTop)
+  const win = windowFollow(cursor, total, roomBelow(['header'], 1), state.scrollTop)
   const { start, end } = win
   const more = win.more ? `${win.atTop ? '' : '^'}${win.atEnd ? '' : 'v'}` : ''
 
@@ -1164,7 +1231,7 @@ function renderPicker(state: UiState, cursor: number): string {
   if (lists.length === 0) {
     lines.push('Nothing left to start.')
   } else {
-    const { start, end } = windowFollow(cursor, lists.length, config.rowsPerPage, state.scrollTop)
+    const { start, end } = windowFollow(cursor, lists.length, roomBelow(lines), state.scrollTop)
     for (let i = start; i < end; i += 1) {
       const list = lists[i]
       lines.push(clip(`${i === cursor ? '>' : ' '}   ${pad(list.name, 18)} ${list.total} items`, LINE_CHARS))
@@ -1229,7 +1296,7 @@ function renderInbox(state: UiState, group: string, cursor: number): string {
   const items = inboxItems(state, group)
   if (items.length === 0) return `WAM\n\n${group} is clear.\n\ndbl-tap to go back`
 
-  const win = windowFollow(cursor, items.length, config.rowsPerPage, state.scrollTop)
+  const win = windowFollow(cursor, items.length, roomBelow(['header']), state.scrollTop)
   const { start, end } = win
   const more = win.more ? `${win.atTop ? '' : '^'}${win.atEnd ? '' : 'v'}` : ''
   const lines = [header(state, `${clip(group, 14)} ${items.length}${more ? ` ${more}` : ''}`)]
@@ -1266,10 +1333,11 @@ function planTip(state: UiState, rows: PlanRow[], cursor: number): string {
     return state.armedTaskId === 'skip-day' ? 'Click again to skip the walk today' : 'Not now - show the list without it'
   }
   if (row.kind === 'task') {
-    return state.armedTaskId === row.task.taskId
-      ? '! Task - click again to finish'
-      : '! Task - click to open'
+    return '! Task - click for notes or Mark done'
   }
+  if (row.kind === 'task-done') return state.armedTaskId === `undo:task:${row.task.taskId}`
+    ? 'Click again to reopen task'
+    : '[x] Done - click twice to reopen'
   if (row.kind === 'listen') {
     return state.coachSession?.active ? 'Recording - click to open Listen' : 'Capture - talk, or read your notes'
   }
@@ -1311,7 +1379,8 @@ function renderPlan(state: UiState, cursor: number): string {
 
   // Before Start Day, the hub owns the brief contract. Older hubs still fall
   // back to the basic setup/off rows so the screen stays truthful.
-  if (state.space === 'life' && plan.day?.started !== true && plan.day?.skipped !== true) {
+  if (state.space === 'life' && plan.day?.started !== true && plan.day?.skipped !== true &&
+      !rows.some(row => row.kind === 'task' || row.kind === 'task-done')) {
     const startSelected = cursor === 1
     const skipSelected = cursor === 2
     const summary = plan.morningBrief?.summary ?? {
@@ -1384,6 +1453,8 @@ function renderPlan(state: UiState, cursor: number): string {
       lines.push(ruleCentred('Chores', i === bodyCursor && cursor > 0))
     } else if (row.kind === 'start-day') {
       lines.push(clip(`${point}+   ${state.plan?.day?.draft ? 'Review Day' : state.plan?.day?.started ? 'Add to day' : 'Start Day'}`, LINE_CHARS))
+    } else if (row.kind === 'skip-day') {
+      lines.push(clip(`${point}${state.armedTaskId === 'skip-day' ? '[?] Skip the walk today?' : '    Skip for now'}`, LINE_CHARS))
     } else if (row.kind === 'rebuild-day') {
       lines.push(clip(`${point}${state.armedTaskId === 'rebuild-day' ? '[?] ' : ''}Rebuild today`, LINE_CHARS))
     } else if (row.kind === 'daily') {
@@ -1398,8 +1469,10 @@ function renderPlan(state: UiState, cursor: number): string {
         lines.push(checklistItemRow(row.item, selected))
       }
     } else if (row.kind === 'task') {
-      const armed = state.armedTaskId === row.task.taskId
-      lines.push(clip(`${point}${taskRow(row.task, armed)}`, LINE_CHARS))
+      lines.push(clip(`${point}${taskRow(row.task)}`, LINE_CHARS))
+    } else if (row.kind === 'task-done') {
+      const armed = state.armedTaskId === `undo:task:${row.task.taskId}`
+      lines.push(clipToWidth(`${point}${armed ? '[?] Reopen ' : '[x] Done '}${row.task.label}${armed ? '?' : ''}`))
     } else if (row.kind === 'agenda') {
       // agendaRow already enforces the measured pixel width. A second
       // character-count cap chopped the final `r` from "Take out of dryer"
@@ -1521,9 +1594,7 @@ function renderDayStart(
 /**
  * One task, opened.
  *
- * Rows are the note lines and then the actions, so scrolling reads the notes
- * rather than being a gesture with nothing to do. Clicking a note line does
- * nothing on purpose — the cursor is a reading aid here, not a selector.
+ * Completion and voice actions lead; notes remain readable below them.
  */
 export type TaskDetailRow =
   | { kind: 'noteline'; text: string; first: boolean }
@@ -1532,10 +1603,11 @@ export type TaskDetailRow =
   | { kind: 'done' }
 
 export function taskDetailRows(state: UiState, taskId: string): TaskDetailRow[] {
-  const task = findTask(state, taskId)
+    const task = findTask(state, taskId)
   if (!task) return []
 
-  const rows: TaskDetailRow[] = []
+  const rows: TaskDetailRow[] = [{ kind: 'done' }, { kind: 'listen' }]
+  if (task.notes?.length) rows.push({ kind: 'space' })
   for (const note of task.notes ?? []) {
     // Two characters of indent on continuation lines so a three-line note
     // still reads as one note rather than three.
@@ -1543,11 +1615,6 @@ export function taskDetailRows(state: UiState, taskId: string): TaskDetailRow[] 
       rows.push({ kind: 'noteline', text: line, first: i === 0 })
     })
   }
-  if (rows.length > 0) rows.push({ kind: 'space' })
-  // Talk about this task, from this task. Starting capture anywhere else means
-  // the hub has to guess the subject; started from here it is not a guess.
-  rows.push({ kind: 'listen' })
-  rows.push({ kind: 'done' })
   return rows
 }
 
@@ -1568,9 +1635,7 @@ function renderTaskDetail(state: UiState, taskId: string, cursor: number): strin
     clip(`${est}${when}${task.note ? ` - ${task.note}` : ''}`, LINE_CHARS),
   ]
 
-  if (rows.length === 1) lines.push('', 'No notes yet. Add one from your phone.')
-
-  const win = windowFollow(cursor, rows.length, config.rowsPerPage - 2, state.scrollTop)
+  const win = windowFollow(cursor, rows.length, roomBelow(lines), state.scrollTop)
   for (let i = win.start; i < win.end; i += 1) {
     const row = rows[i]
     const point = i === cursor ? '>' : ' '
@@ -1581,7 +1646,7 @@ function renderTaskDetail(state: UiState, taskId: string, cursor: number): strin
       lines.push(clip(`${point}${live ? '[*] Stop listening' : `[~] ${stoppedLabel}`}`, LINE_CHARS))
     } else if (row.kind === 'done') {
       const armed = state.armedTaskId === taskId
-      lines.push(clip(`${point}${armed ? '[?] Really done?' : '[ ] Mark done'}`, LINE_CHARS))
+      lines.push(clip(`${point}${armed ? '[?] Confirm task done?' : '[ ] Mark done - click twice'}`, LINE_CHARS))
     } else {
       lines.push(clip(`${point}${row.first ? '- ' : '  '}${row.text}`, LINE_CHARS))
     }

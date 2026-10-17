@@ -23,7 +23,7 @@ import { Checklists } from '../../server/src/checklists.js'
 import { agenda, planBlock, reach } from '../../server/src/plan.js'
 import boardsCfg from '../../server/src/boards.config.json'
 import checksCfg from '../../server/src/checklists.config.json'
-import { planRows, render, type UiState } from '../src/render'
+import { planRows, render, spokenReviewCardStops, type UiState } from '../src/render'
 import type { CoachMode, DayDraft } from '../src/types'
 import { newGame, serve, tick as pongTick, nudge } from '../src/pong'
 
@@ -134,7 +134,7 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
     cueReturn: null,
     pong: null,
     events: 0, lastEvent: '-', diagnostics: false, space: 'ops',
-    scrollTop: 0, armedTaskId: null, stickyDone: new Set<string>(),
+    scrollTop: 0, armedTaskId: null, stickyDone: new Set<string>(), recentTaskDone: new Map(),
     donePageAways: new Map<string, number>(), hiddenDone: new Set<string>(), armedNoteId: null,
     listenReviewing: false, foreground: true, lastAudioAt: null,
     audio: { open: false, frames: 0, chunks: 0, sent: 0, rejected: 0, lastRms: 0, kind: '-', raw: 0, error: null },
@@ -335,6 +335,30 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
       morningBrief,
     },
   }))
+  const doctorTask = { ...withPlan.plan!.tasks[0], taskId: 'doctor', label: 'Text my doctor', note: 'Ask about the referral', notes: [] }
+  const vetTask = { ...withPlan.plan!.tasks[0], taskId: 'vet', label: 'Call the vet', note: 'Prescription refill', notes: [
+    { id: 'vet-voice', text: 'I called the vet yesterday about the refill.', by: 'listen', at: now - M },
+  ] }
+  const doctorVetPlan = { ...withPlan.plan!, tasks: [doctorTask, vetTask],
+    day: { ...withPlan.plan!.day!, started: false, startedAt: null, taskIds: ['doctor', 'vet'] } }
+  add('Life home — doctor and vet carry before Start Day', render({
+    ...withPlan, space: 'life', plan: doctorVetPlan, view: { kind: 'plan', cursor: 1 },
+  }))
+  add('Task detail — Mark done first', render({
+    ...withPlan, space: 'life', plan: doctorVetPlan, view: { kind: 'task', taskId: 'vet', cursor: 0 },
+  }))
+  add('Task detail — completion armed', render({
+    ...withPlan, space: 'life', plan: doctorVetPlan, view: { kind: 'task', taskId: 'vet', cursor: 0 }, armedTaskId: 'vet',
+  }))
+  const afterVetPlan = { ...doctorVetPlan, tasks: [doctorTask], day: { ...doctorVetPlan.day, started: true, startedAt: now } }
+  add('Life home — vet done with undo', render({
+    ...withPlan, space: 'life', plan: afterVetPlan,
+    recentTaskDone: new Map([['vet', vetTask]]), view: { kind: 'plan', cursor: 5 },
+  }))
+  add('Life home — vet reopen armed', render({
+    ...withPlan, space: 'life', plan: afterVetPlan,
+    recentTaskDone: new Map([['vet', vetTask]]), view: { kind: 'plan', cursor: 5 }, armedTaskId: 'undo:task:vet',
+  }))
   add('Start Day — recording the house walk', render({
     ...withPlan,
     space: 'life',
@@ -459,7 +483,8 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
   add('Capture — Review count', render({ ...withPlan, space: 'life', spokenReview, view: { kind: 'capture', cursor: 2 } }))
   add('Review — one card', render({ ...withPlan, space: 'life', spokenReview, view: { kind: 'review', phase: 'list', index: 0, cursor: 0 } }))
   add('Review — guarded Home action', render({ ...withPlan, space: 'life', spokenReview,
-    view: { kind: 'review', phase: 'card', index: 0, cursor: 0, armedAction: 'Task/Home', armedAt: now } }))
+    // The cursor sits on the armed action: the card's text lines come first.
+    view: { kind: 'review', phase: 'card', index: 0, cursor: spokenReviewCardStops(spokenReview.items[0]).text.length, armedAction: 'Task/Home', armedAt: now } }))
   const amendment = { ...reviewItem, id: 'sw_demo-amendment', title: 'Clean the kitchen', sourceType: 'amendment',
     parentId: reviewItem.id, amendmentKind: 'correction' as const, amendmentBaseRevision: 1,
     amendmentOriginal: 'Clean the cap', cleanedTranscript: 'Clean the kitchen', summary: 'Clean the kitchen' }

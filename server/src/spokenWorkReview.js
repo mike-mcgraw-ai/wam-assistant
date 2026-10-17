@@ -24,6 +24,10 @@ export function materializeSpokenWork(store, preview) {
     clarificationQuestions: preview.clarificationQuestions,
     reviewState: preview.reviewState,
     destinationRefs: preview.destinationRefs,
+    parentId: preview.parentId,
+    amendmentKind: preview.amendmentKind,
+    amendmentBaseRevision: preview.amendmentBaseRevision,
+    amendmentOriginal: preview.amendmentOriginal,
     ingest: 'migration',
   }, { actor: 'review-import' })
 }

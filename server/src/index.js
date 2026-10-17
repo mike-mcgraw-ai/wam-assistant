@@ -9,7 +9,7 @@ import { Store } from './state.js'
 import { Checklists } from './checklists.js'
 import { agenda, planBlock, reach } from './plan.js'
 import { Inbox } from './inbox.js'
-import { Tasks, matchOpenTask } from './tasks.js'
+import { Tasks, matchOpenTask, linkedCompletionEvidence } from './tasks.js'
 import { Triage, sweepInbox } from './triage.js'
 import { Jobs, JOB } from './jobs.js'
 import { composeListenSummary, fallbackListenSummary, sessionRecap } from './listenSummary.js'
@@ -26,8 +26,9 @@ import { coalesceTranscriptSegments, isNonSpeechText, mergeRawSegments, parseTas
 import { handleRemoteInput } from './remoteinput.js'
 import { MorningBrief } from './morningBrief.js'
 import { Recordings } from './recordings.js'
-import { SpokenWork } from './spokenWork.js'
+import { SpokenWork, spokenWorkProgress } from './spokenWork.js'
 import { compareSpokenCoverage, legacySpokenInventory } from './spokenWorkImport.js'
+import { ingestCoachCapture, reconcileRecentCaptures } from './spokenWorkCapture.js'
 import { applySpokenModelResult, scheduleSpokenExtraction } from './spokenWorkExtraction.js'
 import { linkExistingSpokenTask, materializeSpokenWork, previewSpokenTaskUpdate, promoteSpokenResource, promoteSpokenTask, updateSpokenTask } from './spokenWorkReview.js'
 import { transcribeSession } from './sessionTranscript.js'
@@ -91,7 +92,7 @@ let ledgerEatOut = loadEatOut(EAT_OUT_PATH)
 function gameState(now = Date.now(), historyDays = 60) {
   const taskInfo = {}
   for (const t of tasks.taskDefs()) {
-    taskInfo[t.id] = { label: t.label, doneAt: tasks.done.get(t.id)?.doneAt ?? null }
+    taskInfo[t.id] = { label: t.label, doneAt: tasks.done.get(t.id)?.doneAt ?? null, completedOn: tasks.done.get(t.id)?.completedOn ?? null }
   }
   return computeGame({
     runs: [...checklists.runs.values()],
@@ -153,6 +154,11 @@ const spokenWork = new SpokenWork({
   logPath: join(DATA_DIR, 'spoken-work.jsonl'),
   indexPath: join(DATA_DIR, 'spoken-work.json'),
 })
+try {
+  const recovery = reconcileRecentCaptures({ store: spokenWork, inventory: legacySpokenInventory(DATA_DIR), recordings })
+  if (recovery.imported || recovery.failures.length) console.warn(`[spoken-work] recovered ${recovery.imported} recent captures; ${recovery.failures.length} failed`)
+  for (const failure of recovery.failures) console.warn(`[spoken-work] could not recover ${failure.sourceKey}: ${failure.error}`)
+} catch (error) { console.warn(`[spoken-work] recent capture recovery failed: ${error.message}`) }
 for (const day of checklists.dayStarts.values()) {
   for (const commit of day.draftCommits || []) {
     try { spokenWork.linkStartDayCommit(commit.id, commit.sourceLinks) }
@@ -1452,9 +1458,10 @@ const server = http.createServer(async (req, res) => {
     const cursor = Math.max(0, Number(url.searchParams.get('cursor')) || 0)
     const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 50))
     const items = filtered.slice(cursor, cursor + limit)
-    return json(res, 200, { ok: true, items, total: filtered.length,
+    const progress = spokenWorkProgress(all)
+    return json(res, 200, { ok: true, items, total: filtered.length, progress,
       nextCursor: cursor + items.length < filtered.length ? cursor + items.length : null,
-      needsReviewCount: all.filter(item => item.reviewState === 'unreviewed' || item.reviewState === 'needs_clarification').length })
+      needsReviewCount: progress.needsReview })
   }
 
   const spokenMutation = url.pathname.match(/^\/spoken-work\/([^/]+)(?:\/(actions|split|merge|extract|destination-sync|amend))?$/)
@@ -1804,56 +1811,22 @@ const server = http.createServer(async (req, res) => {
           if (full?.ok && full.text) recordings.saveFullTranscript(id, full.text)
         }
       }
-      const note = session && session.context?.taskId !== '__assistant__'
-        ? routeCoachSession(session, body.at, full?.ok ? full.text : '')
-        : null
+      let note = null
       if (session) {
-        const rawSegments = mergeRawSegments(session.segments, recordings.transcript(id))
-        const rawText = full?.ok && full.text ? full.text : coalesceTranscriptSegments(rawSegments).map(segment => segment.text).join('\n\n')
-        let recording = recordings.summary(id)
-        let audioState = recording?.available ? 'available' : 'missing'
-        if (recording?.available && !recording.kept) {
-          const retained = recordings.setKeep(id, true)
-          recording = recordings.summary(id)
-          if (!retained.ok || !recording?.kept) audioState = 'retention_error'
+        const amendmentParent = session.context?.reviewItemId
+          ? spokenWork.get(session.context.reviewItemId) || legacySpokenInventory(DATA_DIR).items.find(item => item.id === session.context.reviewItemId)
+          : null
+        const captured = ingestCoachCapture({ store: spokenWork, recordings, session, fullText: full?.ok ? full.text : '', amendmentParent })
+        if (!captured.ok) return json(res, captured.code || 500, captured)
+        if (captured.item.sourceType !== 'amendment' && captured.item.rawTranscript.text &&
+          (!captured.existing || captured.item.extraction?.state === 'stale')) {
+          scheduleSpokenExtraction({ store: spokenWork, jobs, itemId: captured.item.id, rulesPath: SPOKEN_RULES_PATH })
         }
-        const sourceType = session.context?.reviewItemId ? 'amendment'
-          : session.context?.taskId === '__day_start__' ? 'start_day'
-          : session.context?.taskId === '__assistant__' ? 'assistant_voice'
-            : session.context?.taskId || session.context?.choreId ? 'task_voice_note'
-              : session.modeId === 'notes' ? 'solo_notes' : session.modeId === 'meeting' ? 'meeting'
-                : session.modeId === 'listening' ? 'listening' : 'conversation'
-        const sourceRefs = [{ store: 'coach', id }]
-        if (session.context?.reviewItemId) sourceRefs.push({ store: 'spoken-work', id: session.context.reviewItemId })
-        if (recording) sourceRefs.push({ store: 'recordings', id })
-        if (session.context?.taskId && !String(session.context.taskId).startsWith('__')) {
-          sourceRefs.push({ store: 'tasks', id: session.context.taskId })
-        }
-        if (session.context?.choreId) sourceRefs.push({ store: 'runs', id: session.context.choreId })
-        if (note?.summaryTarget) sourceRefs.push({ store: note.summaryTarget.kind === 'chore' ? 'runs' : 'tasks', id: `${note.summaryTarget.subjectId}:${note.summaryTarget.noteId}` })
-        const destinationRefs = []
-        if (note?.kind === 'task' && note.result?.task?.id) destinationRefs.push({ kind: 'task', id: note.result.task.id, createdAt: Date.now(), syncRevision: 1 })
-        else if (['task', 'note'].includes(note?.kind) && note.taskId) destinationRefs.push({ kind: 'task', id: note.taskId, createdAt: Date.now(), syncRevision: 1 })
-        if (note?.kind === 'day-draft' && note.result?.draft?.id) destinationRefs.push({ kind: 'start_day', id: note.result.draft.id,
-          itemIds: note.result.sourceItemIds || [], createdAt: Date.now(), syncRevision: 1 })
-        if (rawText || recording?.available) {
-          const amendmentParent = session.context?.reviewItemId
-            ? spokenWork.get(session.context.reviewItemId) || legacySpokenInventory(DATA_DIR).items.find(item => item.id === session.context.reviewItemId)
-            : null
-          const captured = spokenWork.ingest({
-            sourceKey: `coach:${id}`, sourceType, modeId: session.modeId, space: session.space,
-            parentId: session.context?.reviewItemId || null,
-            amendmentKind: session.context?.amendmentKind || null,
-            amendmentBaseRevision: session.context?.reviewRevision ?? null,
-            amendmentOriginal: amendmentParent?.revision === session.context?.reviewRevision ? amendmentParent.cleanedTranscript : null,
-            sessionId: id, sourceRefs, capturedAt: session.startedAt, endedAt: session.endedAt,
-            rawSegments, rawText, complete: full?.ok === true && Boolean(full.text),
-            transcriptSource: full?.ok && full.text ? 'full-recording' : 'coach',
-            audio: { sessionId: id, state: audioState, kept: recording?.kept === true, expiresAt: recording?.expiresAt ?? null },
-            destinationRefs,
-          })
-          if (sourceType !== 'amendment' && captured.ok && rawText && (!captured.existing || captured.item.extraction?.state === 'stale')) {
-            scheduleSpokenExtraction({ store: spokenWork, jobs, itemId: captured.item.id, rulesPath: SPOKEN_RULES_PATH })
+        if (session.context?.taskId !== '__assistant__') {
+          note = routeCoachSession(session, body.at, full?.ok ? full.text : '')
+          if (note) {
+            const linked = ingestCoachCapture({ store: spokenWork, recordings, session, fullText: full?.ok ? full.text : '', note, amendmentParent })
+            if (!linked.ok) return json(res, linked.code || 500, linked)
           }
         }
         jobs.discardQueuedCoachCuesForSession(session.id)
@@ -2002,6 +1975,24 @@ const server = http.createServer(async (req, res) => {
     return json(res, result.ok ? 200 : 400, { ...result, tasks: tasks.list() })
   }
 
+  const completionDateMatch = url.pathname.match(/^\/task\/([^/]+)\/completion-date$/)
+  if (req.method === 'POST' && completionDateMatch) {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    let body = {}
+    try { body = JSON.parse((await readBody(req)) || '{}') } catch { return json(res, 400, { error: 'bad body' }) }
+    const id = decodeURIComponent(completionDateMatch[1])
+    const day = String(body.day || '')
+    const noteId = String(body.noteId || '')
+    const dayKeyOf = timestamp => checklists.dayKey(timestamp)
+    const linkedEvidence = linkedCompletionEvidence(spokenWork.all(), id).find(row => row.id === noteId) ?? null
+    const result = body.action === 'preview'
+      ? tasks.previewCompletionDate(id, day, noteId, dayKeyOf, Date.now(), linkedEvidence)
+      : body.action === 'confirm'
+        ? tasks.correctCompletionDate(id, day, noteId, String(body.reviewKey || ''), dayKeyOf, Date.now(), linkedEvidence)
+        : { ok: false, error: 'unknown action' }
+    return json(res, result.ok ? 200 : 400, result)
+  }
+
   const taskMatch = url.pathname.match(/^\/task\/([^/]+)\/(done|reopen|note)$/)
   if (req.method === 'POST' && taskMatch) {
     const id = decodeURIComponent(taskMatch[1])
@@ -2061,7 +2052,14 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/tasks') {
     if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
-    return json(res, 200, { tasks: tasks.list() })
+    if (url.searchParams.get('includeDone') !== '1') return json(res, 200, { tasks: tasks.list() })
+    const spokenItems = spokenWork.all()
+    return json(res, 200, { tasks: tasks.list(),
+      completedTasks: tasks.completed().map(task => ({ ...task, voiceEvidence: [
+        ...task.notes.filter(note => String(note.by).startsWith('listen')).map(note => ({ id: note.id, text: note.text, by: note.by })),
+        ...linkedCompletionEvidence(spokenItems, task.id),
+      ] })),
+    })
   }
 
   // ---- assistant chat --------------------------------------------------

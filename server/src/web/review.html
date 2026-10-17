@@ -20,6 +20,9 @@
   .card{display:block;width:100%;text-align:left;padding:15px;margin:0 0 10px;border:1px solid var(--line);border-radius:14px;background:var(--panel)}
   .card strong{display:block;font-size:17px;line-height:1.3;margin-bottom:5px}
   .card .summary{display:block;color:var(--text);margin:8px 0 0;white-space:pre-line;max-height:4.5em;overflow:hidden}
+  .review-row{display:flex;align-items:flex-start;gap:10px}
+  .review-row .card{flex:1;min-width:0}
+  .review-row input{width:22px;height:22px;margin:16px 0 0;flex:none}
   .badge{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:2px 8px;margin:0 6px 5px 0;color:var(--muted);font-size:11px}
   .badge.warn{color:var(--warn);border-color:#876930}
   .detail{border:1px solid var(--line);border-radius:14px;background:var(--panel);padding:17px}
@@ -58,6 +61,13 @@
     <button data-state="done">Done</button>
     <button data-state="all">All</button>
   </div>
+  <p class="meta">Newest first. Suggestions never create or move work without your confirmation.</p>
+  <div class="actions" id="batch-controls">
+    <button id="open-newest" type="button" hidden>Open newest card</button>
+    <button id="select-noise" type="button">Select noise to ignore</button>
+    <button id="ignore-selected" type="button" hidden>Ignore selected</button>
+  </div>
+  <p id="batch-status" class="meta" role="status"></p>
   <div id="content" role="status">Loading spoken work…</div>
   <button id="more" hidden>Show more</button>
 </main>
@@ -69,10 +79,16 @@ const count = document.getElementById('count')
 const filters = document.getElementById('filters')
 const search = document.getElementById('review-search')
 const syncStatus = document.getElementById('sync-status')
+const openNewest = document.getElementById('open-newest')
+const selectNoise = document.getElementById('select-noise')
+const ignoreSelected = document.getElementById('ignore-selected')
+const batchStatus = document.getElementById('batch-status')
 let state = 'active'
 let cursor = 0
 let rows = []
 let selectedId = null
+let selectionMode = false
+const selectedNoise = new Set()
 const pendingCommands = new Map()
 let searchTimer = null
 const editQueueKey = 'spoken-work-pending-edits-v1'
@@ -191,20 +207,75 @@ function card(item) {
 }
 
 function renderList() {
-  content.innerHTML = rows.length ? rows.map(card).join('') : '<p class="empty">Nothing in this view yet.</p>'
+  content.innerHTML = rows.length ? rows.map(item => selectionMode && state === 'active'
+    ? '<div class="review-row"><input type="checkbox" data-select="' + escapeHtml(item.id) + '" aria-label="Select ' + escapeHtml(item.title || 'spoken work') + '"' + (selectedNoise.has(item.id) ? ' checked' : '') + '>' + card(item) + '</div>'
+    : card(item)).join('') : '<p class="empty">Nothing in this view yet.</p>'
   for (const button of content.querySelectorAll('[data-id]')) button.onclick = () => openItem(button.dataset.id)
+  for (const checkbox of content.querySelectorAll('[data-select]')) checkbox.onchange = () => {
+    if (checkbox.checked) selectedNoise.add(checkbox.dataset.select)
+    else selectedNoise.delete(checkbox.dataset.select)
+    updateBatchControls()
+  }
+  updateBatchControls()
+}
+
+function updateBatchControls() {
+  openNewest.hidden = state !== 'active' || !rows.length || selectedId != null
+  selectNoise.hidden = state !== 'active' || selectedId != null
+  selectNoise.textContent = selectionMode ? 'Stop selecting' : 'Select noise to ignore'
+  ignoreSelected.hidden = !selectionMode || state !== 'active' || selectedId != null
+  ignoreSelected.disabled = selectedNoise.size === 0
+  ignoreSelected.textContent = 'Ignore ' + selectedNoise.size + ' selected'
 }
 
 async function loadList(reset = true) {
-  if (reset) { cursor = 0; rows = []; selectedId = null; content.textContent = 'Loading spoken work…' }
+  if (reset) { cursor = 0; rows = []; selectedId = null; selectedNoise.clear(); content.textContent = 'Loading spoken work…' }
   try {
     const result = await request('/spoken-work?state=' + encodeURIComponent(state) + '&cursor=' + cursor + '&limit=50&q=' + encodeURIComponent(search.value.trim()))
     rows = rows.concat(result.items || [])
     cursor = result.nextCursor
-    count.textContent = result.needsReviewCount + ' need review · ' + result.total + ' in this view'
+    const progress = result.progress || { needsReview:result.needsReviewCount, total:result.total, reviewed:0, ignored:0, done:0 }
+    count.textContent = progress.needsReview + ' need review · ' + progress.reviewed + ' reviewed · ' + progress.ignored + ' ignored · ' + progress.done + ' done' +
+      (progress.other ? ' · ' + progress.other + ' merged/split' : '') + ' · ' + progress.total + ' total · ' + result.total + ' in this view'
     more.hidden = cursor == null
     renderList()
   } catch (error) { content.textContent = error.message }
+}
+
+openNewest.onclick = () => { if (rows[0]) openItem(rows[0].id) }
+selectNoise.onclick = () => {
+  selectionMode = !selectionMode
+  selectedNoise.clear()
+  batchStatus.textContent = selectionMode ? 'Select only obvious test or noise cards. Nothing is ignored until you confirm.' : ''
+  renderList()
+}
+ignoreSelected.onclick = async () => {
+  const chosen = rows.filter(item => selectedNoise.has(item.id))
+  if (!chosen.length || !confirm('Ignore ' + chosen.length + ' selected cards? Raw words and audio stay saved; restore them from Ignored any time.')) return
+  ignoreSelected.disabled = true
+  let ignored = 0
+  let failure = null
+  for (const item of chosen) {
+    batchStatus.textContent = 'Ignoring ' + (ignored + 1) + ' of ' + chosen.length + ' selected cards…'
+    try {
+      const latest = (await request('/spoken-work/' + encodeURIComponent(item.id))).item
+      if (!['unreviewed','needs_clarification'].includes(latest.reviewState)) throw new Error('This card changed; review it again.')
+      await request('/spoken-work/' + encodeURIComponent(item.id) + '/actions', {
+        method:'POST', headers:{ 'Content-Type':'application/json', 'If-Match':String(latest.revision) },
+        body:JSON.stringify({ action:'ignored', commandId:crypto.randomUUID() }),
+      })
+      ignored += 1
+    } catch (error) {
+      try {
+        const current = (await request('/spoken-work/' + encodeURIComponent(item.id))).item
+        if (current.reviewState === 'ignored') { ignored += 1; continue }
+      } catch {}
+      failure = item.title + ': ' + error.message
+      break
+    }
+  }
+  await loadList()
+  batchStatus.textContent = ignored + ' of ' + chosen.length + ' selected cards ignored.' + (failure ? ' Stopped at ' + failure + ' Check Ignored if the connection failed; later cards were not attempted.' : ' Restore them from Ignored any time.')
 }
 
 function sourceLinks(item) {
@@ -230,6 +301,7 @@ async function mergeChoices(item) {
 async function openItem(id) {
   selectedId = id
   more.hidden = true
+  updateBatchControls()
   content.textContent = 'Loading detail…'
   try {
     const result = await request('/spoken-work/' + encodeURIComponent(id))
@@ -428,6 +500,7 @@ filters.onclick = event => {
   const button = event.target.closest('[data-state]')
   if (!button) return
   state = button.dataset.state
+  if (state !== 'active') { selectionMode = false; selectedNoise.clear(); batchStatus.textContent = '' }
   for (const choice of filters.querySelectorAll('button')) choice.classList.toggle('selected', choice === button)
   loadList()
 }

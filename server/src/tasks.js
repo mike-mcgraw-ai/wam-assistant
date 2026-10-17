@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { createHash } from 'node:crypto'
 
 /**
  * One-off tasks.
@@ -67,7 +68,7 @@ export class Tasks {
   }
 
   #persist() {
-    if (!this.storePath) return
+    if (!this.storePath) return true
     try {
       mkdirSync(dirname(this.storePath), { recursive: true })
       writeFileSync(
@@ -82,8 +83,10 @@ export class Tasks {
           2,
         ),
       )
+      return true
     } catch (err) {
       console.warn(`[tasks] could not write store: ${err.message}`)
+      return false
     }
   }
 
@@ -199,6 +202,20 @@ export class Tasks {
           (b.weight === 'big' ? 1 : 0) - (a.weight === 'big' ? 1 : 0) ||
           (a.estimateMs ?? Infinity) - (b.estimateMs ?? Infinity),
       )
+  }
+
+  completed() {
+    return this.taskDefs()
+      .filter(task => this.done.has(task.id))
+      .map(task => ({
+        id: task.id,
+        label: task.label,
+        space: task.space ?? 'life',
+        doneAt: this.done.get(task.id).doneAt,
+        completedOn: this.done.get(task.id).completedOn ?? null,
+        notes: this.notes(task.id),
+      }))
+      .sort((left, right) => right.doneAt - left.doneAt)
   }
 
   /** Seeded notes from config first, then anything added since. */
@@ -318,12 +335,57 @@ export class Tasks {
     if (!this.#taskById(id)) {
       return { ok: false, error: `unknown task "${id}"` }
     }
+    if (done === this.done.has(id)) return { ok: true, unchanged: true }
     if (done) this.done.set(id, { doneAt: now })
     else this.done.delete(id)
     this.#log({ type: done ? 'task_done' : 'task_reopen', id, at: now })
     this.#persist()
     return { ok: true }
   }
+
+  previewCompletionDate(id, day, noteId, dayKeyOf, now = Date.now(), linkedEvidence = null) {
+    const task = this.#taskById(id)
+    const completion = this.done.get(id)
+    if (!task || !completion) return { ok: false, error: 'task is not completed' }
+    const note = linkedEvidence?.id === noteId
+      ? linkedEvidence
+      : this.notes(id).find(row => row.id === noteId && String(row.by).startsWith('listen'))
+    if (!note) return { ok: false, error: 'linked voice note not found' }
+    const validDay = /^\d{4}-\d{2}-\d{2}$/.test(day) && !Number.isNaN(Date.parse(`${day}T00:00:00Z`)) &&
+      new Date(`${day}T00:00:00Z`).toISOString().slice(0, 10) === day
+    if (!validDay) return { ok: false, error: 'invalid completion date' }
+    const beforeDay = completion.completedOn ?? dayKeyOf(completion.doneAt)
+    if (day > dayKeyOf(completion.doneAt) || day > dayKeyOf(now)) return { ok: false, error: 'date must be no later than recorded completion' }
+    const reviewKey = createHash('sha256').update(JSON.stringify([
+      id, day, noteId, note.text, completion.doneAt, completion.completedOn ?? null,
+    ])).digest('hex')
+    return { ok: true, taskId: id, label: task.label, note: { id: note.id, text: note.text }, beforeDay, proposedDay: day, expectedDoneAt: completion.doneAt, reviewKey }
+  }
+
+  correctCompletionDate(id, day, noteId, reviewKey, dayKeyOf, now = Date.now(), linkedEvidence = null) {
+    const preview = this.previewCompletionDate(id, day, noteId, dayKeyOf, now, linkedEvidence)
+    if (!preview.ok) return preview
+    if (reviewKey !== preview.reviewKey) return { ok: false, error: 'completion review changed; review again' }
+    const completion = this.done.get(id)
+    const previous = { ...completion }
+    completion.completedOn = day
+    completion.correctedAt = now
+    completion.correctionNoteId = noteId
+    if (!this.#persist()) {
+      this.done.set(id, previous)
+      return { ok: false, error: 'could not save completion date' }
+    }
+    this.#log({ type: 'task_completion_date_corrected', id, beforeDay: preview.beforeDay, completedOn: day, noteId, at: now, by: 'human' })
+    return { ok: true, taskId: id, completedOn: day }
+  }
+}
+
+export function linkedCompletionEvidence(items, taskId) {
+  return items
+    .filter(item => (item.reviewState === 'reviewed' || item.reviewState === 'done') &&
+      item.destinationRefs?.some(ref => (ref.kind === 'task' && ref.id === taskId) || ref.taskIds?.includes(taskId)))
+    .map(item => ({ id: `spoken:${item.id}`, text: item.cleanedTranscript || item.rawTranscript?.text || item.summary || '', by: 'spoken-review' }))
+    .filter(item => item.text)
 }
 
 /**
