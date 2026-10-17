@@ -238,9 +238,12 @@ That page would have caught every layout bug this month before it shipped.
   counting characters was never right. Point it at `config` and `metrics`
   instead of hardcoding.
 - **`/mirror`** on the hub is a live view of the current glasses frame
-  (`server/src/web/mirror.html`, fed by `POST /screen` from `paint()`). It
-  works today and is barely used. It mirrors the text frame, not the bitmap —
-  worth either upgrading to the bitmap or documenting what it is for.
+  (`server/src/web/mirror.html`, fed by `POST /screen` from `paint()`). On a
+  phone, open the hub's HTTPS `/mirror` URL and tap **Camera view** to put the
+  green text over the rear-camera scene. Tap **Stop camera** or leave the page
+  to release the camera. Camera video stays on the phone; the hub receives
+  only the existing glasses text frame. This is a text mirror, not a bitmap
+  capture of the glasses optics.
 
 ---
 

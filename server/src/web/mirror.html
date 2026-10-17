@@ -7,12 +7,36 @@
 <style>
   html,body{margin:0;height:100%;background:#000;overflow:hidden}
   body{display:flex;align-items:center;justify-content:center}
+  #camera{
+    position:fixed; inset:0; width:100%; height:100%;
+    object-fit:cover; background:#000;
+  }
+  #camera[hidden]{display:none}
+  #camera-toggle{
+    position:fixed; z-index:2; top:calc(env(safe-area-inset-top) + 14px);
+    right:calc(env(safe-area-inset-right) + 14px);
+    padding:10px 14px; border:1px solid #8fd9a8; border-radius:8px;
+    background:rgba(0,0,0,.82); color:#d8ffe1;
+    font:600 14px ui-sans-serif,system-ui,sans-serif;
+  }
+  #camera-toggle:disabled{opacity:.6}
+  #camera-status{
+    position:fixed; z-index:2; left:50%; bottom:calc(env(safe-area-inset-bottom) + 14px);
+    transform:translateX(-50%); margin:0; padding:8px 12px;
+    border-radius:8px; background:rgba(0,0,0,.82); color:#d8ffe1;
+    font:13px ui-sans-serif,system-ui,sans-serif; white-space:nowrap;
+  }
+  #camera-status[hidden]{display:none}
+  body.camera-on pre{
+    text-shadow:0 0 3px #000,0 0 7px #000,0 0 10px rgba(43,255,106,.65);
+  }
   /* 576x288 is the panel. The mirror keeps that ratio and scales to fit, so
      what you see on the iPad breaks lines exactly where the glasses do. */
   #panel{
     width:min(100vw, calc(100vh * 2));
     height:min(100vh, calc(100vw / 2));
     position:relative;
+    pointer-events:none;
   }
   pre{
     position:absolute; inset:0; margin:0;
@@ -44,6 +68,9 @@
   #keys.on{opacity:1}
 </style>
 
+<video id="camera" autoplay muted playsinline hidden></video>
+<button id="camera-toggle" type="button" aria-pressed="false">Camera view</button>
+<p id="camera-status" role="status" hidden>Open WAM on the glasses</p>
 <div id="panel"><pre id="screen">connecting…</pre><div id="stale"></div><p id="sent"></p><p id="keys"></p></div>
 
 <script>
@@ -56,7 +83,22 @@
  */
 const screen = document.getElementById('screen')
 const dot = document.getElementById('stale')
+const camera = document.getElementById('camera')
+const cameraToggle = document.getElementById('camera-toggle')
+const cameraStatus = document.getElementById('camera-status')
 let lastAt = 0
+let lastText = ''
+let freshFrame = false
+let cameraStream = null
+
+function showFrame() {
+  dot.className = freshFrame ? '' : 'off'
+  cameraStatus.hidden = !cameraStream || freshFrame
+  cameraStatus.textContent = lastAt ? 'Waiting for a live WAM screen' : 'Open WAM on the glasses'
+  screen.textContent = cameraStream && !freshFrame
+    ? ''
+    : lastAt ? lastText : 'No frame yet.\n\nOpen WAM on the glasses.'
+}
 
 async function tick() {
   try {
@@ -64,18 +106,72 @@ async function tick() {
     const frame = await res.json()
     if (frame.at && frame.at !== lastAt) {
       lastAt = frame.at
-      screen.textContent = frame.text || ''
+      lastText = frame.text || ''
     }
-    const fresh = frame.at && Date.now() - frame.at < 20000
-    dot.className = fresh ? '' : 'off'
-    if (!frame.at) screen.textContent = 'No frame yet.\n\nOpen WAM on the glasses.'
+    freshFrame = Boolean(frame.at && Date.now() - frame.at < 20000)
   } catch {
-    dot.className = 'off'
+    freshFrame = false
   }
+  showFrame()
 }
 
 tick()
 setInterval(tick, 1000)
+
+function stopCamera() {
+  if (cameraStream) cameraStream.getTracks().forEach(track => track.stop())
+  cameraStream = null
+  camera.srcObject = null
+  camera.hidden = true
+  document.body.classList.remove('camera-on')
+  cameraToggle.textContent = 'Camera view'
+  cameraToggle.setAttribute('aria-pressed', 'false')
+  showFrame()
+}
+
+cameraToggle.addEventListener('click', async () => {
+  if (cameraStream) {
+    stopCamera()
+    return
+  }
+  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+    note('Open the HTTPS mirror link to use the camera', true)
+    return
+  }
+  cameraToggle.disabled = true
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: { exact: 'environment' } },
+    })
+    if (document.hidden) {
+      stream.getTracks().forEach(track => track.stop())
+      return
+    }
+    cameraStream = stream
+    camera.srcObject = stream
+    camera.hidden = false
+    await camera.play()
+    if (document.hidden) {
+      stopCamera()
+      return
+    }
+    document.body.classList.add('camera-on')
+    cameraToggle.textContent = 'Stop camera'
+    cameraToggle.setAttribute('aria-pressed', 'true')
+    showFrame()
+  } catch (error) {
+    stopCamera()
+    note(error?.name === 'NotAllowedError' ? 'Allow camera access to use this view' : 'Camera unavailable', true)
+  } finally {
+    cameraToggle.disabled = false
+  }
+})
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) stopCamera()
+})
+window.addEventListener('pagehide', stopCamera)
 
 /*
  * Drive the glasses from the keyboard.

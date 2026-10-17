@@ -66,10 +66,10 @@ export function pad(text: string, width: number): string {
  * hardware. 44 is the working compromise: comfortable for ordinary mixed text,
  * and nothing here ever gets close to a line of solid capitals.
  */
-export function clipToWidth(text: string): string {
-  if (measure(text) <= USABLE_PX) return text
+export function clipToWidth(text: string, maxPx = USABLE_PX): string {
+  if (measure(text) <= maxPx) return text
   let out = text
-  while (out.length > 0 && measure(out) > USABLE_PX) out = out.slice(0, -1)
+  while (out.length > 0 && measure(out) > maxPx) out = out.slice(0, -1)
   return out
 }
 
@@ -181,6 +181,27 @@ export function countdown(remainingSeconds: number | null): string {
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}`
 }
 
+/** Exact active clock: `7:03`, or `1:07:03` once it passes an hour. */
+export function timerClock(totalSeconds: number): string {
+  const seconds = Math.max(0, Math.floor(totalSeconds))
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  const tail = String(seconds % 60).padStart(2, '0')
+  return hours > 0 ? `${hours}:${String(minutes).padStart(2, '0')}:${tail}` : `${minutes}:${tail}`
+}
+
+function activeItemClock(item: ChecklistItem): string {
+  const now = Date.now()
+  if (item.stepKind === 'wait' && item.endsAt !== null) {
+    const remainingSeconds = Math.ceil((item.endsAt - now) / 1000)
+    return remainingSeconds >= 0
+      ? timerClock(remainingSeconds)
+      : `+${timerClock(-remainingSeconds)}`
+  }
+  if (item.running && item.startedAt !== null) return timerClock((now - item.startedAt) / 1000)
+  return ''
+}
+
 /**
  * One row inside a checklist.
  *
@@ -197,10 +218,10 @@ export function checklistItemRow(item: ChecklistItem, selected: boolean): string
         ? '[>]'
         : '[ ]'
 
+  const liveClock = activeItemClock(item)
   let right = ''
   if (item.done) right = clockShort(item.at)
-  else if (item.stepKind === 'wait' && item.endsAt !== null) right = countdown(item.remainingSeconds)
-  else if (item.running) right = `${mins(item.elapsedMs)}...`
+  else if (liveClock) right = liveClock
   else if (item.stepKind === 'wait' && item.waitMinutes) right = `~${item.waitMinutes}m`
   else if (item.estimateMinutes) right = `~${item.estimateMinutes}m`
 
@@ -211,8 +232,9 @@ export function checklistItemRow(item: ChecklistItem, selected: boolean): string
     layout([
       { text: `${cursor}${box}`, at: 0 },
       { text: item.label, at: COL.label - 130 },
-      { text: right, end: COL.right },
+      { text: right, end: liveClock ? COL.timer : COL.right },
     ]),
+    COL.edge,
   )
 }
 
@@ -268,11 +290,14 @@ export const COL = {
   marker: 144,
   label: 178,
   right: 420,
+  /** Hardware-confirmed spare dashboard width reserved for an active clock. */
+  timer: 548,
+  edge: 560,
   taskLabel: 30,
   taskWhen: 360,
 }
 
-export function agendaRow(row: AgendaRow | DoneRow, running = false): string {
+export function agendaRow(row: AgendaRow | DoneRow, running = false, liveClock = ''): string {
   // Done, and staying visible. Its time is off the totals but the row remains
   // so an accidental click can be taken back and so the page shows the work
   // you actually did — a list that only shrinks is no evidence of anything.
@@ -307,7 +332,9 @@ export function agendaRow(row: AgendaRow | DoneRow, running = false): string {
       { text: marker, at: COL.marker },
       { text: label, at: COL.label },
       { text: work, end: COL.right },
+      ...(liveClock ? [{ text: liveClock, end: COL.timer }] : []),
     ]),
+    COL.edge,
   )
 }
 

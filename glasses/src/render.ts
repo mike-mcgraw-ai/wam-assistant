@@ -45,6 +45,7 @@ import {
   countdown,
   wrap,
   mins,
+  timerClock,
   bar,
   clip,
   clipToWidth,
@@ -259,6 +260,21 @@ function isRunning(state: UiState, row: AgendaRow | DoneRow): boolean {
   const run = state.snapshot?.checklists?.active.find(r => r.checklistId === row.choreId && !r.complete)
   const item = run?.items.find(i => i.id === row.stepId)
   return Boolean(item && !item.done && (item.running || (item.stepKind === 'wait' && item.endsAt !== null)))
+}
+
+/** Exact far-right timer for the active Home row, refreshed once a second. */
+function agendaLiveClock(state: UiState, row: AgendaRow | DoneRow): string {
+  if (row.kind !== 'do') return ''
+  const run = state.snapshot?.checklists?.active.find(r => r.checklistId === row.choreId && !r.complete)
+  const item = run?.items.find(i => i.id === row.stepId)
+  if (!item || item.done) return ''
+  const now = Date.now()
+  if (item.stepKind === 'wait' && item.endsAt !== null) {
+    const seconds = Math.ceil((item.endsAt - now) / 1000)
+    return seconds >= 0 ? timerClock(seconds) : `+${timerClock(-seconds)}`
+  }
+  if (item.running && item.startedAt !== null) return timerClock((now - item.startedAt) / 1000)
+  return ''
 }
 
 export function planRows(state: UiState): PlanRow[] {
@@ -1395,7 +1411,10 @@ function renderPlan(state: UiState, cursor: number): string {
       } else if (selected && r.kind === 'done' && state.armedTaskId === `undo:${r.runId}:${r.stepId}`) {
         lines.push(clipToWidth(`>[?] Undo ${r.step}?`))
       } else {
-        lines.push(clipToWidth(`${point}${agendaRow(row.row, isRunning(state, row.row))}`))
+        lines.push(clipToWidth(
+          `${point}${agendaRow(row.row, isRunning(state, row.row), agendaLiveClock(state, row.row))}`,
+          568,
+        ))
       }
     }
   }

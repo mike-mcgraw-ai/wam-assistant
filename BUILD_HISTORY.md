@@ -1,6 +1,6 @@
 # Device Build History
 
-WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 33 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
+WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 34 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
 
 | Face build | Attribution / status | Change |
 |---|---|---|
@@ -152,3 +152,10 @@ WAM used rapid numbered device builds for hardware testing. These entries are do
 | v0.155.0 | Codex (phase 3 source checkpoint; not packed) | Add approved-rule extraction with model fallback, explicit Project/Idea/Memory destinations, Start Day source links, and linked-destination update previews. |
 | v0.156.0 | Codex (phase 4 source checkpoint; not packed) | Add a compact Review count and one-card flow on the glasses with guarded actions, phone handoff, and deliberate voice amendments. |
 | v0.157.0 | Codex (review infrastructure integration release) | Ship phases 2–5 together as one private build, preserving each phase's separate Git and sanitized portfolio checkpoint. |
+| v0.158.0 | Codex (phone camera mirror; no glasses package) | Add an opt-in rear-camera view with the live WAM display overlaid, so the wearer can show another person what the glasses view looks like. |
+| v0.159.0 | Codex (server startup hotfix; no glasses package) | Restore the Listen-note distiller import required by the startup migration. |
+| v0.160.0 | Codex (in the v0.165.0 package; was `codex/task-completion-v160`) | Make one-off completion and its scoring date reviewable. |
+| v0.161.0 | Claude (in the v0.165.0 package; was `codex/scroll-focus-v161`) | Ring scrolling stays inside the content on every native-text screen. |
+| v0.162.0 | Codex (in the v0.165.0 package; server module unused by the hub; was `codex/voice-profile-v162`) |  |
+| v0.163.0 | Codex (in the v0.165.0 package; was `codex/spoken-backlog-v163`) | Make post-migration captures canonical and make the review backlog safe to process newest-first. |
+| v0.164.0 | Codex (full-width dashboard timers) | Give live timers their own useful right-side column instead of clipping a running value into an artificial ... suffix. |
