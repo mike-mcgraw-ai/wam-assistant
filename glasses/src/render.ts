@@ -2,6 +2,8 @@ import { config } from './config'
 import { ALL_CLEAR } from './art'
 import { renderPong, type PongState } from './pong'
 import { renderFontTest } from './fonttest'
+// The chat screen's words are shared with the WAM Home iPad app (v0.177.0).
+import * as chatText from './chattext.js'
 import { DISPLAY_PX, measure, USABLE_PX, WIDTH } from './metrics'
 
 /** Injected by vite.config.ts from app.json; falls back when run under Node. */
@@ -2040,49 +2042,17 @@ function renderCue(state: UiState, scrollBack = 0): string {
   return assemble(lines, config.maxChars, config.maxLines)
 }
 
-const ASSISTANT_PROVIDERS: Array<{ id: AssistantProvider; label: string }> = [
-  { id: 'chatgpt', label: 'ChatGPT' },
-  { id: 'claude', label: 'Claude' },
-]
+const ASSISTANT_PROVIDERS = chatText.PROVIDERS
 const ASSISTANT_NATIVE_ROWS = 10
 
-function assistantLinePrefix(provider: AssistantProvider, role: AssistantChat['messages'][number]['role']): string {
-  if (role === 'user') return 'Me: '
-  if (role === 'system') return '! '
-  return provider === 'claude' ? 'Claude: ' : 'GPT: '
-}
-
-function assistantPassageLines(provider: AssistantProvider, role: AssistantChat['messages'][number]['role'], text: string): string[] {
-  const prefix = assistantLinePrefix(provider, role)
-  const body = role === 'user' ? assistantRequestText(text) : assistantClean(text)
-  const lines = wrap(body, Math.max(8, LINE_CHARS - prefix.length))
-  return lines.map((line, index) => `${index === 0 ? prefix : ' '.repeat(prefix.length)}${line}`)
-}
-
 function assistantMessageLines(chat: AssistantChat | null, provider: AssistantProvider): string[] {
-  const lines: string[] = []
-  const messages = chat?.messages ?? []
-  const latestReply = assistantLatestReplyId(chat)
-  const pendingUser = messages.at(-1)?.role === 'user' && latestReply !== null
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (pendingUser && index === messages.length - 1) continue
-    const message = messages[index]
-    lines.push(...assistantPassageLines(provider, message.role, message.text))
-    if (pendingUser && message.id === latestReply) {
-      const pending = messages[messages.length - 1]
-      lines.push(...assistantPassageLines(provider, pending.role, pending.text))
-    }
-  }
-  return lines
+  return chatText.passages(chat, provider).flatMap(({ prefix, text }) => {
+    const lines = wrap(text, Math.max(8, LINE_CHARS - prefix.length))
+    return lines.map((line, index) => `${index === 0 ? prefix : ' '.repeat(prefix.length)}${line}`)
+  })
 }
 
-export function assistantLatestReplyId(chat: AssistantChat | null): string | null {
-  const messages = chat?.messages ?? []
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index].role === 'assistant') return messages[index].id
-  }
-  return null
-}
+export const assistantLatestReplyId = chatText.latestReplyId
 
 export function assistantViewAfterRefresh(
   view: Extract<View, { kind: 'assistant'; phase: 'chat' }>,
@@ -2093,67 +2063,29 @@ export function assistantViewAfterRefresh(
   view.replyId = replyId
 }
 
-function assistantClean(text: string): string {
-  return text.replace(/\s+/g, ' ').trim()
-}
-
-function assistantRequestText(text: string): string {
-  const cleaned = assistantClean(text)
-    .replace(
-      /^((ok|okay|alright|so|hey|hi|um|uh|please|thanks|thank you)[,.\s]+)+/i,
-      '',
-    )
-    .replace(/^(chat\s*gpt|chatgpt|claude|codex)[,:\s-]+/i, '')
-    .replace(/[,.\s]+(thanks|thank you)[.!?]?$/i, '')
-    .trim()
-  return cleaned || 'new voice request'
-}
-
-function assistantLabel(provider: AssistantProvider): string {
-  return provider === 'claude' ? 'Claude' : 'ChatGPT'
-}
-
 function assistantIsReady(state: UiState, provider: AssistantProvider, chat: AssistantChat | null): boolean | null {
   if (chat) return chat.ready
   const ready = state.snapshot?.assistant?.[provider]
   return typeof ready === 'boolean' ? ready : null
 }
 
-function latestAssistantMessage(chat: AssistantChat | null): AssistantChat['messages'][number] | null {
-  const messages = chat?.messages ?? []
-  return messages.length > 0 ? messages[messages.length - 1] : null
-}
-
 function assistantStatusBadge(state: UiState, provider: AssistantProvider, chat: AssistantChat | null): string {
-  if (chat?.busy) {
-    const status = chat.pending?.status === 'queued' ? 'QUEUED' : 'WORKING'
-    const queued = chat.queued ?? 0
-    return queued > 0 ? `${status} +${queued}` : status
-  }
-  const ready = assistantIsReady(state, provider, chat)
-  if (ready === true) return 'READY'
-  if (ready === false) return 'SETUP'
-  return 'CHECKING'
+  return chatText.statusBadge(chat, assistantIsReady(state, provider, chat))
 }
 
 function assistantNowText(state: UiState, provider: AssistantProvider, chat: AssistantChat | null): string {
-  if (chat?.busy) {
-    if (chat.pending?.status === 'queued') return 'reply queued for Mac'
-    if (chat.pending?.status === 'claimed') {
-      const who = assistantClean(chat.pending.claimedBy ?? '')
-      return who ? `${who} drafting reply` : 'drafting reply on Mac'
-    }
-    return 'reply in progress'
+  return chatText.nowText(chat, assistantIsReady(state, provider, chat))
+}
+
+function assistantTurn(state: UiState): chatText.TurnState {
+  return {
+    recording: state.assistantRecording,
+    reviewing: state.assistantReviewing,
+    sending: state.assistantSending,
+    error: state.error,
+    armed: state.view.kind === 'assistant' && state.view.phase === 'chat'
+      && state.armedTaskId === `assistant-record:${state.view.provider}`,
   }
-
-  const ready = assistantIsReady(state, provider, chat)
-  if (ready === false) return 'setup needed on Mac'
-
-  const latest = latestAssistantMessage(chat)
-  if (!latest) return ready === true ? 'waiting for your first ask' : 'loading thread'
-  if (latest.role === 'system') return assistantClean(latest.text) || 'last turn failed'
-  if (latest.role === 'user') return 'sent; waiting for reply'
-  return 'ready for next turn'
 }
 
 function assistantProviderRows(
@@ -2163,24 +2095,12 @@ function assistantProviderRows(
 ): string {
   const chat = state.assistantThreads[provider.id] ?? null
   const point = selected ? '>' : ' '
-  const status = assistantStatusBadge(state, provider.id, chat)
-  const label =
-    status.startsWith('READY') ? 'ready'
-      : status === 'SETUP' ? 'setup needed'
-        : status.startsWith('QUEUED') ? status.toLowerCase()
-          : status.startsWith('WORKING') ? status.toLowerCase()
-            : 'checking'
-  return clipToWidth(`${point}${provider.label}  ${label}`)
+  const status = chatText.pickerStatus(assistantStatusBadge(state, provider.id, chat))
+  return clipToWidth(`${point}${provider.label}  ${status}`)
 }
 
 function assistantFooter(state: UiState): string | null {
-  if (state.error) return state.error
-  if (state.assistantRecording) return 'click stops recording'
-  if (state.assistantReviewing) return 'click sends - back saves words'
-  if (state.assistantSending) return 'voice is being queued'
-  if (state.view.kind === 'assistant' && state.view.phase === 'chat'
-    && state.armedTaskId === `assistant-record:${state.view.provider}`) return 'click again to record'
-  return null
+  return chatText.footerText(assistantTurn(state))
 }
 
 export function assistantCaptureHasWords(session: CoachSessionSummary | null): boolean {
@@ -2205,7 +2125,7 @@ function assistantActiveContentLines(state: UiState, provider: AssistantProvider
 
   const lines = assistantMessageLines(state.assistantChat, provider)
   if (lines.length > 0) return lines
-  return [state.assistantChat?.busy ? assistantNowText(state, provider, state.assistantChat) : 'Ready for your next message.']
+  return [state.assistantChat?.busy ? assistantNowText(state, provider, state.assistantChat) : chatText.EMPTY_CHAT]
 }
 
 export function assistantScrollMax(state: UiState): number {
@@ -2226,22 +2146,12 @@ function renderAssistant(state: UiState): string {
     ASSISTANT_PROVIDERS.forEach((provider, index) => {
       lines.push(assistantProviderRows(state, provider, view.cursor === index))
     })
-    lines.push('', 'click to choose')
+    lines.push('', chatText.pickerHint())
     return assemble(lines, config.maxChars, config.maxLines)
   }
 
-  const label = assistantLabel(view.provider)
-  const status = state.assistantRecording
-    ? 'REC'
-    : state.assistantReviewing
-      ? 'REVIEW'
-      : state.assistantSending
-        ? 'SENDING'
-        : state.error
-          ? 'ERROR'
-          : state.armedTaskId === `assistant-record:${view.provider}`
-            ? 'ARMED'
-            : assistantStatusBadge(state, view.provider, state.assistantChat)
+  const label = chatText.label(view.provider)
+  const status = chatText.headerStatus(assistantTurn(state), assistantStatusBadge(state, view.provider, state.assistantChat))
   const footer = assistantFooter(state)
   const room = assistantContentRoom(state)
   const content = assistantActiveContentLines(state, view.provider)

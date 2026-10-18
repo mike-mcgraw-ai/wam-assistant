@@ -11,6 +11,8 @@
     "skipLibCheck": true,
     "isolatedModules": true,
     "noEmit": true,
+    "allowJs": true,
+    "checkJs": true,
     "types": []
   },
   "include": ["src"]

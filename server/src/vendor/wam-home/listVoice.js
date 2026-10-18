@@ -6,7 +6,7 @@
 export const itemKey = name => String(name ?? '').toLowerCase().replace(/\s+/g, ' ').trim()
 
 export function itemLabel(item) {
-  const name = item.name || item.text
+  const name = item.glanceLabel || item.name || item.text
   return `${item.qty > 1 ? `${item.qty} × ` : ''}${name}${item.unit ? ` (${item.unit})` : ''}`
 }
 

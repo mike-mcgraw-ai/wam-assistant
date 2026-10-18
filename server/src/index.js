@@ -393,6 +393,23 @@ function enqueueTriage() {
   })
 }
 
+function enqueueListLabels() {
+  const seen = new Set()
+  for (const item of inbox.active(300)) {
+    if (item.kind !== 'shopping' || item.list !== 'Groceries' || item.raw) continue
+    const name = String(item.name || item.text || '').trim()
+    const key = name.toLocaleLowerCase('en-US').replace(/\s+/g, ' ')
+    if (!key || seen.has(key) || inbox.labelFor(name)) continue
+    seen.add(key)
+    const hash = crypto.createHash('sha256').update(key).digest('hex').slice(0, 16)
+    jobs.create({
+      capability: 'list.label',
+      input: { name },
+      idempotencyKey: `list.label:${hash}:${new Date().toISOString().slice(0, 10)}`,
+    })
+  }
+}
+
 /** Apply a triage job's result back onto the inbox. */
 function applyTriageResult(result) {
   const rows = Array.isArray(result) ? result : result?.items
@@ -1537,6 +1554,19 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, screenFrame)
   }
 
+  // The chat screen's words, shared by the glasses and the WAM Home iPad app
+  // (v0.177.0). One file, read where the glasses build it from.
+  if (req.method === 'GET' && url.pathname === '/shared/chattext.js') {
+    try {
+      const js = readFileSync(join(HERE, '..', '..', 'glasses', 'src', 'chattext.js'))
+      cors(res)
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' })
+      return res.end(js)
+    } catch {
+      return json(res, 404, { error: 'not found' })
+    }
+  }
+
   if (req.method === 'GET' && url.pathname === '/mirror') {
     try {
       const html = readFileSync(join(WEB_DIR, 'mirror.html'))
@@ -2128,6 +2158,7 @@ const server = http.createServer(async (req, res) => {
         const result = applyListSpeech(listOps, { ...listDeps(), by, via: body.pcmBase64 ? 'kiosk-voice' : 'kiosk-text', changeId })
         applied.push(...result.applied)
         if (result.say) says.push(result.say)
+        enqueueListLabels()
       }
       const runIds = []
       const started = []
@@ -2191,18 +2222,23 @@ const server = http.createServer(async (req, res) => {
       }
       return json(res, 200, { ok: true, changeId, say: 'Cleared the list.', items: listing() })
     }
-    const one = url.pathname.match(/^\/list\/([^/]+)\/(done|undone|urgent|remove|edit)$/)
+    const one = url.pathname.match(/^\/list\/([^/]+)\/(done|undone|urgent|remove|edit|label)$/)
     if (one) {
       const id = decodeURIComponent(one[1])
       const item = inbox.items.get(id)
       if (!item) return json(res, 404, { ok: false, error: 'unknown item' })
       if (one[2] === 'edit' && (typeof body.name !== 'string' || !body.name.trim())) return json(res, 400, { ok: false, error: 'name required' })
+      if (one[2] === 'label') {
+        const result = inbox.classifyLabel(item.name || item.text, body.label)
+        return json(res, result.ok ? 200 : 400, { ...result, items: listing() })
+      }
       const changeId = `chg-${one[2]}-${Date.now()}`
       rememberChange(changeId)
       let say = ''
       if (one[2] === 'edit') {
         const result = inbox.update(id, { name: body.name }, { changeId })
         if (!result.ok) return json(res, 400, result)
+        enqueueListLabels()
         say = `Updated ${result.item.name}.`
       } else if (one[2] === 'done') {
         inbox.complete(id, true, { by, changeId })
@@ -2438,7 +2474,8 @@ const server = http.createServer(async (req, res) => {
   if (
     url.pathname === '/assistant/chat' ||
     url.pathname === '/assistant/chat/from-session' ||
-    url.pathname === '/assistant/queue-note'
+    url.pathname === '/assistant/queue-note' ||
+    url.pathname === '/assistant/transcribe'
   ) {
     if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
     const querySpace = cueSpace(url.searchParams.get('space'))
@@ -2450,10 +2487,23 @@ const server = http.createServer(async (req, res) => {
 
     let body = {}
     try {
-      const raw = await readBody(req)
+      // A spoken turn from the iPad is up to ~90 s of 16 kHz PCM, base64.
+      const raw = await readBody(req, url.pathname === '/assistant/transcribe' ? 4 * 1024 * 1024 : undefined)
       if (raw) body = JSON.parse(raw)
     } catch (err) {
       return json(res, 400, { error: `bad body: ${err.message}` })
+    }
+
+    // The iPad's spoken chat turn (v0.177.0): words only, nothing is sent. The
+    // iPad shows them for review first, as the glasses do, then posts the
+    // (possibly edited) text to /assistant/chat.
+    if (req.method === 'POST' && url.pathname === '/assistant/transcribe') {
+      let pcm
+      try { pcm = Buffer.from(String(body.pcmBase64 || '').replace(/^data:.*?;base64,/, ''), 'base64') } catch { return json(res, 400, { error: 'bad audio' }) }
+      if (pcm.length < 1600) return json(res, 200, { ok: true, text: '' })
+      const out = await transcribeClip(pcm, { sampleRate: body.sampleRate, channels: body.channels, clientId: body.clientId })
+      if (!out.ok) return json(res, 503, { ok: false, error: String(out.error || 'transcription failed') })
+      return json(res, 200, { ok: true, text: String(out.text || '').trim() })
     }
 
     if (req.method === 'POST' && url.pathname === '/assistant/chat/from-session') {
@@ -2610,6 +2660,7 @@ const server = http.createServer(async (req, res) => {
             coach.currentSession('life')?.id,
           ])
         : jobs.available(capability)
+      if (capability === 'list.label') available = available.filter(job => !inbox.labelFor(job.input?.name))
       if (capability === 'assistant.chat' && (provider === 'chatgpt' || provider === 'claude')) {
         available = available.filter(job => job.input?.provider === provider)
       }
@@ -2647,6 +2698,11 @@ const server = http.createServer(async (req, res) => {
       } else if (action === 'heartbeat') {
         result = jobs.heartbeat(id, agent, body.leaseSeconds)
       } else if (action === 'result') {
+        if (job?.capability === 'list.label') {
+          if (job.claimedBy !== agent) return json(res, 409, { error: 'not your job' })
+          const label = body.result?.label
+          if (typeof label !== 'string' || !label.trim() || label.length > 120) return json(res, 400, { error: 'invalid glance label' })
+        }
         if (job?.capability === 'spoken.extract') {
           if (job.claimedBy !== agent) return json(res, 409, { error: 'not your job' })
           const applied = applySpokenModelResult(spokenWork, job, body.result)
@@ -2661,6 +2717,7 @@ const server = http.createServer(async (req, res) => {
           const applied = applyTriageResult(body.result)
           console.log(`[triage] applied ${applied} item(s) from ${agent}`)
         }
+        if (result.ok && job?.capability === 'list.label') inbox.classifyLabel(job.input.name, body.result.label, { source: 'ai' })
         if (result.ok && job?.capability === 'coach.cue' && job.input?.finalNote) {
           const applied = applyFinalListenSummary(job, body.result)
           if (applied.ok) console.log(`[coach] applied final Listen summary from ${agent}`)
@@ -3073,6 +3130,8 @@ if (AI_CUE_NOTIFY) {
  */
 setInterval(enqueueTriage, 5 * 60_000)
 enqueueTriage()
+setInterval(enqueueListLabels, 5 * 60_000)
+setTimeout(enqueueListLabels, 60_000)
 
 /**
  * Optional: let the hub do triage itself by calling the API directly.

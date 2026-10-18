@@ -1,6 +1,6 @@
 # Device Build History
 
-WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 41 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
+WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 42 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
 
 | Face build | Attribution / status | Change |
 |---|---|---|
@@ -177,3 +177,5 @@ WAM used rapid numbered device builds for hardware testing. These entries are do
 | v0.180.0 | Codex (brief dismissal and 72-hour rain) | Make the morning doorway denser and remove the redundant Skip row. |
 | v0.181.0 | Codex (pause a routine item without rewriting history; server only) | Pause the routine checklist item from 2026-10-18 forward. |
 | v0.182.0 | Codex (full grocery names on every screen) | Restore the exact product names on the household grocery list and omit attribution across the kiosk, phone, Pad, and glasses list views so names get the available width. |
+| v0.183.0 | Claude (chat wording shared with the iPad; hub only) | The chat screen's words move into one module that the glasses and the iPad's new Chat tab both use. |
+| v0.184.0 | Codex (automatic grocery glance labels) | Keep exact product names while showing concise, correctable labels on every list surface. New products get an AI suggestion once, then reuse the saved classification. |

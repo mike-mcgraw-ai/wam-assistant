@@ -167,6 +167,7 @@ export interface InboxItem {
   note: string | null
   /** household list fields (v0.171.0); absent on raw captures and older hubs */
   name?: string
+  glanceLabel?: string | null
   qty?: number
   unit?: string | null
   urgent?: boolean

@@ -24,12 +24,15 @@ export const STATUS = {
   DONE: 'done',
 }
 
+export const listLabelKey = name => String(name || '').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US')
+
 export class Inbox {
   constructor({ storePath, logPath }) {
     this.storePath = storePath
     this.logPath = logPath
     /** @type {Map<string, any>} */
     this.items = new Map()
+    this.labels = new Map()
     /** Undo journal for list changes: newest last, the last 50 kept. */
     this.changes = []
     this.#load()
@@ -40,6 +43,9 @@ export class Inbox {
     try {
       const raw = JSON.parse(readFileSync(this.storePath, 'utf8'))
       for (const item of raw.items || []) this.items.set(item.id, item)
+      for (const [key, rule] of Object.entries(raw.labels || {})) {
+        if (rule && typeof rule.label === 'string') this.labels.set(key, rule)
+      }
       this.changes = Array.isArray(raw.changes) ? raw.changes : []
       console.log(`[inbox] restored ${this.items.size} items`)
     } catch (err) {
@@ -56,7 +62,7 @@ export class Inbox {
       const items = [...this.items.values()].filter(
         i => i.status !== STATUS.DONE || i.updatedAt > cutoff,
       )
-      writeFileSync(this.storePath, JSON.stringify({ items, changes: this.changes.slice(-50) }, null, 2))
+      writeFileSync(this.storePath, JSON.stringify({ items, labels: Object.fromEntries(this.labels), changes: this.changes.slice(-50) }, null, 2))
     } catch (err) {
       console.warn(`[inbox] could not write store: ${err.message}`)
     }
@@ -161,6 +167,24 @@ export class Inbox {
     return itemLabel(item)
   }
 
+  labelFor(name) {
+    return this.labels.get(listLabelKey(name))?.label || null
+  }
+
+  classifyLabel(name, label, { source = 'manual' } = {}) {
+    const key = listLabelKey(name)
+    const clean = String(label || '').trim().replace(/\s+/g, ' ')
+    if (!key || !clean || clean.length > 120) return { ok: false, error: 'invalid label' }
+    if (source === 'ai' && this.labels.get(key)?.source === 'manual') return { ok: false, error: 'manual label is fixed' }
+    this.labels.set(key, { label: clean, source: source === 'ai' ? 'ai' : 'manual', updatedAt: Date.now() })
+    for (const item of this.items.values()) {
+      if (listLabelKey(item.name || item.text) === key) item.glanceLabel = clean
+    }
+    this.#log({ type: 'label', key, label: clean, source, at: Date.now() })
+    this.#persist()
+    return { ok: true, label: clean }
+  }
+
   /** Remember an item's state once per change, so the change can be undone. */
   #remember(changeId, itemId, created = false) {
     let change = this.changes.find(c => c.id === changeId)
@@ -207,6 +231,7 @@ export class Inbox {
       clientId,
       text,
       name: text,
+      glanceLabel: this.labelFor(text),
       qty: qty || 1,
       unit: unit ?? null,
       urgent: Boolean(urgent),
@@ -237,7 +262,10 @@ export class Inbox {
     if (!item) return { ok: false, error: 'unknown item' }
     if (patch.name !== undefined && !String(patch.name).trim()) return { ok: false, error: 'empty name' }
     if (changeId) this.#remember(changeId, id)
-    if (patch.name !== undefined) item.name = item.text = String(patch.name).trim().slice(0, 120)
+    if (patch.name !== undefined) {
+      item.name = item.text = String(patch.name).trim().slice(0, 120)
+      item.glanceLabel = this.labelFor(item.name)
+    }
     if (patch.qty !== undefined) item.qty = Math.max(1, Math.min(99, Number(patch.qty) || 1))
     if (patch.unit !== undefined) item.unit = patch.unit
     if (patch.urgent !== undefined) item.urgent = Boolean(patch.urgent)

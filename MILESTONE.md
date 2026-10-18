@@ -1,8 +1,8 @@
-# Full-width list names
+# Grocery labels that learn once
 
-- Public version: `v0.41.0`
-- Face build: `0.182.0`
+- Public version: `v0.42.0`
+- Face build: `0.184.0`
 - Originally completed: `2026-10-18`
 - Sanitized and published: `2026-10-18`
 
-Long list items use the full display width and wrap across lines without an attribution suffix.
+Item-first list labels preserve exact product names. New names get one AI suggestion; corrections become deterministic rules for future matches.

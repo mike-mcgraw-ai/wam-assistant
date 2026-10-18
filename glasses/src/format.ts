@@ -484,7 +484,7 @@ export function inboxGroupRow(group: InboxGroup, selected: boolean): string {
  */
 export function inboxItemLines(item: InboxItem, selected: boolean, partIndex = 0, armed = false): string[] {
   // "2 × milk (gallon)", urgent marked — the same label the kiosk shows.
-  const name = item.parts?.[partIndex] ?? item.name ?? item.text
+  const name = item.glanceLabel ?? item.parts?.[partIndex] ?? item.name ?? item.text
   const label = `${item.qty && item.qty > 1 ? `${item.qty} x ` : ''}${name}${item.unit ? ` (${item.unit})` : ''}`
   const mark = armed ? '[?]' : item.urgent ? '[!]' : '[ ]'
   const prefix = `${selected ? '>' : ' '}${mark} `
