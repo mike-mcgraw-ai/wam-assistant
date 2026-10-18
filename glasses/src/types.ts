@@ -165,6 +165,11 @@ export interface InboxItem {
   list: string | null
   parts: string[] | null
   note: string | null
+  /** household list fields (v0.171.0); absent on raw captures and older hubs */
+  name?: string
+  qty?: number
+  unit?: string | null
+  urgent?: boolean
 }
 
 export interface InboxGroup {

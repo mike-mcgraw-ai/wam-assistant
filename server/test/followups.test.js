@@ -64,7 +64,7 @@ test('validation, idempotent create, delete, and persistence across a restart', 
     const retry = f.add({ label: 'Doctor appointment', dueDay: '2026-10-28', clientId: 'tap-1' })
     assert.equal(retry.duplicate, true)
     assert.equal(retry.followup.id, first.followup.id)
-    const other = f.add({ label: 'Vet checkup for Rex', dueDay: '2026-10-25' })
+    const other = f.add({ label: 'Vet checkup', dueDay: '2026-10-25' })
     f.remove(other.followup.id)
 
     const again = new Followups({ storePath })

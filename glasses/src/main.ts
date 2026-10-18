@@ -2274,7 +2274,11 @@ async function activate(): Promise<void> {
       return
     }
     if (row?.kind === 'notes') await openNotes()
-    else if (row?.kind === 'review') await openSpokenReview()
+    else if (row?.kind === 'groceries') {
+      state.view = { kind: 'inbox', group: 'Groceries', cursor: 0, returnTo: 'capture' }
+      state.scrollTop = 0
+      await paint()
+    } else if (row?.kind === 'review') await openSpokenReview()
     else await openAssistant()
     return
   }
@@ -2870,6 +2874,12 @@ async function activate(): Promise<void> {
   if (view.kind === 'inbox') {
     const item = inboxItems(state, view.group)[view.cursor]
     if (!item) return
+    // Arm, 3-2-1, confirm — the same check-off as Home (Mike, 2026-10-18).
+    const gate = confirmGate(`list:${item.id}`)
+    if (gate !== 'confirmed') {
+      if (gate === 'armed') await paint()
+      return
+    }
     // Optimistic removal would be wrong here: the list is shared, so the
     // server's view is the one that counts. Tick, then refetch.
     const ok = await completeInboxItem(item.id)
@@ -2956,6 +2966,12 @@ async function back(): Promise<void> {
     return
   }
 
+  if (state.view.kind === 'inbox' && state.view.returnTo === 'capture') {
+    state.view = { kind: 'capture', cursor: Math.max(0, captureRows().findIndex(row => row.kind === 'groceries')) }
+    await paint()
+    return
+  }
+
   if (state.view.kind === 'followupDate') {
     const { taskId } = state.view
     state.armedTaskId = null
@@ -2985,7 +3001,7 @@ async function back(): Promise<void> {
     } else if (state.view.returnTo === 'notes') {
       await openNotes()
       return
-    } else state.view = { kind: 'capture', cursor: 2 }
+    } else state.view = { kind: 'capture', cursor: Math.max(0, captureRows().findIndex(row => row.kind === 'review')) }
     await paint()
     return
   }

@@ -1,6 +1,6 @@
 # Device Build History
 
-WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 38 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
+WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 39 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
 
 | Face build | Attribution / status | Change |
 |---|---|---|
@@ -165,3 +165,4 @@ WAM used rapid numbered device builds for hardware testing. These entries are do
 | v0.168.0 | Codex (glasses prompt wording) | Remove repeated “click twice” instructions from the on-glasses task and Start Day prompts. |
 | v0.169.0 | Claude (ready for EvenHub package) | The 3-2-1 before a confirm counts no longer depends on the words "Click again". |
 | v0.170.0 | Claude (ready for EvenHub package) | Done-but-waiting tasks become dated follow-ups that show 7 days ahead. |
+| v0.171.0 | Claude (ready for EvenHub package) | Walk-up voice household list on the iPad, per docs/SHOPPING-LIST-SPEC.md. |

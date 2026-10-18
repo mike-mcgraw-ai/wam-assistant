@@ -68,7 +68,7 @@ test('an ended Listen session with words survives the 14-day cut; a wordless one
     const old = Date.now() - 30 * DAY
 
     const spoken = coach.startSession({ space: 'life', clientId: 'spoken', at: old }).session.id
-    coach.addSegment(spoken, { text: 'Call the vet about Rex', speaker: 'me', at: old + 10_000 })
+    coach.addSegment(spoken, { text: 'Call the vet about the dog', speaker: 'me', at: old + 10_000 })
     coach.endSession(spoken, old + 60_000)
 
     const empty = coach.startSession({ space: 'life', clientId: 'empty', at: old }).session.id

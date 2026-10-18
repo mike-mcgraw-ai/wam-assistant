@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { itemKey } from './listVoice.js'
 
 /**
  * The inbox.
@@ -29,6 +30,8 @@ export class Inbox {
     this.logPath = logPath
     /** @type {Map<string, any>} */
     this.items = new Map()
+    /** Undo journal for list changes: newest last, the last 50 kept. */
+    this.changes = []
     this.#load()
   }
 
@@ -37,6 +40,7 @@ export class Inbox {
     try {
       const raw = JSON.parse(readFileSync(this.storePath, 'utf8'))
       for (const item of raw.items || []) this.items.set(item.id, item)
+      this.changes = Array.isArray(raw.changes) ? raw.changes : []
       console.log(`[inbox] restored ${this.items.size} items`)
     } catch (err) {
       console.warn(`[inbox] could not read store: ${err.message}`)
@@ -52,7 +56,7 @@ export class Inbox {
       const items = [...this.items.values()].filter(
         i => i.status !== STATUS.DONE || i.updatedAt > cutoff,
       )
-      writeFileSync(this.storePath, JSON.stringify({ items }, null, 2))
+      writeFileSync(this.storePath, JSON.stringify({ items, changes: this.changes.slice(-50) }, null, 2))
     } catch (err) {
       console.warn(`[inbox] could not write store: ${err.message}`)
     }
@@ -118,7 +122,7 @@ export class Inbox {
   /** Everything still live, newest first — what the phone page shows back. */
   active(limit = 50) {
     return [...this.items.values()]
-      .filter(i => i.status !== STATUS.DONE)
+      .filter(i => i.status !== STATUS.DONE && !i.removedAt)
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, limit)
   }
@@ -138,14 +142,141 @@ export class Inbox {
     return { ok: true, item }
   }
 
-  complete(id, done = true) {
+  complete(id, done = true, { by = null, changeId = null } = {}) {
     const item = this.items.get(id)
     if (!item) return { ok: false, error: 'unknown item' }
-    item.status = done ? STATUS.DONE : STATUS.SORTED
+    if (changeId) this.#remember(changeId, id)
+    item.doneBy = done ? (by ? String(by).slice(0, 24) : item.doneBy ?? null) : null
+    item.status = done ? STATUS.DONE : (item.kind || item.list ? STATUS.SORTED : STATUS.RAW)
     item.updatedAt = Date.now()
     this.#log({ type: done ? 'done' : 'reopen', id, at: item.updatedAt })
     this.#persist()
     return { ok: true, item }
+  }
+
+  // ---- household list (v0.171.0, docs/SHOPPING-LIST-SPEC.md) ----------------
+
+  /** "2 × milk (gallon)" — what every surface shows for a list item. */
+  static label(item) {
+    const name = item.name || item.text
+    const count = item.qty && item.qty > 1 ? `${item.qty} × ` : ''
+    return `${count}${name}${item.unit ? ` (${item.unit})` : ''}`
+  }
+
+  /** Remember an item's state once per change, so the change can be undone. */
+  #remember(changeId, itemId, created = false) {
+    let change = this.changes.find(c => c.id === changeId)
+    if (!change) {
+      change = { id: changeId, at: Date.now(), before: [] }
+      this.changes.push(change)
+      if (this.changes.length > 50) this.changes.splice(0, this.changes.length - 50)
+    }
+    if (change.before.some(b => b.itemId === itemId)) return
+    const current = this.items.get(itemId)
+    change.before.push({ itemId, snapshot: created || !current ? null : JSON.parse(JSON.stringify(current)) })
+  }
+
+  /** The live item this name refers to (same item, same unit), if any. */
+  findLive(name, unit = null) {
+    const key = itemKey(name)
+    return [...this.items.values()].find(i =>
+      i.status !== STATUS.DONE && !i.removedAt && itemKey(i.name || i.text) === key && (i.unit ?? null) === (unit ?? null)) ?? null
+  }
+
+  /**
+   * Add a parsed list item, or merge it into the same item already on the
+   * list ("milk" twice is 2 × milk, never two rows).
+   */
+  addItem({ name, qty = 1, unit = null, urgent = false, raw = false, by = 'someone', via = 'kiosk', sourceText = '', list = 'Groceries', changeId = null, clientId = null, at = Date.now() } = {}) {
+    const text = String(name ?? '').trim().slice(0, 120)
+    if (!text) return { ok: false, error: 'empty' }
+    if (clientId) {
+      const existing = [...this.items.values()].find(i => i.clientId === clientId)
+      if (existing) return { ok: true, item: existing, duplicate: true }
+    }
+    const same = raw ? null : this.findLive(text, unit)
+    if (same) {
+      if (changeId) this.#remember(changeId, same.id)
+      same.qty = (same.qty || 1) + (qty || 1)
+      if (urgent) same.urgent = true
+      same.updatedAt = at
+      this.#log({ type: 'merge', id: same.id, qty: same.qty, by, at })
+      this.#persist()
+      return { ok: true, item: same, merged: true }
+    }
+    const item = {
+      id: randomUUID(),
+      clientId,
+      text,
+      name: text,
+      qty: qty || 1,
+      unit: unit ?? null,
+      urgent: Boolean(urgent),
+      raw: Boolean(raw),
+      taskId: null,
+      by: String(by).slice(0, 24),
+      via,
+      sourceText: String(sourceText).slice(0, 300),
+      createdAt: at,
+      updatedAt: at,
+      status: STATUS.SORTED,
+      kind: 'shopping',
+      list,
+      parts: null,
+      note: raw ? 'added as said' : null,
+      doneBy: null,
+      removedAt: null,
+    }
+    this.items.set(item.id, item)
+    if (changeId) this.#remember(changeId, item.id, true)
+    this.#log({ type: 'add', id: item.id, text, qty: item.qty, unit: item.unit, urgent: item.urgent, by, via, at })
+    this.#persist()
+    return { ok: true, item }
+  }
+
+  update(id, patch = {}, { changeId = null } = {}) {
+    const item = this.items.get(id)
+    if (!item) return { ok: false, error: 'unknown item' }
+    if (changeId) this.#remember(changeId, id)
+    if (patch.qty !== undefined) item.qty = Math.max(1, Math.min(99, Number(patch.qty) || 1))
+    if (patch.unit !== undefined) item.unit = patch.unit
+    if (patch.urgent !== undefined) item.urgent = Boolean(patch.urgent)
+    if (patch.taskId !== undefined) item.taskId = patch.taskId
+    if (patch.list !== undefined) item.list = String(patch.list).slice(0, 40)
+    item.updatedAt = Date.now()
+    this.#log({ type: 'update', id, patch, at: item.updatedAt })
+    this.#persist()
+    return { ok: true, item }
+  }
+
+  /** Removed is not deleted: the item leaves the list and keeps its history. */
+  remove(id, { by = null, changeId = null } = {}) {
+    const item = this.items.get(id)
+    if (!item) return { ok: false, error: 'unknown item' }
+    if (changeId) this.#remember(changeId, id)
+    item.removedAt = Date.now()
+    item.removedBy = by
+    item.updatedAt = item.removedAt
+    this.#log({ type: 'remove', id, by, at: item.removedAt })
+    this.#persist()
+    return { ok: true, item }
+  }
+
+  /** Put every item a change touched back the way it was. Newest change if no id. */
+  undo(changeId = null) {
+    const change = changeId ? this.changes.find(c => c.id === changeId) : this.changes[this.changes.length - 1]
+    if (!change) return { ok: false, error: 'nothing to undo' }
+    const restored = []
+    for (const { itemId, snapshot } of change.before) {
+      const current = this.items.get(itemId)
+      if (snapshot) this.items.set(itemId, snapshot)
+      else this.items.delete(itemId)
+      restored.push({ itemId, before: current ?? null, after: snapshot })
+    }
+    this.changes = this.changes.filter(c => c !== change)
+    this.#log({ type: 'undo', change: change.id, at: Date.now() })
+    this.#persist()
+    return { ok: true, changeId: change.id, restored }
   }
 
   /** Grouped for display: shopping together, tasks together, unsorted last. */

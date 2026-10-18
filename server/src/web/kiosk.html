@@ -1,0 +1,398 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="The List">
+<title>The List</title>
+<style>
+  :root{
+    --bg:#0f1214; --card:#181c20; --line:#262c31; --line2:#3a434b;
+    --ink:#eef1f3; --dim:#8b969e; --accent:#5ac8a0; --warn:#e0b341; --hot:#e86a5f;
+    color-scheme: dark;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  html,body{height:100%; margin:0}
+  body{
+    background:var(--bg); color:var(--ink); overflow:hidden;
+    font:20px/1.35 system-ui,-apple-system,"SF Pro Text",Segoe UI,Roboto,sans-serif;
+    padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    display:grid; grid-template-rows:auto 1fr auto; transition:opacity .6s;
+    user-select:none; -webkit-user-select:none;
+  }
+  body.idle{opacity:.35}
+  header{display:flex; align-items:baseline; gap:18px; padding:16px 26px 8px}
+  h1{margin:0; font-size:30px; letter-spacing:.02em}
+  .count{color:var(--dim); font-size:22px}
+  .spacer{flex:1}
+  .clock{color:var(--dim); font-size:22px; font-variant-numeric:tabular-nums}
+  .iconbtn{background:none; border:1px solid var(--line2); color:var(--dim); border-radius:12px;
+           font-size:18px; padding:8px 14px}
+  .iconbtn.armed{border-color:var(--hot); color:var(--hot)}
+
+  main{display:grid; grid-template-columns:2fr 1fr; gap:22px; padding:6px 26px 10px; min-height:0}
+  .pane{overflow-y:auto; min-height:0; padding-bottom:12px}
+  h2{font-size:15px; color:var(--dim); letter-spacing:.08em; text-transform:uppercase; margin:14px 0 6px}
+  .row{display:flex; align-items:center; gap:14px; padding:14px 16px; margin:6px 0;
+       background:var(--card); border:1px solid var(--line); border-radius:16px; min-height:64px}
+  .row .name{flex:1; font-size:26px}
+  .row .who{color:var(--dim); font-size:15px}
+  .row.done .name{text-decoration:line-through; color:var(--dim)}
+  .row.urgent{border-color:var(--hot)}
+  .row.raw .name{font-style:italic}
+  .check{width:36px; height:36px; border-radius:50%; border:2px solid var(--line2); flex:none}
+  .row.done .check{background:var(--accent); border-color:var(--accent)}
+  .flag{background:none; border:1px solid var(--line2); color:var(--dim); border-radius:12px;
+        font-size:16px; padding:10px 14px; flex:none}
+  .row.urgent .flag{border-color:var(--hot); color:var(--hot); font-weight:700}
+  .empty{color:var(--dim); font-size:22px; padding:24px 4px}
+  .today .row{min-height:52px; padding:10px 14px}
+  .today .row .name{font-size:20px}
+  .today .when{color:var(--warn); font-size:15px}
+
+  footer{border-top:1px solid var(--line); padding:12px 26px 16px; display:grid; gap:12px}
+  .strip{min-height:30px; display:flex; align-items:center; gap:14px; font-size:20px}
+  .strip .heard{color:var(--dim); font-style:italic; max-width:45%; overflow:hidden; white-space:nowrap; text-overflow:ellipsis}
+  .strip .said{flex:1}
+  .strip.bad .said{color:var(--hot)}
+  .undo{background:var(--card); border:1px solid var(--line2); color:var(--ink); border-radius:12px;
+        font-size:18px; padding:8px 18px}
+  .controls{display:grid; grid-template-columns:auto 1fr auto; gap:16px; align-items:center}
+  .chips{display:flex; gap:10px}
+  .chip{background:none; border:1px solid var(--line2); color:var(--dim); border-radius:99px;
+        padding:10px 20px; font-size:19px; font-weight:600}
+  .chip.on{background:var(--accent); border-color:var(--accent); color:#06231a}
+  .talk{height:84px; border-radius:42px; border:0; background:var(--accent); color:#06231a;
+        font-size:28px; font-weight:800; letter-spacing:.02em}
+  .talk.live{background:var(--hot); color:#fff; animation:pulse 1.2s infinite}
+  .talk.busy{background:var(--line2); color:var(--ink)}
+  @keyframes pulse{50%{filter:brightness(1.25)}}
+  .type{display:flex; gap:8px}
+  .type input{width:260px; background:var(--card); border:1px solid var(--line2); color:var(--ink);
+              border-radius:14px; padding:14px; font-size:19px}
+</style>
+
+<header>
+  <h1>The List</h1>
+  <span class="count" id="count"></span>
+  <span class="spacer"></span>
+  <button class="iconbtn" id="clear" type="button">Clear list</button>
+  <button class="iconbtn" id="mute" type="button">🔈 Voice on</button>
+  <span class="clock" id="clock">—</span>
+</header>
+
+<main>
+  <section class="pane" id="list"><div class="empty">Loading…</div></section>
+  <section class="pane today" id="today"></section>
+</main>
+
+<footer>
+  <div class="strip" id="strip"><span class="said">Tap Talk and say what you need — "milk, eggs and bread", "we got the eggs", "milk, urgent".</span></div>
+  <div class="controls">
+    <div class="chips" id="chips"></div>
+    <button class="talk" id="talk" type="button">● Talk</button>
+    <form class="type" id="typeForm" autocomplete="off">
+      <input id="typed" placeholder="or type it…" enterkeyhint="done" autocapitalize="sentences" spellcheck="false">
+    </form>
+  </div>
+</footer>
+
+<script>
+/*
+ * The List — walk-up household kiosk (v0.171.0, docs/SHOPPING-LIST-SPEC.md).
+ *
+ * Anyone walks up, taps Talk, says what they need, and the list is right.
+ * Mike's decisions (2026-10-18): one tap checks off (Undo for 15 s); the
+ * list plus today's tasks, nothing else personal; urgent items also become a
+ * Home task; the kiosk says a short confirmation out loud (mutable).
+ *
+ * The hub does the understanding (fixed rules, server/src/listVoice.js); this
+ * page records, shows, speaks and undoes.
+ */
+const $ = id => document.getElementById(id)
+const el = (tag, cls, txt) => { const n = document.createElement(tag); if (cls) n.className = cls; if (txt != null) n.textContent = txt; return n }
+const uid = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random())
+const TOKEN_KEY = 'opsboard.readToken'
+const MUTE_KEY = 'thelist.kiosk.muted'
+const WHO_MS = 2 * 60 * 1000
+const UNDO_MS = 15 * 1000
+const IDLE_MS = 3 * 60 * 1000
+const MAX_SECONDS = 20
+
+let token = ''; try { token = localStorage.getItem(TOKEN_KEY) || '' } catch {}
+let muted = false; try { muted = localStorage.getItem(MUTE_KEY) === '1' } catch {}
+let items = [], today = { tasks: [], followups: [] }, members = []
+let who = 'Household', whoUntil = 0
+let doneShown = new Map()       // id -> item, ticked here: shown struck for FADE_MS, then gone
+const FADE_MS = 30 * 1000
+let undoTimer = null
+
+async function api(path, body) {
+  const headers = token ? { Authorization: 'Bearer ' + token } : {}
+  if (body) headers['Content-Type'] = 'application/json'
+  const res = await fetch(path, { method: body ? 'POST' : 'GET', headers, body: body ? JSON.stringify(body) : undefined, cache: 'no-store' })
+  const out = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(out.error || ('hub ' + res.status))
+  return out
+}
+
+/* ---------- speech out ---------- */
+function speak(text) {
+  if (muted || !text || !window.speechSynthesis) return
+  try {
+    speechSynthesis.cancel()
+    const u = new SpeechSynthesisUtterance(text)
+    u.rate = 1.05
+    speechSynthesis.speak(u)
+  } catch {}
+}
+function paintMute() { $('mute').textContent = muted ? '🔇 Voice off' : '🔈 Voice on' }
+$('mute').onclick = () => { muted = !muted; try { localStorage.setItem(MUTE_KEY, muted ? '1' : '0') } catch {}; paintMute(); if (!muted) speak('Voice on.') }
+paintMute()
+
+/* ---------- feedback strip + undo ---------- */
+function feedback({ heard = '', say = '', changeId = null, bad = false }) {
+  const strip = $('strip')
+  strip.innerHTML = ''
+  strip.classList.toggle('bad', bad)
+  if (heard) strip.appendChild(el('span', 'heard', '“' + heard + '”'))
+  strip.appendChild(el('span', 'said', say))
+  clearTimeout(undoTimer)
+  if (changeId) {
+    const b = el('button', 'undo', 'Undo')
+    b.type = 'button'
+    b.onclick = async () => {
+      b.disabled = true
+      try {
+        const out = await api('/list/undo', { changeId, by: currentWho() })
+        doneShown.clear()
+        setItems(out.items)
+        feedback({ say: out.say || 'Undone.' })
+        speak(out.say || 'Undone.')
+      } catch (err) { feedback({ say: 'Could not undo: ' + err.message, bad: true }) }
+    }
+    strip.appendChild(b)
+    undoTimer = setTimeout(() => b.remove(), UNDO_MS)
+  }
+}
+
+/* ---------- who ---------- */
+function currentWho() { return Date.now() < whoUntil ? who : 'Household' }
+function renderChips() {
+  const host = $('chips'); host.innerHTML = ''
+  const active = currentWho()
+  for (const name of [...members, 'Household']) {
+    const c = el('button', 'chip' + (name === active ? ' on' : ''), name)
+    c.type = 'button'
+    c.onclick = () => { who = name; whoUntil = name === 'Household' ? 0 : Date.now() + WHO_MS; renderChips() }
+    host.appendChild(c)
+  }
+}
+setInterval(renderChips, 15000)
+
+/* ---------- list ---------- */
+function setItems(next) { if (Array.isArray(next)) items = next; renderList() }
+function renderList() {
+  const host = $('list'); host.innerHTML = ''
+  const live = items.filter(i => !doneShown.has(i.id))
+  const rows = [...live, ...doneShown.values()]
+  $('count').textContent = live.length ? live.length + (live.length === 1 ? ' item' : ' items') : ''
+  if (!rows.length) { host.appendChild(el('div', 'empty', 'The list is empty. Tap Talk to add something.')); return }
+  const groups = new Map()
+  for (const item of rows) {
+    const g = item.list || (item.kind ? 'Other' : 'Unsorted')
+    if (!groups.has(g)) groups.set(g, [])
+    groups.get(g).push(item)
+  }
+  const order = [...groups.keys()].sort((a, b) => (a === 'Groceries' ? -1 : b === 'Groceries' ? 1 : a.localeCompare(b)))
+  for (const name of order) {
+    host.appendChild(el('h2', null, name))
+    // Urgent first; otherwise newest first.
+    const list = groups.get(name).sort((a, b) => (b.urgent - a.urgent) || ((b.createdAt || 0) - (a.createdAt || 0)))
+    for (const item of list) host.appendChild(rowFor(item))
+  }
+}
+function rowFor(item) {
+  const done = doneShown.has(item.id)
+  const row = el('div', 'row' + (done ? ' done' : '') + (item.urgent ? ' urgent' : '') + (item.raw ? ' raw' : ''))
+  row.appendChild(el('span', 'check'))
+  const name = el('span', 'name', item.label || item.text)
+  row.appendChild(name)
+  if (item.by && item.by !== 'Household') row.appendChild(el('span', 'who', item.by))
+  const flag = el('button', 'flag', item.urgent ? 'URGENT' : '! urgent')
+  flag.type = 'button'
+  flag.onclick = async e => {
+    e.stopPropagation()
+    try {
+      const out = await api('/list/' + encodeURIComponent(item.id) + '/urgent', { urgent: !item.urgent, by: currentWho() })
+      setItems(out.items); feedback({ say: out.say, changeId: out.changeId }); speak(out.say)
+    } catch (err) { feedback({ say: 'Not saved: ' + err.message, bad: true }) }
+  }
+  if (!done) row.appendChild(flag)
+  // One tap checks off; Undo is in the strip for 15 seconds.
+  row.onclick = async () => {
+    if (done) return
+    doneShown.set(item.id, item); renderList()
+    setTimeout(() => { if (doneShown.delete(item.id)) renderList() }, FADE_MS)
+    try {
+      const out = await api('/list/' + encodeURIComponent(item.id) + '/done', { by: currentWho() })
+      setItems(out.items); feedback({ say: out.say, changeId: out.changeId }); speak(out.say)
+    } catch (err) {
+      doneShown.delete(item.id); renderList()
+      feedback({ say: 'Not saved: ' + err.message, bad: true })
+    }
+  }
+  return row
+}
+
+/* ---------- today (read-only) ---------- */
+function renderToday() {
+  const host = $('today'); host.innerHTML = ''
+  const tasks = today.tasks || [], follows = today.followups || []
+  host.appendChild(el('h2', null, 'Today'))
+  if (!tasks.length && !follows.length) { host.appendChild(el('div', 'empty', 'Nothing scheduled.')); return }
+  for (const t of tasks) host.appendChild(el('div', 'row', null)).appendChild(el('span', 'name', t.label))
+  for (const f of follows.filter(f => !f.done)) {
+    const row = el('div', 'row')
+    row.appendChild(el('span', 'name', f.label))
+    const d = f.daysLeft
+    row.appendChild(el('span', 'when', d === 0 ? 'today' : d === 1 ? 'tomorrow' : d < 0 ? (-d) + 'd late' : 'in ' + d + 'd'))
+    host.appendChild(row)
+  }
+}
+
+async function refresh() {
+  try {
+    const out = await api('/list')
+    items = out.items || []; today = out.today || today
+    for (const id of [...doneShown.keys()]) if (items.some(i => i.id === id)) doneShown.delete(id)
+    renderList(); renderToday()
+  } catch (err) { feedback({ say: 'Hub unreachable — ' + err.message, bad: true }) }
+}
+
+/* ---------- talk ---------- */
+let media = null, audioCtx = null, proc = null, chunks = [], recording = false, recStart = 0
+let heardSpeech = false, lastLoud = 0, recTimer = null
+
+function pcm16k(buffers, fromRate) {
+  let length = 0; for (const b of buffers) length += b.length
+  const flat = new Float32Array(length); let at = 0
+  for (const b of buffers) { flat.set(b, at); at += b.length }
+  const ratio = fromRate / 16000, out = new Int16Array(Math.floor(flat.length / ratio))
+  for (let i = 0; i < out.length; i += 1) {
+    const pos = i * ratio, low = Math.floor(pos), frac = pos - low
+    const a = flat[low] || 0, b = low + 1 < flat.length ? flat[low + 1] : a
+    const s = Math.max(-1, Math.min(1, a + (b - a) * frac))
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff
+  }
+  return out
+}
+function toBase64(int16) {
+  const bytes = new Uint8Array(int16.buffer, int16.byteOffset, int16.byteLength); let binary = ''
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000))
+  return btoa(binary)
+}
+
+async function startTalk() {
+  speak('') // iOS only lets the page speak after a tap; this tap unlocks it
+  try {
+    media = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } })
+  } catch (err) {
+    feedback({ say: 'No microphone: ' + (err && err.name === 'NotAllowedError' ? 'allow the mic for this page' : err.message), bad: true })
+    return
+  }
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+  if (audioCtx.state === 'suspended') await audioCtx.resume()
+  const src = audioCtx.createMediaStreamSource(media)
+  proc = audioCtx.createScriptProcessor(4096, 1, 1)
+  chunks = []; heardSpeech = false; lastLoud = Date.now()
+  proc.onaudioprocess = e => {
+    const data = e.inputBuffer.getChannelData(0)
+    chunks.push(new Float32Array(data))
+    let sum = 0; for (let i = 0; i < data.length; i += 1) sum += data[i] * data[i]
+    if (Math.sqrt(sum / data.length) > 0.02) { heardSpeech = true; lastLoud = Date.now() }
+  }
+  const mute = audioCtx.createGain(); mute.gain.value = 0
+  src.connect(proc); proc.connect(mute); mute.connect(audioCtx.destination)
+  recording = true; recStart = Date.now()
+  $('talk').classList.add('live'); $('talk').textContent = '■ Listening — tap to stop'
+  feedback({ say: 'Listening…' })
+  recTimer = setInterval(() => {
+    const now = Date.now()
+    // Stops itself: 1.5 s of quiet after speech, nothing at all for 6 s, or 20 s.
+    if ((heardSpeech && now - lastLoud > 1500) || (!heardSpeech && now - recStart > 6000) || now - recStart > MAX_SECONDS * 1000) stopTalk()
+  }, 200)
+}
+
+async function stopTalk() {
+  if (!recording) return
+  recording = false; clearInterval(recTimer)
+  const rate = audioCtx ? audioCtx.sampleRate : 48000
+  try { proc.disconnect() } catch {}
+  try { media.getTracks().forEach(t => t.stop()) } catch {}
+  try { await audioCtx.close() } catch {}
+  proc = null; media = null; audioCtx = null
+  const talk = $('talk')
+  talk.classList.remove('live'); talk.classList.add('busy'); talk.textContent = 'Working…'
+  const samples = pcm16k(chunks, rate); chunks = []
+  try {
+    if (!heardSpeech || samples.length < 8000) { feedback({ say: 'I did not hear anything.' }); speak('I did not hear anything.'); return }
+    const out = await api('/list/voice', { pcmBase64: toBase64(samples), sampleRate: 16000, channels: 1, by: currentWho(), clientId: uid() })
+    setItems(out.items)
+    feedback({ heard: out.heard, say: out.say, changeId: out.applied?.length && !out.applied.every(a => a.type === 'clear' || a.type === 'missing') ? out.changeId : null })
+    speak(out.say)
+    if (out.applied?.some(a => a.type === 'clear')) armClear()
+    refresh()
+  } catch (err) {
+    feedback({ say: 'Not saved: ' + err.message, bad: true })
+  } finally {
+    talk.classList.remove('busy'); talk.textContent = '● Talk'
+  }
+}
+$('talk').onclick = () => (recording ? stopTalk() : startTalk())
+
+$('typeForm').onsubmit = async e => {
+  e.preventDefault()
+  const text = $('typed').value.trim(); if (!text) return
+  $('typed').value = ''; $('typed').blur()
+  try {
+    const out = await api('/list/voice', { text, by: currentWho(), clientId: uid() })
+    setItems(out.items)
+    feedback({ heard: text, say: out.say, changeId: out.applied?.length ? out.changeId : null })
+    speak(out.say)
+    if (out.applied?.some(a => a.type === 'clear')) armClear()
+  } catch (err) { feedback({ say: 'Not saved: ' + err.message, bad: true }) }
+}
+
+/* ---------- clear (confirmed) ---------- */
+let clearTimer = null
+function armClear() {
+  const b = $('clear')
+  b.classList.add('armed'); b.textContent = 'Tap again to clear'
+  clearTimeout(clearTimer)
+  clearTimer = setTimeout(() => { b.classList.remove('armed'); b.textContent = 'Clear list' }, 6000)
+}
+$('clear').onclick = async () => {
+  const b = $('clear')
+  if (!b.classList.contains('armed')) { armClear(); return }
+  clearTimeout(clearTimer); b.classList.remove('armed'); b.textContent = 'Clear list'
+  try {
+    const out = await api('/list/clear', { confirm: true, by: currentWho() })
+    setItems(out.items); feedback({ say: out.say, changeId: out.changeId }); speak(out.say)
+  } catch (err) { feedback({ say: 'Not cleared: ' + err.message, bad: true }) }
+}
+
+/* ---------- always-on screen ---------- */
+let wakeLock = null
+async function keepAwake() { try { if ('wakeLock' in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null }) } } catch {} }
+let idleTimer = null
+function poke() { document.body.classList.remove('idle'); clearTimeout(idleTimer); idleTimer = setTimeout(() => document.body.classList.add('idle'), IDLE_MS); keepAwake() }
+for (const ev of ['pointerdown', 'keydown']) document.addEventListener(ev, poke, { capture: true })
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { refresh(); keepAwake() } })
+function tickClock() { $('clock').textContent = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) }
+
+api('/household').then(out => { members = out.members || []; renderChips() }).catch(() => renderChips())
+tickClock(); setInterval(tickClock, 10000)
+refresh(); setInterval(refresh, 10000)
+poke()
+</script>

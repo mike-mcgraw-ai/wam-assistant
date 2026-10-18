@@ -89,7 +89,8 @@ export type View =
   | { kind: 'timerReset'; done?: boolean; count?: number }
   | { kind: 'pong' }
   | { kind: 'fonttest'; page: number }
-  | { kind: 'inbox'; group: string; cursor: number }
+  /** `returnTo: 'capture'` when opened from the Capture menu's Groceries row */
+  | { kind: 'inbox'; group: string; cursor: number; returnTo?: 'capture' }
 
 export interface UiState {
   view: View
@@ -459,10 +460,16 @@ export interface SpokenReviewItem {
   provenance?: { humanEditedFields?: string[] }
 }
 
-export type CaptureRow = { kind: 'listen' } | { kind: 'notes' } | { kind: 'review' } | { kind: 'chat' }
+export type CaptureRow = { kind: 'listen' } | { kind: 'notes' } | { kind: 'groceries' } | { kind: 'review' } | { kind: 'chat' }
 
 export function captureRows(): CaptureRow[] {
-  return [{ kind: 'listen' }, { kind: 'notes' }, { kind: 'review' }, { kind: 'chat' }]
+  // Groceries stays in the menu even when empty (Mike, 2026-10-18).
+  return [{ kind: 'listen' }, { kind: 'notes' }, { kind: 'groceries' }, { kind: 'review' }, { kind: 'chat' }]
+}
+
+/** The household Groceries list as the glasses see it. */
+export function groceryItems(state: UiState): InboxItem[] {
+  return (state.snapshot?.inbox ?? []).find(group => group.name === 'Groceries')?.items ?? []
 }
 
 function renderCapture(state: UiState, cursor: number): string {
@@ -477,6 +484,10 @@ function renderCapture(state: UiState, cursor: number): string {
       lines.push(clipToWidth(`${point}Listen        ${live ? 'recording now' : 'arm mic'}`))
     } else if (row.kind === 'notes') {
       lines.push(clipToWidth(`${point}Notes         ${notes === 0 ? 'nothing saved' : `${notes} saved`}`))
+    } else if (row.kind === 'groceries') {
+      const items = groceryItems(state)
+      const urgent = items.filter(item => item.urgent).length
+      lines.push(clipToWidth(`${point}Groceries     ${items.length === 0 ? 'empty' : `${items.length} item${items.length === 1 ? '' : 's'}`}${urgent ? `  ${urgent} urgent` : ''}`))
     } else if (row.kind === 'review') {
       lines.push(clipToWidth(`${point}Review        ${state.spokenReview.total} to check`))
     } else {
@@ -490,6 +501,8 @@ function renderCapture(state: UiState, cursor: number): string {
     ? live ? 'click to stop recording' : 'click to arm mic'
     : selected === 'notes'
       ? 'click to read them back'
+      : selected === 'groceries'
+        ? 'click for the household list'
       : selected === 'review'
         ? 'click for one card at a time'
       : 'click to choose ChatGPT or Claude')
@@ -1330,7 +1343,9 @@ function renderInbox(state: UiState, group: string, cursor: number): string {
   const { start, end } = win
   const more = win.more ? `${win.atTop ? '' : '^'}${win.atEnd ? '' : 'v'}` : ''
   const lines = [header(state, `${clip(group, 14)} ${items.length}${more ? ` ${more}` : ''}`)]
-  for (let i = start; i < end; i += 1) lines.push(inboxItemRow(items[i], i === cursor))
+  for (let i = start; i < end; i += 1) {
+    lines.push(inboxItemRow(items[i], i === cursor, 0, i === cursor && state.armedTaskId === `list:${items[i].id}`))
+  }
 
 
   return assemble(lines, config.maxChars, config.maxLines)

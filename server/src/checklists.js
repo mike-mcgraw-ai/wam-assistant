@@ -391,6 +391,9 @@ export class Checklists {
     const byId = new Map()
     const unmatched = []
     const unmatchedSources = []
+    // Errands ("two gallons of milk from the store") go to the household list
+    // at commit rather than becoming Home tasks (Mike, 2026-10-18).
+    const unmatchedErrands = []
     const fragments = []
 
     for (const rawClause of dayClauses(transcript)) {
@@ -409,6 +412,7 @@ export class Checklists {
         }
         unmatched.push(label)
         unmatchedSources.push(rawClause)
+        unmatchedErrands.push(isErrandClause(rawClause))
         continue
       }
 
@@ -427,12 +431,12 @@ export class Checklists {
       }
     }
 
-    return { transcript, matches: [...byId.values()], unmatched, unmatchedSources, fragments }
+    return { transcript, matches: [...byId.values()], unmatched, unmatchedSources, unmatchedErrands, fragments }
   }
 
   /** Stage a spoken walk for review without changing any checklist or task. */
   draftDay(text, space = 'life', sessionId = randomUUID(), now = Date.now(), openTaskLabels = []) {
-    const { transcript, matches, unmatched, unmatchedSources, fragments } = this.dayIntent(text, space)
+    const { transcript, matches, unmatched, unmatchedSources, unmatchedErrands, fragments } = this.dayIntent(text, space)
     if (!transcript) return { ok: false, error: 'nothing heard' }
 
     const items = [
@@ -456,6 +460,7 @@ export class Checklists {
         note: '',
         source: unmatchedSources[index],
         sourceSessionIds: [sessionId],
+        ...(unmatchedErrands?.[index] ? { errand: true } : {}),
       })),
       ...fragments.map(({ label, source }, index) => ({
         id: `task:${sessionId}:${unmatched.length + index}`,
@@ -715,12 +720,14 @@ export class Checklists {
   }
 
   /** Add one-off tasks to today's commitments (from a Start Day walk). */
-  commitTasks(space = 'life', taskIds = [], now = Date.now()) {
+  commitTasks(space = 'life', taskIds = [], now = Date.now(), { startDay = true } = {}) {
     const ids = taskIds.filter(id => typeof id === 'string' && id)
     if (!ids.length) return { ok: true, taskIds: [] }
     const day = this.dayKey(now)
     const key = `${space}:${day}`
-    const prior = this.dayStarts.get(key) ?? { day, space, startedAt: now, checklistIds: [], runIds: [], transcript: '' }
+    // startDay: false pins tasks to today without counting as the morning
+    // walk (an urgent list item before Start Day must not hide Start Day).
+    const prior = this.dayStarts.get(key) ?? { day, space, startedAt: startDay ? now : null, checklistIds: [], runIds: [], transcript: '' }
     const saved = { ...prior, updatedAt: now, taskIds: [...new Set([...(prior.taskIds ?? []), ...ids])] }
     this.dayStarts.set(key, saved)
     this.#log({ type: 'day_commit_tasks', day, space, taskIds: ids, at: now })

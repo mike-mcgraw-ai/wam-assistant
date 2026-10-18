@@ -185,9 +185,11 @@ export const resetActiveTimers = () => post('/timers/reset', {})
  */
 export async function completeInboxItem(id: string): Promise<boolean> {
   try {
-    const res = await fetch(`${config.serverUrl}/inbox/${encodeURIComponent(id)}/done`, {
+    // The household list route: it also closes an urgent item's Home task.
+    const res = await fetch(`${config.serverUrl}/list/${encodeURIComponent(id)}/done`, {
       method: 'POST',
-      headers: authHeaders(),
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ by: 'glasses' }),
       signal: AbortSignal.timeout(config.timeoutMs),
     })
     return res.ok

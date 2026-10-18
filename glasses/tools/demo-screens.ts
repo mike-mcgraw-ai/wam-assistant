@@ -104,6 +104,9 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
       { id:'i1', text:'grab milk and cat food', by:'sam', createdAt:now, status:'sorted', kind:'shopping', list:'Groceries', parts:['milk'], note:null },
       { id:'i2', text:'grab milk and cat food', by:'sam', createdAt:now, status:'sorted', kind:'shopping', list:'Groceries', parts:['cat food'], note:null },
       { id:'i3', text:'coffee filters', by:'sam', createdAt:now, status:'sorted', kind:'shopping', list:'Groceries', parts:['coffee filters'], note:null },
+      // v0.171.0 kiosk items: quantity, unit, urgent.
+      { id:'i6', text:'milk', name:'milk', qty:2, unit:'gallon', urgent:true, by:'Alex', createdAt:now, status:'sorted', kind:'shopping', list:'Groceries', parts:null, note:null },
+      { id:'i7', text:'bread', name:'bread', qty:2, unit:'loaf', by:'Sam', createdAt:now, status:'sorted', kind:'shopping', list:'Groceries', parts:null, note:null },
     ]},
     { name: 'Home', items: [
       { id:'i4', text:'call the plumber about the upstairs sink', by:'mike', createdAt:now, status:'sorted', kind:'task', list:'Home', parts:['call the plumber'], note:'upstairs sink' },
@@ -480,11 +483,13 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
     audio: { state: 'available' },
   }
   const spokenReview = { items: [reviewItem], total: 1, loading: false, error: null }
-  add('Capture — Review count', render({ ...withPlan, space: 'life', spokenReview, view: { kind: 'capture', cursor: 2 } }))
+  add('Capture — Groceries row', render({ ...withPlan, space: 'life', spokenReview, view: { kind: 'capture', cursor: 2 } }))
+  add('Capture — Review count', render({ ...withPlan, space: 'life', spokenReview, view: { kind: 'capture', cursor: 3 } }))
+  add('Groceries — armed check-off (3-2-1 then confirm)', render({ ...withPlan, space: 'life', armedTaskId: 'list:i6', view: { kind: 'inbox', group: 'Groceries', cursor: 3, returnTo: 'capture' } }))
   // v0.170.0 dated follow-ups: on Home from 7 days before their day.
   const followups = [
     { id: 'fu-doc', label: 'Doctor appointment', dueDay: '2026-10-16', daysLeft: 5, taskId: 'text-my-doctor', done: false, doneAt: null },
-    { id: 'fu-vet', label: "Vet: checkup", dueDay: '2026-10-11', daysLeft: 0, taskId: 'call-the-vet', done: false, doneAt: null },
+    { id: 'fu-vet', label: 'Vet checkup', dueDay: '2026-10-11', daysLeft: 0, taskId: 'call-the-vet', done: false, doneAt: null },
     { id: 'fu-lib', label: 'Return library books', dueDay: '2026-10-09', daysLeft: -2, taskId: null, done: false, doneAt: null },
   ]
   const withFollowups = { ...withPlan, space: 'life' as const, plan: { ...withPlan.plan, followups } }

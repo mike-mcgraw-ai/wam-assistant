@@ -9,6 +9,8 @@ import { Store } from './state.js'
 import { Checklists } from './checklists.js'
 import { agenda, planBlock, reach } from './plan.js'
 import { Inbox } from './inbox.js'
+import { parseListSpeech } from './listVoice.js'
+import { applyListSpeech, relinkAfterUndo } from './householdList.js'
 import { Tasks, matchOpenTask, linkedCompletionEvidence } from './tasks.js'
 import { Followups, daysBetween, reminderText } from './followups.js'
 import { Triage, sweepInbox } from './triage.js'
@@ -115,6 +117,47 @@ const inbox = new Inbox({
   storePath: join(DATA_DIR, 'inbox.json'),
   logPath: join(DATA_DIR, 'inbox.jsonl'),
 })
+
+// ---- household list (v0.171.0, docs/SHOPPING-LIST-SPEC.md) ----------------
+// An urgent list item is also a Home task; finishing either finishes both.
+// Pinned to today without starting the day, so Start Day still shows.
+function openUrgentTask(item) {
+  const created = tasks.addTask({
+    label: `Get ${Inbox.label(item)} (urgent)`.slice(0, 80),
+    space: 'life',
+    window: 'anytime',
+    by: 'list',
+    clientId: `list-urgent:${item.id}`,
+  })
+  if (!created.ok) return null
+  // Flagged urgent again after being un-flagged: the same task comes back open.
+  if (created.duplicate) tasks.complete(created.task.id, false)
+  checklists.commitTasks('life', [created.task.id], Date.now(), { startDay: false })
+  return created.task.id
+}
+function closeTask(taskId) {
+  try { tasks.complete(taskId, true) } catch (err) { console.warn(`[list] close task: ${err.message}`) }
+}
+/** A Home task that was an urgent list item: checking it off checks the item off. */
+function closeLinkedListItem(taskId, by = 'home') {
+  for (const item of inbox.active(500)) {
+    if (item.taskId === taskId) inbox.complete(item.id, true, { by })
+  }
+}
+function reopenTask(taskId) {
+  try { tasks.complete(taskId, false) } catch (err) { console.warn(`[list] reopen task: ${err.message}`) }
+}
+const listDeps = () => ({ inbox, openUrgentTask, closeTask, reopenTask })
+/** Names for the kiosk chips. Private data (server/data/household.json), never in git. */
+function householdMembers() {
+  try {
+    const raw = JSON.parse(readFileSync(join(DATA_DIR, 'household.json'), 'utf8'))
+    return Array.isArray(raw.members) ? raw.members.map(name => String(name).slice(0, 24)).filter(Boolean) : []
+  } catch {
+    return []
+  }
+}
+const listReplies = new Map()
 const triage = new Triage()
 
 let probeText = ''
@@ -1577,7 +1620,9 @@ const server = http.createServer(async (req, res) => {
   // to compress.
   if (req.method === 'GET' && url.pathname === '/pad') {
     try {
-      const html = readFileSync(join(WEB_DIR, 'pad.html'))
+      // ?kiosk=1 is the walk-up household list (v0.171.0); plain /pad is unchanged.
+      const page = url.searchParams.get('kiosk') === '1' ? 'kiosk.html' : 'pad.html'
+      const html = readFileSync(join(WEB_DIR, page))
       cors(res)
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
       return res.end(html)
@@ -1924,6 +1969,112 @@ const server = http.createServer(async (req, res) => {
    * sorts it later. The audio is transcribed and dropped; only the transcript
    * is kept, and neither ever leaves the machine.
    */
+  // ---- household list (v0.171.0) -----------------------------------------
+  if (req.method === 'GET' && url.pathname === '/household') {
+    return json(res, 200, { ok: true, members: householdMembers(), fallback: 'Household' })
+  }
+  if (req.method === 'GET' && url.pathname === '/list') {
+    const today = checklists.dayKey()
+    const committed = new Set(checklists.committedTaskIds('life'))
+    const todayTasks = tasks.list()
+      .filter(task => task.space !== 'ops' && committed.has(task.id))
+      .map(task => ({ id: task.id, label: task.label }))
+    const items = inbox.active(300).map(item => ({ ...item, label: Inbox.label(item) }))
+    return json(res, 200, { ok: true, items, today: { tasks: todayTasks, followups: followups.visible(today, 'life') } })
+  }
+  if (req.method === 'POST' && url.pathname.startsWith('/list/')) {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    let body = {}
+    try { body = JSON.parse((await readBody(req, 4 * 1024 * 1024)) || '{}') } catch (err) { return json(res, 400, { error: `bad body: ${err.message}` }) }
+    const by = String(body.by || 'Household').slice(0, 24)
+    const listing = () => inbox.active(300).map(item => ({ ...item, label: Inbox.label(item) }))
+
+    if (url.pathname === '/list/voice') {
+      // A retried utterance returns the first answer instead of applying twice.
+      if (body.clientId && listReplies.has(body.clientId)) return json(res, 200, listReplies.get(body.clientId))
+      let heard = String(body.text || '').trim()
+      if (!heard && body.pcmBase64) {
+        let pcm
+        try { pcm = Buffer.from(String(body.pcmBase64).replace(/^data:.*?;base64,/, ''), 'base64') } catch { return json(res, 400, { error: 'bad audio' }) }
+        if (pcm.length < 1600) return json(res, 200, { ok: true, heard: '', applied: [], say: 'I did not hear anything.', items: listing() })
+        // The whole clip in one pass: chunk transcripts mishear (SPOKEN-WORK-DECISIONS §4).
+        const out = await transcribeClip(pcm, { sampleRate: body.sampleRate, channels: body.channels, clientId: body.clientId })
+        if (!out.ok) return json(res, 503, { ok: false, error: String(out.error || 'transcription failed') })
+        heard = String(out.text || '').trim()
+      }
+      if (!heard) return json(res, 200, { ok: true, heard: '', applied: [], say: 'I did not hear anything.', items: listing() })
+
+      // "Remind me to call the plumber" is a task, as on every other surface.
+      const taskLabel = parseTaskCommand(heard)
+      let reply
+      if (taskLabel) {
+        const created = tasks.addTask({ label: taskLabel, space: 'life', by, clientId: body.clientId ? `list-task:${body.clientId}` : undefined })
+        reply = { ok: created.ok, heard, applied: [], task: created.task, say: created.ok ? `Added the task: ${taskLabel.charAt(0).toUpperCase()}${taskLabel.slice(1)}.` : 'Could not add that task.', items: listing() }
+      } else {
+        const result = applyListSpeech(parseListSpeech(heard, inbox.active(300)), { ...listDeps(), by, via: body.pcmBase64 ? 'kiosk-voice' : 'kiosk-text' })
+        reply = { ok: true, heard, ...result, items: listing() }
+      }
+      if (body.clientId) {
+        listReplies.set(body.clientId, reply)
+        if (listReplies.size > 200) listReplies.delete(listReplies.keys().next().value)
+      }
+      return json(res, 200, reply)
+    }
+    if (url.pathname === '/list/undo') {
+      // A kiosk Undo names its own change, so a change someone else made in
+      // between is never the one undone.
+      if (body.changeId) {
+        const undone = inbox.undo(String(body.changeId))
+        if (!undone.ok) return json(res, 200, { ok: false, say: 'Nothing to undo.', items: listing() })
+        relinkAfterUndo(undone.restored, { closeTask, reopenTask })
+        return json(res, 200, { ok: true, say: 'Undone.', items: listing() })
+      }
+      const result = applyListSpeech([{ type: 'undo' }], { ...listDeps(), by })
+      return json(res, 200, { ok: true, ...result, items: listing() })
+    }
+    if (url.pathname === '/list/clear') {
+      if (body.confirm !== true) return json(res, 400, { ok: false, error: 'clear needs confirm: true' })
+      const changeId = `chg-clear-${Date.now()}`
+      for (const item of inbox.active(500)) {
+        inbox.complete(item.id, true, { by, changeId })
+        if (item.taskId) closeTask(item.taskId)
+      }
+      return json(res, 200, { ok: true, changeId, say: 'Cleared the list.', items: listing() })
+    }
+    const one = url.pathname.match(/^\/list\/([^/]+)\/(done|undone|urgent|remove)$/)
+    if (one) {
+      const id = decodeURIComponent(one[1])
+      const item = inbox.items.get(id)
+      if (!item) return json(res, 404, { ok: false, error: 'unknown item' })
+      const changeId = `chg-${one[2]}-${Date.now()}`
+      let say = ''
+      if (one[2] === 'done') {
+        inbox.complete(id, true, { by, changeId })
+        if (item.taskId) closeTask(item.taskId)
+        say = `Checked off ${item.name || item.text}.`
+      } else if (one[2] === 'undone') {
+        inbox.complete(id, false, { by, changeId })
+      } else if (one[2] === 'remove') {
+        inbox.remove(id, { by, changeId })
+        if (item.taskId) closeTask(item.taskId)
+        say = `Removed ${item.name || item.text}.`
+      } else {
+        const urgent = body.urgent !== false
+        inbox.update(id, { urgent }, { changeId })
+        if (urgent && !item.taskId) {
+          const taskId = openUrgentTask(item)
+          if (taskId) inbox.update(id, { taskId }, { changeId })
+        } else if (!urgent && item.taskId) {
+          closeTask(item.taskId)
+          inbox.update(id, { taskId: null }, { changeId })
+        }
+        say = urgent ? `${item.name || item.text} is urgent.` : `${item.name || item.text} is not urgent.`
+      }
+      return json(res, 200, { ok: true, changeId, say: say.charAt(0).toUpperCase() + say.slice(1), items: listing() })
+    }
+    return json(res, 404, { error: 'not found' })
+  }
+
   if (req.method === 'POST' && url.pathname === '/capture/audio') {
     let body
     try {
@@ -2034,6 +2185,7 @@ const server = http.createServer(async (req, res) => {
       })
       if (!added.ok) return json(res, 400, added)
       const done = tasks.complete(taskId, true)
+      if (done.ok) closeLinkedListItem(taskId)
       return json(res, 200, { ...added, taskDone: done.ok, tasks: tasks.list(), items: listing() })
     }
 
@@ -2070,6 +2222,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     const result = tasks.complete(id, action === 'done')
+    if (result.ok && action === 'done') closeLinkedListItem(id)
     return json(res, result.ok ? 200 : 404, { ...result, tasks: tasks.list() })
   }
 
@@ -2603,6 +2756,15 @@ const server = http.createServer(async (req, res) => {
       const prepared = checklists.prepareDayDraft(space)
       result = prepared
       if (prepared.ok) {
+        // Errands go onto the household list, not Home (Mike, 2026-10-18);
+        // saying "urgent" with one still makes it a Home task via the list.
+        const errands = prepared.tasks.filter(item => item.errand)
+        if (errands.length) {
+          prepared.tasks = prepared.tasks.filter(item => !item.errand)
+          for (const errand of errands) {
+            applyListSpeech(parseListSpeech(errand.source || errand.label, inbox.active(300)), { ...listDeps(), by: 'Start Day', via: 'start-day' })
+          }
+        }
         const open = tasks.list().filter(task => task.space === space)
         const resolved = prepared.tasks.map((item, index) => {
           const existing = matchOpenTask(item.label, open)

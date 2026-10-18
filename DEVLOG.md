@@ -42,3 +42,4 @@ These are the real completion dates of private device builds. The sanitized port
 | v0.36.0 | 2026-10-17 | 0.168.0 | **Fewer words on confirm prompts:** Repeated click instructions removed from on-glasses prompts. |
 | v0.37.0 | 2026-10-17 | 0.169.0 | **A countdown on every confirm:** The armed row itself counts down, so no prompt wording can drop it. |
 | v0.38.0 | 2026-10-17 | 0.170.0 | **Dated follow-ups:** Done-but-waiting tasks become follow-ups shown a week ahead, checked off in one click, with phone reminders. |
+| v0.39.0 | 2026-10-18 | 0.171.0 | **A household list you can talk to:** A walk-up tablet kiosk where anyone in the house adds, checks off or flags items by voice: fixed-rule parsing with quantities, merging and undo, urgent items that become Home tasks, and a Groceries row on the glasses. |
