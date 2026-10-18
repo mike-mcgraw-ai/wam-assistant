@@ -9,8 +9,10 @@ import { Store } from './state.js'
 import { Checklists } from './checklists.js'
 import { agenda, planBlock, reach } from './plan.js'
 import { Inbox } from './inbox.js'
-import { parseListSpeech } from './listVoice.js'
-import { applyListSpeech, relinkAfterUndo } from './householdList.js'
+// The household rules live in WAM Home (private repo), synced by tools/sync-wam-home.mjs.
+import { parseListSpeech } from './vendor/wam-home/listVoice.js'
+import { applyListSpeech, relinkAfterUndo } from './vendor/wam-home/householdList.js'
+import { routeHouseholdSpeech } from './vendor/wam-home/householdRouter.js'
 import { Tasks, matchOpenTask, linkedCompletionEvidence } from './tasks.js'
 import { Followups, daysBetween, reminderText } from './followups.js'
 import { Triage, sweepInbox } from './triage.js'
@@ -158,6 +160,88 @@ function householdMembers() {
   }
 }
 const listReplies = new Map()
+// v0.172.0: one kiosk utterance can add to the list, start a routine and add a
+// task. Each change id remembers the runs and tasks it made so Undo takes all
+// of it back; every /list change is registered so a spoken "undo" takes back
+// the most recent one, whoever made it.
+const householdChanges = new Map()
+function rememberChange(changeId, { runIds = [], taskIds = [] } = {}) {
+  if (!changeId) return
+  householdChanges.set(changeId, { runIds, taskIds, at: Date.now() })
+  if (householdChanges.size > 50) householdChanges.delete(householdChanges.keys().next().value)
+}
+function undoHouseholdChange(changeId) {
+  const extra = householdChanges.get(changeId) ?? { runIds: [], taskIds: [] }
+  householdChanges.delete(changeId)
+  let undone = 0
+  const fromList = inbox.undo(changeId)
+  if (fromList.ok) {
+    relinkAfterUndo(fromList.restored, { closeTask, reopenTask })
+    undone += 1
+  }
+  for (const runId of extra.runIds) if (checklists.cancelRun(runId).ok) undone += 1
+  for (const taskId of extra.taskIds) {
+    if (tasks.removeTask(taskId).ok) {
+      checklists.uncommitTask(taskId)
+      undone += 1
+    }
+  }
+  return undone > 0
+}
+/**
+ * Today's household routines for the kiosk: every step with its state and
+ * timer, so each one can be done or undone from the iPad (v0.175.0). A routine
+ * finished in the last ten minutes stays, so its last tap can be taken back.
+ */
+const KIOSK_DONE_GRACE_MS = 10 * 60_000
+function kioskRoutines(now = Date.now()) {
+  return checklists.snapshot(now).active
+    .filter(run => run.space === 'life' && run.kind === 'ondemand')
+    .filter(run => !run.complete || (run.lastAt && now - run.lastAt < KIOSK_DONE_GRACE_MS))
+    .map(run => ({
+      runId: run.runId,
+      name: run.name,
+      done: run.done,
+      total: run.total,
+      complete: run.complete,
+      currentItemId: run.currentItemId,
+      steps: run.items.map(item => ({
+        id: item.id,
+        label: item.label,
+        stepKind: item.stepKind,
+        done: item.done,
+        at: item.at,
+        estimateMinutes: item.estimateMinutes,
+        waitMinutes: item.waitMinutes,
+        endsAt: item.endsAt,
+        running: item.running,
+      })),
+    }))
+}
+function listToday() {
+  const committed = new Set(checklists.committedTaskIds('life'))
+  return {
+    routines: kioskRoutines(),
+    tasks: tasks.list()
+      .filter(task => task.space !== 'ops' && committed.has(task.id))
+      .map(task => {
+        const last = task.notes?.at(-1)
+        return {
+          id: task.id,
+          label: task.label,
+          note: task.note,
+          estimateMinutes: task.estimateMs ? Math.round(task.estimateMs / 60_000) : null,
+          window: task.window,
+          open: task.open,
+          opensLabel: task.opensLabel,
+          lastNote: last ? { text: String(last.text).slice(0, 160), at: last.at } : null,
+          noteCount: task.notes?.length ?? 0,
+        }
+      }),
+    followups: followups.visible(checklists.dayKey(), 'life'),
+  }
+}
+const joinNames = names => (names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`)
 const triage = new Triage()
 
 let probeText = ''
@@ -1620,9 +1704,11 @@ const server = http.createServer(async (req, res) => {
   // to compress.
   if (req.method === 'GET' && url.pathname === '/pad') {
     try {
-      // ?kiosk=1 is the walk-up household list (v0.171.0); plain /pad is unchanged.
-      const page = url.searchParams.get('kiosk') === '1' ? 'kiosk.html' : 'pad.html'
-      const html = readFileSync(join(WEB_DIR, page))
+      // ?kiosk=1 is the walk-up household list (v0.171.0), now WAM Home's page
+      // (synced into vendor/, v0.173.0); plain /pad is unchanged.
+      const html = url.searchParams.get('kiosk') === '1'
+        ? readFileSync(join(HERE, 'vendor', 'wam-home', 'web', 'kiosk.html'))
+        : readFileSync(join(WEB_DIR, 'pad.html'))
       cors(res)
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
       return res.end(html)
@@ -1974,13 +2060,8 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { ok: true, members: householdMembers(), fallback: 'Household' })
   }
   if (req.method === 'GET' && url.pathname === '/list') {
-    const today = checklists.dayKey()
-    const committed = new Set(checklists.committedTaskIds('life'))
-    const todayTasks = tasks.list()
-      .filter(task => task.space !== 'ops' && committed.has(task.id))
-      .map(task => ({ id: task.id, label: task.label }))
     const items = inbox.active(300).map(item => ({ ...item, label: Inbox.label(item) }))
-    return json(res, 200, { ok: true, items, today: { tasks: todayTasks, followups: followups.visible(today, 'life') } })
+    return json(res, 200, { ok: true, items, today: listToday() })
   }
   if (req.method === 'POST' && url.pathname.startsWith('/list/')) {
     if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
@@ -2004,15 +2085,61 @@ const server = http.createServer(async (req, res) => {
       }
       if (!heard) return json(res, 200, { ok: true, heard: '', applied: [], say: 'I did not hear anything.', items: listing() })
 
-      // "Remind me to call the plumber" is a task, as on every other surface.
-      const taskLabel = parseTaskCommand(heard)
-      let reply
-      if (taskLabel) {
-        const created = tasks.addTask({ label: taskLabel, space: 'life', by, clientId: body.clientId ? `list-task:${body.clientId}` : undefined })
-        reply = { ok: created.ok, heard, applied: [], task: created.task, say: created.ok ? `Added the task: ${taskLabel.charAt(0).toUpperCase()}${taskLabel.slice(1)}.` : 'Could not add that task.', items: listing() }
-      } else {
-        const result = applyListSpeech(parseListSpeech(heard, inbox.active(300)), { ...listDeps(), by, via: body.pcmBase64 ? 'kiosk-voice' : 'kiosk-text' })
-        reply = { ok: true, heard, ...result, items: listing() }
+      // Routed like the Start Day walk (householdRouter.js): carrots go on the
+      // list, "vacuum" starts the Vacuum routine with its steps and timers,
+      // "call the vet" is a task on today's Home.
+      const routed = routeHouseholdSpeech(heard, { routines: checklists.routineTemplates('life'), items: inbox.active(300) })
+      const now = Date.now()
+      const changeId = `chg-${crypto.randomUUID()}`
+      const says = []
+      const applied = []
+      if (routed.listOps.some(op => op.type === 'undo')) {
+        const last = [...householdChanges.keys()].pop()
+        const ok = last ? undoHouseholdChange(last) : false
+        applied.push(ok ? { type: 'undo', label: 'last change' } : { type: 'missing', label: 'anything to undo' })
+        says.push(ok ? 'Undone.' : 'Nothing to undo.')
+      }
+      const listOps = routed.listOps.filter(op => op.type !== 'undo')
+      if (listOps.length) {
+        const result = applyListSpeech(listOps, { ...listDeps(), by, via: body.pcmBase64 ? 'kiosk-voice' : 'kiosk-text', changeId })
+        applied.push(...result.applied)
+        if (result.say) says.push(result.say)
+      }
+      const runIds = []
+      const started = []
+      const already = []
+      for (const routine of routed.routines) {
+        const out = checklists.start(routine.checklistId, now, { startIndex: routine.startIndex })
+        if (!out.ok) continue
+        if (out.existing) already.push(routine.name)
+        else { started.push(routine.name); runIds.push(out.run.runId) }
+        applied.push({ type: 'routine', label: routine.name, runId: out.run.runId, existing: Boolean(out.existing) })
+      }
+      if (started.length) says.push(`Started ${joinNames(started)}.`)
+      if (already.length) says.push(`${joinNames(already)} ${already.length > 1 ? 'are' : 'is'} already going.`)
+      // A routine started here is on today's list but is not a Start Day
+      // commitment: it closes overnight like any on-demand run and never costs
+      // game points (anyone in the house can start one).
+      const taskIds = []
+      for (const [index, task] of routed.tasks.entries()) {
+        const created = tasks.addTask({
+          label: task.label, space: 'life', window: 'anytime', by,
+          clientId: body.clientId ? `list-task:${body.clientId}:${index}` : undefined,
+        })
+        if (!created.ok) continue
+        if (!created.duplicate) {
+          checklists.commitTasks('life', [created.task.id], now, { startDay: false })
+          taskIds.push(created.task.id)
+        }
+        applied.push({ type: 'task', label: created.task.label, taskId: created.task.id })
+      }
+      if (routed.tasks.length) says.push(`Added to today: ${joinNames(routed.tasks.map(task => task.label))}.`)
+      rememberChange(changeId, { runIds, taskIds })
+      if (runIds.length) announceGame()
+      const reply = {
+        ok: true, heard, changeId, applied,
+        say: says.join(' ') || 'I did not catch that.',
+        items: listing(), today: listToday(),
       }
       if (body.clientId) {
         listReplies.set(body.clientId, reply)
@@ -2024,10 +2151,8 @@ const server = http.createServer(async (req, res) => {
       // A kiosk Undo names its own change, so a change someone else made in
       // between is never the one undone.
       if (body.changeId) {
-        const undone = inbox.undo(String(body.changeId))
-        if (!undone.ok) return json(res, 200, { ok: false, say: 'Nothing to undo.', items: listing() })
-        relinkAfterUndo(undone.restored, { closeTask, reopenTask })
-        return json(res, 200, { ok: true, say: 'Undone.', items: listing() })
+        const ok = undoHouseholdChange(String(body.changeId))
+        return json(res, 200, { ok, say: ok ? 'Undone.' : 'Nothing to undo.', items: listing(), today: listToday() })
       }
       const result = applyListSpeech([{ type: 'undo' }], { ...listDeps(), by })
       return json(res, 200, { ok: true, ...result, items: listing() })
@@ -2035,6 +2160,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/list/clear') {
       if (body.confirm !== true) return json(res, 400, { ok: false, error: 'clear needs confirm: true' })
       const changeId = `chg-clear-${Date.now()}`
+      rememberChange(changeId)
       for (const item of inbox.active(500)) {
         inbox.complete(item.id, true, { by, changeId })
         if (item.taskId) closeTask(item.taskId)
@@ -2047,13 +2173,17 @@ const server = http.createServer(async (req, res) => {
       const item = inbox.items.get(id)
       if (!item) return json(res, 404, { ok: false, error: 'unknown item' })
       const changeId = `chg-${one[2]}-${Date.now()}`
+      rememberChange(changeId)
       let say = ''
       if (one[2] === 'done') {
         inbox.complete(id, true, { by, changeId })
         if (item.taskId) closeTask(item.taskId)
         say = `Checked off ${item.name || item.text}.`
       } else if (one[2] === 'undone') {
+        // Tapped again on the kiosk: back on the list (and its urgent task back open).
         inbox.complete(id, false, { by, changeId })
+        if (item.taskId) reopenTask(item.taskId)
+        say = `Back on the list: ${item.name || item.text}.`
       } else if (one[2] === 'remove') {
         inbox.remove(id, { by, changeId })
         if (item.taskId) closeTask(item.taskId)

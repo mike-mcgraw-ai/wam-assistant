@@ -1,6 +1,6 @@
 # WAM Assistant
 
-> Historical milestone `v0.39.0`, based on face build `0.171.0`. Originally completed 2026-10-18; sanitized and published 2026-10-18. See [MILESTONE.md](MILESTONE.md) for this checkpoint.
+> Historical milestone `v0.40.0`, based on face build `0.176.0`. Originally completed 2026-10-18; sanitized and published 2026-10-18. See [MILESTONE.md](MILESTONE.md) for this checkpoint.
 
 A portable, privacy-first conversation assistant with an Even G2 smart-glasses
 client. WAM keeps the thread of a real conversation visible without demanding
@@ -14,7 +14,7 @@ recordings, tasks, credentials, private server addresses, packaged apps, or the
 private repository's Git objects.
 
 WAM progressed through more than 100 documented on-device iterations. This
-public history distills that work into 39 runnable milestones so the important
+public history distills that work into 40 runnable milestones so the important
 product and engineering turns remain reviewable without presenting every
 diagnostic or one-line hardware build as a separate release.
 

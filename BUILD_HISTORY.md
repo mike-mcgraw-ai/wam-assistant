@@ -1,6 +1,6 @@
 # Device Build History
 
-WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 39 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
+WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 40 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
 
 | Face build | Attribution / status | Change |
 |---|---|---|
@@ -166,3 +166,8 @@ WAM used rapid numbered device builds for hardware testing. These entries are do
 | v0.169.0 | Claude (ready for EvenHub package) | The 3-2-1 before a confirm counts no longer depends on the words "Click again". |
 | v0.170.0 | Claude (ready for EvenHub package) | Done-but-waiting tasks become dated follow-ups that show 7 days ahead. |
 | v0.171.0 | Claude (ready for EvenHub package) | Walk-up voice household list on the iPad, per docs/SHOPPING-LIST-SPEC.md. |
+| v0.172.0 | Claude (kiosk routes like Start Day; hub only) | The iPad kiosk becomes the household's way into the whole system, not only the list. |
+| v0.173.0 | Claude (the household app becomes WAM Home; hub only) |  |
+| v0.174.0 | Claude (watch and drive the glasses from the iPad; hub only) |  |
+| v0.175.0 | Claude (kiosk Today: every step, task detail; hub only) |  |
+| v0.176.0 | Claude (Brief first again on the glasses; Me space on the iPad) | Before Start Day the glasses show the Brief again, and the iPad gets a Me space for notes and review. |

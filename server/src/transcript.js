@@ -176,17 +176,5 @@ export function transcriptText(segments, max = 2_000) {
     .slice(0, max)
 }
 
-/** Only unmistakable, complete voice commands become tasks automatically. */
-export function parseTaskCommand(text) {
-  const raw = cleanText(text)
-  if (!raw || raw.split(/\s+/).length > 24) return null
-  const patterns = [
-    /^(?:add|create|make)\s+(?:a\s+)?(?:task|to-?do|todo)\s+(?:to\s+)?(.+)$/i,
-    /^(?:remind me to|remember to)\s+(.+)$/i,
-  ]
-  for (const pattern of patterns) {
-    const label = raw.match(pattern)?.[1]?.trim()
-    if (label) return label.replace(/[.!?]+$/g, '').slice(0, 80)
-  }
-  return null
-}
+/** Only unmistakable, complete voice commands become tasks automatically (one copy, in WAM Home). */
+export { parseReminder as parseTaskCommand } from './vendor/wam-home/intent.js'

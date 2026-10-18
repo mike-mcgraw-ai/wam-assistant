@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { itemKey } from './listVoice.js'
+import { itemKey, itemLabel } from './vendor/wam-home/listVoice.js'
 
 /**
  * The inbox.
@@ -158,9 +158,7 @@ export class Inbox {
 
   /** "2 × milk (gallon)" — what every surface shows for a list item. */
   static label(item) {
-    const name = item.name || item.text
-    const count = item.qty && item.qty > 1 ? `${item.qty} × ` : ''
-    return `${count}${name}${item.unit ? ` (${item.unit})` : ''}`
+    return itemLabel(item)
   }
 
   /** Remember an item's state once per change, so the change can be undone. */

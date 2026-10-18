@@ -6,7 +6,7 @@ import test from 'node:test'
 const html = readFileSync(new URL('../src/web/mirror.html', import.meta.url), 'utf8')
 const script = html.match(/<script>([\s\S]*?)<\/script>/)?.[1]
 
-function mirrorHarness({ fullscreenSupported = true, standalone = false } = {}) {
+function mirrorHarness({ fullscreenSupported = true, standalone = false, search = '', coarse = false } = {}) {
   const listeners = new Map()
   const elements = new Map()
   const classes = new Set()
@@ -17,6 +17,7 @@ function mirrorHarness({ fullscreenSupported = true, standalone = false } = {}) 
   const constraints = []
   const orientationLocks = []
   let cameraRequests = 0
+  const posts = []
 
   function element(id) {
     if (!elements.has(id)) {
@@ -32,6 +33,8 @@ function mirrorHarness({ fullscreenSupported = true, standalone = false } = {}) 
         },
         addEventListener: (type, listener) => listeners.set(`${id}:${type}`, listener),
         setAttribute(name, value) { this[name] = value },
+        children: [],
+        appendChild(child) { this.children.push(child) },
         async play() {},
       })
     }
@@ -40,7 +43,8 @@ function mirrorHarness({ fullscreenSupported = true, standalone = false } = {}) 
 
   const document = {
     getElementById: element,
-    body: { classList: { add: name => classes.add(name), remove: name => classes.delete(name) } },
+    createElement: () => ({ dataset: {}, textContent: '' }),
+    body: { classList: { add: name => classes.add(name), remove: name => classes.delete(name), contains: name => classes.has(name) } },
     addEventListener: (type, listener) => listeners.set(`document:${type}`, listener),
     hidden: false,
     fullscreenElement: null,
@@ -72,13 +76,22 @@ function mirrorHarness({ fullscreenSupported = true, standalone = false } = {}) 
         },
       },
     },
-    fetch: async () => ({ json: async () => frame }),
+    location: { search },
+    URLSearchParams,
+    matchMedia: () => ({ matches: coarse }),
+    fetch: async (url, init) => {
+      if (init?.method === 'POST') {
+        posts.push({ url, body: JSON.parse(init.body) })
+        return { ok: true, json: async () => ({ ok: true, listening: true }) }
+      }
+      return { json: async () => frame }
+    },
     setInterval: listener => intervals.push(listener),
     setTimeout: () => 1,
     clearTimeout: () => {},
   }
   runInNewContext(script, context)
-  return { document: context.document, navigator: context.navigator, element, listeners, intervals, track, frame, constraints, orientationLocks, get cameraRequests() { return cameraRequests } }
+  return { document: context.document, navigator: context.navigator, element, listeners, intervals, track, frame, constraints, orientationLocks, classes, posts, get cameraRequests() { return cameraRequests } }
 }
 
 test('phone mirror starts the rear camera only on tap and clears stale overlays', async () => {
@@ -166,4 +179,25 @@ test('iPhone without element fullscreen shows home-screen instructions', async (
 test('standalone mirror hides the unneeded full-screen button', () => {
   const mirror = mirrorHarness({ standalone: true })
   assert.equal(mirror.element('fullscreen-toggle').hidden, true)
+})
+
+test('touch controls drive the glasses from an iPad or phone (v0.174.0)', async () => {
+  const desktop = mirrorHarness()
+  assert.equal(desktop.classes.has('touch'), false)
+
+  const phone = mirrorHarness({ coarse: true })
+  assert.equal(phone.classes.has('touch'), true)
+  assert.equal(phone.classes.has('embed'), false)
+
+  const kiosk = mirrorHarness({ search: '?embed=1' })
+  assert.equal(kiosk.classes.has('touch'), true)
+  assert.equal(kiosk.classes.has('embed'), true)
+  assert.deepEqual(kiosk.element('menu').children.map(b => b.textContent), ['Listen', 'Chat', 'Notes', 'Lists', 'Diagnostics'])
+
+  const button = action => ({ target: { textContent: action, closest: () => ({ dataset: { action } }) } })
+  kiosk.listeners.get('pad:click')(button('down'))
+  kiosk.listeners.get('pad:click')(button('double'))
+  kiosk.listeners.get('pad:click')(button('menu:6'))
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(kiosk.posts.map(post => [post.url, post.body.action]), [['/input', 'down'], ['/input', 'double'], ['/input', 'menu:6']])
 })

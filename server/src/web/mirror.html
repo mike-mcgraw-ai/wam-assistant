@@ -55,9 +55,13 @@
   }
   /* 576x288 is the panel. The mirror keeps that ratio and scales to fit, so
      what you see on the iPad breaks lines exactly where the glasses do. */
+  /* --bar is the touch controls' height (v0.174.0): zero when there are none. */
+  :root{--bar:0px}
+  body.touch{--bar:calc(112px + env(safe-area-inset-bottom))}
+  body.touch{padding-bottom:var(--bar); box-sizing:border-box}
   #panel{
-    width:min(100vw, calc(100vh * 2));
-    height:min(100vh, calc(100vw / 2));
+    width:min(100vw, calc((100vh - var(--bar)) * 2));
+    height:min(calc(100vh - var(--bar)), calc(100vw / 2));
     position:relative;
     pointer-events:none;
   }
@@ -89,6 +93,27 @@
   #sent.warn{color:#f0b429}
   #keys{bottom:auto; top:2%; white-space:pre; opacity:0}
   #keys.on{opacity:1}
+  body.touch #keys{display:none}
+
+  /* Touch controls (v0.174.0): the ring's gestures as buttons, so an iPad or
+     phone can drive the glasses, not only watch them. */
+  #pad{
+    display:none; position:fixed; z-index:3; left:0; right:0; bottom:0;
+    height:var(--bar); box-sizing:border-box;
+    padding:10px 14px calc(10px + env(safe-area-inset-bottom));
+    background:#05140a; border-top:1px solid #1d4a2b;
+    grid-template-columns:repeat(4, minmax(0, 1fr)) 1.4fr; gap:10px; align-items:stretch;
+    -webkit-user-select:none; user-select:none; touch-action:manipulation;
+  }
+  body.touch #pad{display:grid}
+  #pad button{
+    border:1px solid #2e7a47; border-radius:14px; background:#0b2614; color:#d8ffe1;
+    font:700 20px ui-sans-serif,system-ui,sans-serif; -webkit-tap-highlight-color:transparent;
+  }
+  #pad button:active{background:#2bff6a; color:#03140a}
+  #pad .menu{display:grid; grid-template-columns:repeat(3, 1fr); gap:6px}
+  #pad .menu button{font-size:14px; font-weight:600; border-radius:10px}
+  body.embed #controls,body.embed #fullscreen-help,body.embed #turn-hint{display:none}
 </style>
 
 <video id="camera" autoplay muted playsinline hidden></video>
@@ -99,6 +124,13 @@
 <p id="fullscreen-help" role="status" hidden>On iPhone: Safari Share → Add to Home Screen → Open as Web App, then open WAM from its icon to hide the browser bar. Turn the phone sideways for landscape.</p>
 <p id="turn-hint">Turn phone sideways for landscape</p>
 <p id="camera-status" role="status" hidden>Open WAM on the glasses</p>
+<div id="pad" role="group" aria-label="Glasses controls">
+  <button type="button" data-action="up" aria-label="Scroll up">▲</button>
+  <button type="button" data-action="down" aria-label="Scroll down">▼</button>
+  <button type="button" data-action="click" aria-label="Tap">● Tap</button>
+  <button type="button" data-action="double" aria-label="Back (double tap)">↩ Back</button>
+  <div class="menu" id="menu"></div>
+</div>
 <div id="panel"><pre id="screen">connecting…</pre><div id="stale"></div><p id="sent"></p><p id="keys"></p></div>
 
 <script>
@@ -302,6 +334,31 @@ async function press(action, label) {
   // once-a-second poll would.
   for (const ms of [250, 600, 1100]) setTimeout(tick, ms)
 }
+
+/*
+ * Touch controls (v0.174.0). Shown on touch screens, with ?controls=1, and in
+ * ?embed=1 — the WAM Home kiosk's Glasses view, which also hides the camera
+ * and full-screen buttons it has no use for.
+ */
+const params = new URLSearchParams(location.search)
+if (params.get('embed') === '1') document.body.classList.add('embed')
+if (params.get('embed') === '1' || params.get('controls') === '1' || matchMedia('(pointer: coarse)').matches) {
+  document.body.classList.add('touch')
+}
+const LABELS = { up: '↑ up', down: '↓ down', click: 'tap', double: 'back' }
+const menuHost = document.getElementById('menu')
+for (const [, name, id] of MENU) {
+  const b = document.createElement('button')
+  b.type = 'button'
+  b.dataset.action = 'menu:' + id
+  b.textContent = name
+  menuHost.appendChild(b)
+}
+document.getElementById('pad').addEventListener('click', event => {
+  const action = event.target.closest('button')?.dataset.action
+  if (!action) return
+  press(action, LABELS[action] || 'menu: ' + event.target.textContent)
+})
 
 window.addEventListener('keydown', event => {
   if (event.metaKey || event.ctrlKey || event.altKey) return

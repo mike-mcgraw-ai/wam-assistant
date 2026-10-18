@@ -302,11 +302,13 @@ export function planRows(state: UiState): PlanRow[] {
     .filter(f => !f.done || (state.stickyDone.has(`fu:${f.id}`) && !state.hiddenDone.has(`fu:${f.id}`)))
     .map(followup => ({ kind: 'followup', followup }))
 
-  // Before the morning walk-through, Home is intentionally just the Life
-  // doorway and one Start Day action. Preset lists exist, but none of them is
-  // today's work until Mike names it.
+  // Before the morning walk-through, Home is the Brief: the Life doorway and
+  // the Start Day / Skip actions, nothing else. Tasks and follow-ups (carried
+  // over, pinned from the iPad, urgent groceries) wait behind it until Start
+  // Day or Skip. Mike, 2026-10-18: "the brief page is completely gone - taken
+  // over by the tasks that are supposed to be hidden behind that brief one."
   if (state.space === 'life' && plan.day?.started !== true && plan.day?.skipped !== true) {
-    return [{ kind: 'listen' }, ...followRows, ...committedTasks, ...completedTasks, { kind: 'start-day' }, { kind: 'skip-day' }]
+    return [{ kind: 'listen' }, { kind: 'start-day' }, { kind: 'skip-day' }]
   }
 
   // The hub files a Listen capture with no obvious home onto a task called
@@ -1432,8 +1434,7 @@ function renderPlan(state: UiState, cursor: number): string {
 
   // Before Start Day, the hub owns the brief contract. Older hubs still fall
   // back to the basic setup/off rows so the screen stays truthful.
-  if (state.space === 'life' && plan.day?.started !== true && plan.day?.skipped !== true &&
-      !rows.some(row => row.kind === 'task' || row.kind === 'task-done')) {
+  if (state.space === 'life' && plan.day?.started !== true && plan.day?.skipped !== true) {
     const startSelected = cursor === 1
     const skipSelected = cursor === 2
     const summary = plan.morningBrief?.summary ?? {

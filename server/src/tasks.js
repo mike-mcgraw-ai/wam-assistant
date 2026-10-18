@@ -331,6 +331,20 @@ export class Tasks {
     return { ok: true }
   }
 
+  /**
+   * Take back a task added moments ago — the kiosk's Undo (v0.172.0). Only a
+   * custom task that is still open and has no notes; anything else is history.
+   */
+  removeTask(id, now = Date.now()) {
+    const index = this.customTasks.findIndex(t => t.id === id)
+    if (index < 0) return { ok: false, error: `unknown task "${id}"` }
+    if (this.done.has(id) || (this.notes_.get(id) ?? []).length) return { ok: false, error: 'task has history' }
+    this.customTasks.splice(index, 1)
+    this.#log({ type: 'task_remove', id, at: now })
+    this.#persist()
+    return { ok: true }
+  }
+
   complete(id, done = true, now = Date.now()) {
     if (!this.#taskById(id)) {
       return { ok: false, error: `unknown task "${id}"` }

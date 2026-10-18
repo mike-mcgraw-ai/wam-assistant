@@ -526,3 +526,39 @@ test('skip for now is remembered and is not a start', () => {
   assert.equal(status.skipped, true)
   assert.equal(status.started, false)
 })
+
+test('cancelRun takes back an untouched run but never one with progress', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wam-cancel-'))
+  try {
+    const checklists = new Checklists(
+      { checklists: [{ id: 'vacuum', name: 'Vacuum', space: 'life', kind: 'ondemand',
+        items: [{ id: 'clear', label: 'Clear floors' }, { id: 'run', label: 'Vacuum' }] }] },
+      { runsPath: join(dir, 'runs.json'), logPath: join(dir, 'log.jsonl'), summaryPath: join(dir, 'summaries') },
+    )
+    const first = checklists.start('vacuum').run
+    assert.equal(checklists.cancelRun(first.runId).ok, true)
+    assert.equal(checklists.snapshot().active.length, 0)
+
+    const second = checklists.start('vacuum').run
+    checklists.check(second.runId, 'clear', true)
+    assert.equal(checklists.cancelRun(second.runId).ok, false)
+    assert.equal(checklists.snapshot().active.length, 1)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('starting a routine whose every step is ticked starts a fresh run', () => {
+  const checklists = new Checklists(
+    { checklists: [{ id: 'vacuum', name: 'Vacuum', space: 'life', kind: 'ondemand',
+      items: [{ id: 'clear', label: 'Clear floors' }, { id: 'run', label: 'Vacuum' }] }] },
+    { runsPath: null, logPath: null, summaryPath: null },
+  )
+  const first = checklists.start('vacuum').run
+  checklists.check(first.runId, 'clear', true)
+  assert.equal(checklists.start('vacuum').existing, true)
+  checklists.check(first.runId, 'run', true)
+  const again = checklists.start('vacuum')
+  assert.equal(again.existing, undefined)
+  assert.notEqual(again.run.runId, first.runId)
+})

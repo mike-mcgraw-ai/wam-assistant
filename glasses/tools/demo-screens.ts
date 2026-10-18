@@ -344,7 +344,7 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
   ] }
   const doctorVetPlan = { ...withPlan.plan!, tasks: [doctorTask, vetTask],
     day: { ...withPlan.plan!.day!, started: false, startedAt: null, taskIds: ['doctor', 'vet'] } }
-  add('Life home — doctor and vet carry before Start Day', render({
+  add('Life home — Brief first; carried tasks wait behind Start Day', render({
     ...withPlan, space: 'life', plan: doctorVetPlan, view: { kind: 'plan', cursor: 1 },
   }))
   add('Task detail — Mark done first', render({
