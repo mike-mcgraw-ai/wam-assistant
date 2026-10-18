@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto'
 // Start Day intent (which routines a sentence names, errands, actions) lives
 // in WAM Home's core and is synced here (v0.173.0, tools/sync-wam-home.mjs).
 import { matchDayIntent, normalizeMatchText, sameWork } from './vendor/wam-home/intent.js'
+import { itemActiveOnDay } from './checklistSchedule.js'
 
 /**
  * Checklist runs.
@@ -852,7 +853,7 @@ export class Checklists {
     const template = this.templates.get(run.checklistId)
 
     const startIndex = Number.isInteger(run.startIndex) ? run.startIndex : 0
-    const items = template.items.slice(startIndex).map(item => {
+    const items = template.items.slice(startIndex).filter(item => itemActiveOnDay(item, run.day)).map(item => {
       // `check` is a step that is only ever ticked: one click, done, and the
       // time it happened is the whole record. A list marked `timed: false`
       // makes every step one, which is what a morning routine is — you are not

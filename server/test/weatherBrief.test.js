@@ -45,10 +45,10 @@ test('weather config stays setup until manual coordinates are present', async ()
     dayStatus: { day: '2026-10-12', started: false },
   })
   assert.equal(snapshot.sources.weather.status, 'notConfigured')
-  assert.equal(snapshot.summary.line1, '💬⚙ 📩⚙ 🔗– 🌤⚙ 💵⚙')
+  assert.equal(snapshot.summary.line1, 'MAIL SET | SET | MONEY SET')
 })
 
-test('weather adapter keeps seeded weather visible until coordinates are present', async () => {
+test('weather adapter replaces seeded weather with setup until coordinates are present', async () => {
   const brief = new MorningBrief({ timezone: 'America/New_York' })
   assert.equal(brief.updateSource({
     id: 'weather',
@@ -71,15 +71,14 @@ test('weather adapter keeps seeded weather visible until coordinates are present
   })
 
   assert.equal(result.ok, true)
-  assert.equal(result.preserved, true)
   const snapshot = brief.snapshot({
     now: Date.UTC(2026, 9, 13, 11, 5),
     dayStatus: { day: '2026-10-13', started: false },
   })
-  assert.equal(snapshot.sources.weather.status, 'ok')
-  assert.equal(snapshot.sources.weather.display, '61F')
-  assert.equal(snapshot.sources.weather.source, 'manual-seed')
-  assert.equal(snapshot.summary.line1, '💬⚙ 📩⚙ 🔗– 🌤61° 💵⚙')
+  assert.equal(snapshot.sources.weather.status, 'notConfigured')
+  assert.equal(snapshot.sources.weather.display, 'setup')
+  assert.equal(snapshot.sources.weather.source, 'nws')
+  assert.equal(snapshot.summary.line1, 'MAIL SET | SET | MONEY SET')
 })
 
 test('weather adapter reads NWS point and hourly forecast into the brief', async () => {
@@ -147,7 +146,7 @@ test('weather adapter reads NWS point and hourly forecast into the brief', async
   assert.equal(snapshot.sources.weather.status, 'ok')
   assert.equal(snapshot.sources.weather.display, '61F H88 rain ends 9a')
   assert.equal(snapshot.sources.weather.value, 61)
-  assert.equal(snapshot.summary.line1, '💬⚙ 📩⚙ 🔗– 🌤61°💧88☔→9a 💵⚙')
+  assert.equal(snapshot.summary.line1, 'MAIL SET | 61F/88% R NOW | MONEY SET')
 })
 
 test('weather adapter preserves last display when provider fails', async () => {
@@ -179,7 +178,7 @@ test('weather adapter preserves last display when provider fails', async () => {
   })
   assert.equal(snapshot.sources.weather.status, 'error')
   assert.equal(snapshot.sources.weather.display, '61F rain')
-  assert.equal(snapshot.summary.line1, '💬⚙ 📩⚙ 🔗– 🌤61°☔? 💵⚙')
+  assert.equal(snapshot.summary.line1, 'MAIL SET | 61F R NOW? | MONEY SET')
 })
 
 test('weather display picks only decision-changing conditions', () => {
@@ -266,6 +265,31 @@ test('weather display includes humidity and rain start or stop timing', () => {
     }),
     '72F H54 no rain',
   )
+})
+
+test('weather display finds the next rain up to 72 hours ahead', () => {
+  const now = Date.UTC(2026, 9, 18, 16, 0)
+  const periods = [
+    {
+      startTime: '2026-10-18T12:00:00-04:00',
+      temperature: 52,
+      relativeHumidity: { value: 48 },
+      probabilityOfPrecipitation: { value: 5 },
+      shortForecast: 'Sunny',
+    },
+    {
+      startTime: '2026-10-20T14:00:00-04:00',
+      temperature: 58,
+      relativeHumidity: { value: 80 },
+      probabilityOfPrecipitation: { value: 80 },
+      shortForecast: 'Rain Showers',
+    },
+  ]
+  assert.equal(weatherDisplayFromPeriod(periods[0], {
+    periods,
+    now,
+    timeZone: 'America/New_York',
+  }), '52F H48 rain Tue 2p')
 })
 
 test('weather config and cadence are explicit', () => {

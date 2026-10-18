@@ -235,7 +235,9 @@ export class Inbox {
   update(id, patch = {}, { changeId = null } = {}) {
     const item = this.items.get(id)
     if (!item) return { ok: false, error: 'unknown item' }
+    if (patch.name !== undefined && !String(patch.name).trim()) return { ok: false, error: 'empty name' }
     if (changeId) this.#remember(changeId, id)
+    if (patch.name !== undefined) item.name = item.text = String(patch.name).trim().slice(0, 120)
     if (patch.qty !== undefined) item.qty = Math.max(1, Math.min(99, Number(patch.qty) || 1))
     if (patch.unit !== undefined) item.unit = patch.unit
     if (patch.urgent !== undefined) item.urgent = Boolean(patch.urgent)

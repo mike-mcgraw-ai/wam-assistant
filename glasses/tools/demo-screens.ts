@@ -185,7 +185,7 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
     mode: 'morning',
     started: false,
     summary: {
-      line1: '💬0 📩0 🔗0 🌤61°💧88☔→9a 💵+$240/$18k',
+      line1: 'MAIL 12 | 61F/88% R 9a | MONEY +$240',
       line2: '',
       line3: '',
       asOfLabel: '@7:05a',
@@ -561,18 +561,6 @@ export function demoScreens(now = Date.now()): DemoScreen[] {
     const lifeRows = planRows({ ...withPlan, space: 'life' })
     add('Running order — last row, Add to day', render({ ...withPlan, space: 'life', view: { kind: 'plan', cursor: lifeRows.length - 1 } }))
   }
-  add('Life home — Skip for now armed', render({
-    ...withPlan,
-    space: 'life',
-    armedTaskId: 'skip-day',
-    view: { kind: 'plan', cursor: 2 },
-    plan: {
-      ...withPlan.plan,
-      timeline: [], agenda: [], progress: [], reach: [], busyMs: 0,
-      day: { day: '2026-10-11', startHour: 5, started: false, startedAt: null, checklistIds: [], transcript: '' },
-      morningBrief,
-    },
-  }))
   add('Index — cold start from cache', render({ ...base, fromCache: true }))
   add('Index — server unreachable', render({ ...base, error: 'timeout' }))
 

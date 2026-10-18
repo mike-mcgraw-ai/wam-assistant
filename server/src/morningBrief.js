@@ -9,13 +9,6 @@ const SOURCE_LABELS = {
   weather: 'Weather',
   money: 'Money',
 }
-const SOURCE_ICONS = {
-  texts: '💬',
-  mail: '📩',
-  linkedin: '🔗',
-  weather: '🌤',
-  money: '💵',
-}
 const SOURCE_KINDS = {
   texts: 'count',
   mail: 'count',
@@ -86,6 +79,10 @@ function defaultSource(id) {
         ]
       : undefined,
   }
+}
+
+function isPlaceholderSeed(source) {
+  return source?.source === 'manual-seed' && source?.confidence === 'seeded'
 }
 
 function withoutUndefined(value) {
@@ -184,26 +181,24 @@ function displayLine(source, nowMs) {
 }
 
 function compactWeatherDisplay(display) {
-  return cleanText(display)
-    .replace(/(\d+)F\b/g, '$1°')
-    .replace(/\bH(\d+)\b/g, '💧$1')
-    .replace(/\brain ends ([^\s?]+)/, '☔→$1')
-    .replace(/\brain ([^\s?]+)/, '☔$1')
-    .replace(/\bno rain\b/, '☔0')
-    .replace(/\brain\b/, '☔')
-    .replace(/\bice\b/, '🧊')
-    .replace(/\bsnow\b/, '❄')
-    .replace(/\bheat\b/, '🔥')
-    .replace(/\bwind\b/, '💨')
-    .replace(/\bfog\b/, '🌫')
-    .replace(/\s+/g, '')
-    .slice(0, 24)
+  const text = cleanText(display)
+  const temperature = text.match(/(-?\d+)F\b/)
+  const humidity = text.match(/\bH(\d+)\b/)
+  if (!temperature) return text.slice(0, 24)
+  const stale = text.endsWith('?') ? '?' : ''
+  let rain = ''
+  if (!/\bno rain\b/.test(text) && /\brain(?:\s+(?:now|ends)\b|(?=\?|$))/.test(text)) rain = ' R NOW'
+  else {
+    const nextRain = text.match(/\brain ([^?]+)$/)
+    if (nextRain) rain = ` R ${nextRain[1].trim()}`
+  }
+  return `${temperature[1]}F${humidity ? `/${humidity[1]}%` : ''}${rain}${stale}`
 }
 
 function compactSourceValue(source, nowMs) {
   const display = sourceDisplay(source, nowMs)
-  if (display === 'setup') return '⚙'
-  if (display === 'off') return '–'
+  if (display === 'setup') return 'SET'
+  if (display === 'off') return 'OFF'
   if (display === 'err') return '!'
   if (display === 'stale') return '?'
   if (source.id === 'weather') return compactWeatherDisplay(display)
@@ -212,9 +207,11 @@ function compactSourceValue(source, nowMs) {
 }
 
 function compactSummaryLine(sources, nowMs) {
-  return SOURCE_ORDER
-    .map(id => `${SOURCE_ICONS[id]}${compactSourceValue(sources[id], nowMs)}`)
-    .join(' ')
+  return [
+    `MAIL ${compactSourceValue(sources.mail, nowMs)}`,
+    compactSourceValue(sources.weather, nowMs),
+    `MONEY ${compactSourceValue(sources.money, nowMs)}`,
+  ].join(' | ')
 }
 
 export class MorningBrief {
@@ -253,7 +250,11 @@ export class MorningBrief {
       ? this.state.sources[space]
       : {}
     return Object.fromEntries(
-      SOURCE_ORDER.map(id => [id, withoutUndefined({ ...defaultSource(id), ...(saved[id] ?? {}) })]),
+      SOURCE_ORDER.map(id => {
+        const stored = saved[id] ?? {}
+        const source = isPlaceholderSeed(stored) ? {} : stored
+        return [id, withoutUndefined({ ...defaultSource(id), ...source })]
+      }),
     )
   }
 

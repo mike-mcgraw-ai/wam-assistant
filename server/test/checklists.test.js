@@ -6,6 +6,32 @@ import { join } from 'node:path'
 
 import { Checklists } from '../src/checklists.js'
 
+test('a dated item pause hides current work without erasing the prior day', () => {
+  const checklists = new Checklists(
+    {
+      timezone: 'America/New_York',
+      resetHour: 5,
+      checklists: [{
+        id: 'morning', name: 'Morning', space: 'life', kind: 'daily', timed: false,
+        items: [
+          { id: 'stretch', label: 'Stretch', pausedFrom: '2026-10-18' },
+          { id: 'teeth', label: 'Brush teeth' },
+        ],
+      }],
+    },
+    { runsPath: null, logPath: null, summaryPath: null },
+  )
+
+  const saturday = checklists.snapshot(Date.parse('2026-10-17T12:00:00-04:00')).active
+    .find(run => run.day === '2026-10-17')
+  const sunday = checklists.snapshot(Date.parse('2026-10-18T12:00:00-04:00')).active
+    .find(run => run.day === '2026-10-18')
+
+  assert.deepEqual(saturday.items.map(item => item.id), ['stretch', 'teeth'])
+  assert.deepEqual(sunday.items.map(item => item.id), ['teeth'])
+  assert.equal(sunday.total, 1)
+})
+
 test('a Listen note on a chore can be upgraded to an AI summary', () => {
   const checklists = new Checklists(
     {
@@ -82,7 +108,7 @@ test('beginStep on a checkbox-only list checks without starting a timer', () => 
           kind: 'daily',
           timed: false,
           items: [
-            { id: 'meds', label: 'Meds' },
+            { id: 'stretch', label: 'Stretch' },
             { id: 'teeth', label: 'Brush teeth' },
           ],
         },
@@ -92,10 +118,10 @@ test('beginStep on a checkbox-only list checks without starting a timer', () => 
   )
 
   const run = checklists.snapshot(1_000).active[0]
-  const result = checklists.beginStep(run.runId, 'meds', 2_000)
+  const result = checklists.beginStep(run.runId, 'stretch', 2_000)
 
   assert.equal(result.ok, true)
-  const item = checklists.snapshot(2_000).active[0].items.find(row => row.id === 'meds')
+  const item = checklists.snapshot(2_000).active[0].items.find(row => row.id === 'stretch')
   assert.equal(item.done, true)
   assert.equal(item.running, false)
   assert.equal(item.startedAt, null)
@@ -111,7 +137,7 @@ test('checkbox-only legacy timings do not feed the read model or stats', () => {
           space: 'life',
           kind: 'daily',
           timed: false,
-          items: [{ id: 'meds', label: 'Meds' }],
+          items: [{ id: 'stretch', label: 'Stretch' }],
         },
       ],
     },
@@ -120,8 +146,8 @@ test('checkbox-only legacy timings do not feed the read model or stats', () => {
 
   const shapedRun = checklists.snapshot(1_000).active[0]
   const run = checklists.runs.get(shapedRun.runId)
-  run.checked.meds = { at: 3_601_000, by: 'glasses' }
-  run.timing.meds = {
+  run.checked.stretch = { at: 3_601_000, by: 'glasses' }
+  run.timing.stretch = {
     startedAt: 1_000,
     completedAt: 3_601_000,
     durationMs: 3_600_000,

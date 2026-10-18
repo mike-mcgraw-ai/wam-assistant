@@ -36,7 +36,7 @@ import {
   checklistItemRow,
   checklistRow,
   inboxGroupRow,
-  inboxItemRow,
+  inboxItemLines,
   agendaRow,
   taskRow,
   ruleRight,
@@ -253,7 +253,6 @@ export type PlanRow =
   | { kind: 'listen' }
   | { kind: 'start-day' }
   | { kind: 'rebuild-day' }
-  | { kind: 'skip-day' }
   | { kind: 'daily'; runId: string; listName: string; item: ChecklistItem }
   | { kind: 'task'; task: TaskRow }
   | { kind: 'task-done'; task: TaskRow }
@@ -303,12 +302,12 @@ export function planRows(state: UiState): PlanRow[] {
     .map(followup => ({ kind: 'followup', followup }))
 
   // Before the morning walk-through, Home is the Brief: the Life doorway and
-  // the Start Day / Skip actions, nothing else. Tasks and follow-ups (carried
+  // the Start Day action, nothing else. Tasks and follow-ups (carried
   // over, pinned from the iPad, urgent groceries) wait behind it until Start
-  // Day or Skip. Mike, 2026-10-18: "the brief page is completely gone - taken
+  // Day or the greeting is clicked. Mike, 2026-10-18: "the brief page is completely gone - taken
   // over by the tasks that are supposed to be hidden behind that brief one."
   if (state.space === 'life' && plan.day?.started !== true && plan.day?.skipped !== true) {
-    return [{ kind: 'listen' }, { kind: 'start-day' }, { kind: 'skip-day' }]
+    return [{ kind: 'listen' }, { kind: 'start-day' }]
   }
 
   // The hub files a Listen capture with no obvious home onto a task called
@@ -910,7 +909,7 @@ export function clockLine(_state: UiState, now = new Date()): string {
  * stale or cached data, that belongs with the label saying what you are
  * looking at.
  */
-export function spaceLine(state: UiState, selected = false, labelOverride?: string): string {
+export function spaceLine(state: UiState, selected = false, labelOverride?: string, actionOverride?: string): string {
   // Before Start Day, Life Home greets instead of naming the space (Mike,
   // 2026-10-13). Same line in every other way: selectable, opens talk / notes,
   // carries the connection, mic and game markers.
@@ -947,7 +946,9 @@ export function spaceLine(state: UiState, selected = false, labelOverride?: stri
   const ai = aiWidgetText(state)
   // When the line is the cursor it earns the right-hand slot, so the one thing
   // you can do from here is spelled out instead of guessed at.
-  const action = selected ? (state.coachSession?.active ? '   RECORDING' : '   click: talk / notes') : ''
+  const action = selected
+    ? state.coachSession?.active ? '   RECORDING' : `   click: ${actionOverride ?? 'talk / notes'}`
+    : ''
   const aiText = ai && !selected ? `   AI: ${ai}` : ''
   // The game bar takes whatever room the rest of the line leaves.
   const game = gameText(state, USABLE_PX - measure(`${point}${label}${connection}${mic}${action}${aiText}`))
@@ -1341,14 +1342,26 @@ function renderInbox(state: UiState, group: string, cursor: number): string {
   const items = inboxItems(state, group)
   if (items.length === 0) return `WAM\n\n${group} is clear.\n\ndbl-tap to go back`
 
-  const win = windowFollow(cursor, items.length, roomBelow(['header']), state.scrollTop)
-  const { start, end } = win
-  const more = win.more ? `${win.atTop ? '' : '^'}${win.atEnd ? '' : 'v'}` : ''
-  const lines = [header(state, `${clip(group, 14)} ${items.length}${more ? ` ${more}` : ''}`)]
-  for (let i = start; i < end; i += 1) {
-    lines.push(inboxItemRow(items[i], i === cursor, 0, i === cursor && state.armedTaskId === `list:${items[i].id}`))
+  const capacity = roomBelow(['header'])
+  const rows = items.map((item, itemIndex) => inboxItemLines(item, itemIndex === cursor, 0, itemIndex === cursor && state.armedTaskId === `list:${item.id}`))
+  const pages: Array<{ start: number; end: number; used: number }> = [{ start: 0, end: 0, used: 0 }]
+  for (const [itemIndex, row] of rows.entries()) {
+    const height = Math.min(row.length, capacity)
+    let page = pages[pages.length - 1]
+    if (page.used && page.used + height > capacity) {
+      page = { start: itemIndex, end: itemIndex, used: 0 }
+      pages.push(page)
+    }
+    page.end = itemIndex + 1
+    page.used += height
   }
-
+  const pageIndex = Math.max(0, pages.findIndex(page => cursor < page.end))
+  const page = pages[pageIndex]
+  const more = pages.length > 1 ? `${pageIndex ? '^' : ''}${pageIndex < pages.length - 1 ? 'v' : ''}` : ''
+  const lines = [header(state, `${clip(group, 14)} ${items.length}${more ? ` ${more}` : ''}`)]
+  for (let itemIndex = page.start; itemIndex < page.end; itemIndex += 1) {
+    lines.push(...rows[itemIndex].slice(0, capacity))
+  }
 
   return assemble(lines, config.maxChars, config.maxLines)
 }
@@ -1376,9 +1389,6 @@ function planTip(state: UiState, rows: PlanRow[], cursor: number): string {
     return state.plan?.day?.started ? 'click to add more to today' : 'click to walk the house and name today'
   }
   if (row.kind === 'rebuild-day') return state.armedTaskId === 'rebuild-day' ? 'Click again to rebuild today' : 'Restart today review; unfinished work stays'
-  if (row.kind === 'skip-day') {
-    return state.armedTaskId === 'skip-day' ? 'Click again to skip the walk today' : 'Not now - show the list without it'
-  }
   if (row.kind === 'task') {
     return '! Task - click for notes or Mark done'
   }
@@ -1436,9 +1446,8 @@ function renderPlan(state: UiState, cursor: number): string {
   // back to the basic setup/off rows so the screen stays truthful.
   if (state.space === 'life' && plan.day?.started !== true && plan.day?.skipped !== true) {
     const startSelected = cursor === 1
-    const skipSelected = cursor === 2
     const summary = plan.morningBrief?.summary ?? {
-      line1: '💬⚙ 📩⚙ 🔗– 🌤⚙ 💵⚙',
+      line1: 'MAIL SET | SET | MONEY SET',
       line2: '',
       line3: '',
       asOfLabel: '@setup',
@@ -1448,18 +1457,13 @@ function renderPlan(state: UiState, cursor: number): string {
       glassesSafeText(summary.line2),
       glassesSafeText(summary.line3),
     ].filter(Boolean).flatMap(line => wrapToGlassWidth(line)).slice(0, 3)
-    if (summary.asOfLabel) briefLines.push(clipToWidth(summary.asOfLabel))
-    // No hint row here: the rows say what they do, and the armed Skip asks
-    // its own question. Mike asked for the walk-the-house hint to go.
+    // No hint or refresh-time row here: the selectable rows say what they do.
     return assemble(
       [
         clockLine(state),
-        spaceLine(state, cursor === 0, 'Good morning, Mike.'),
+        spaceLine(state, cursor === 0, 'Good morning, Mike.', 'continue'),
         ...briefLines,
         `${startSelected ? '>' : ' '}+   ${plan.day?.draft ? 'Review Day' : 'Start Day'}`,
-        skipSelected && state.armedTaskId === 'skip-day'
-          ? '>[?] Skip the walk today?'
-          : `${skipSelected ? '>' : ' '}    Skip for now`,
       ],
       config.maxChars,
       config.maxLines,
@@ -1507,8 +1511,6 @@ function renderPlan(state: UiState, cursor: number): string {
       lines.push(ruleCentred('Chores', i === bodyCursor && cursor > 0))
     } else if (row.kind === 'start-day') {
       lines.push(clip(`${point}+   ${state.plan?.day?.draft ? 'Review Day' : state.plan?.day?.started ? 'Add to day' : 'Start Day'}`, LINE_CHARS))
-    } else if (row.kind === 'skip-day') {
-      lines.push(clip(`${point}${state.armedTaskId === 'skip-day' ? '[?] Skip the walk today?' : '    Skip for now'}`, LINE_CHARS))
     } else if (row.kind === 'rebuild-day') {
       lines.push(clip(`${point}${state.armedTaskId === 'rebuild-day' ? '[?] ' : ''}Rebuild today`, LINE_CHARS))
     } else if (row.kind === 'daily') {

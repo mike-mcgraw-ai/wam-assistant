@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { addDays, computeGame, GameAnnouncer, levelFor, weekday } from '../src/game.js'
 
 const templates = new Map([
-  ['morning', { id: 'morning', kind: 'daily', items: [{ id: 'meds' }, { id: 'teeth' }] }],
+  ['morning', { id: 'morning', kind: 'daily', items: [{ id: 'stretch' }, { id: 'teeth' }] }],
   ['rounds', { id: 'rounds', kind: 'daily', items: [{ id: 'boiler' }] }],
   ['dishes', { id: 'dishes', kind: 'ondemand', items: [{ id: 'load' }, { id: 'run' }] }],
 ])
@@ -27,7 +27,7 @@ const run = (checklistId, day, items) => ({
   day,
   checked: Object.fromEntries(items.map(id => [id, { at: 0 }])),
 })
-const full = day => [run('morning', day, ['meds', 'teeth']), run('rounds', day, ['boiler'])]
+const full = day => [run('morning', day, ['stretch', 'teeth']), run('rounds', day, ['boiler'])]
 
 test('calendar helpers work on day keys', () => {
   assert.equal(weekday('2026-10-12'), 'mon')
@@ -45,7 +45,7 @@ test('level curve: 100, then each level costs 50 more', () => {
 
 test('steps earn XP, a complete list earns its bonus', () => {
   const g = computeGame({
-    runs: [run('dishes', '2026-10-10', ['load', 'run']), run('morning', '2026-10-10', ['meds'])],
+    runs: [run('dishes', '2026-10-10', ['load', 'run']), run('morning', '2026-10-10', ['stretch'])],
     templates, config, today: '2026-10-10',
   })
   // dishes: 2x10 + 25 bonus; morning: 1x10, incomplete so no bonus
@@ -56,6 +56,31 @@ test('steps earn XP, a complete list earns its bonus', () => {
 test('items no longer on the list do not earn', () => {
   const g = computeGame({ runs: [run('dishes', '2026-10-10', ['gone'])], templates, config, today: '2026-10-10' })
   assert.equal(g.xp, 0)
+})
+
+test('a dated item pause preserves old XP and stops future misses', () => {
+  const pausedTemplates = new Map([[
+    'morning',
+    { id: 'morning', kind: 'daily', items: [{ id: 'stretch', pausedFrom: '2026-10-18' }, { id: 'teeth' }] },
+  ]])
+  const pausedConfig = {
+    ...config,
+    startDay: '2026-10-17',
+    checklists: { morning: config.checklists.morning },
+  }
+  const g = computeGame({
+    runs: [
+      run('morning', '2026-10-17', ['stretch', 'teeth']),
+      run('morning', '2026-10-18', ['teeth']),
+    ],
+    templates: pausedTemplates,
+    config: pausedConfig,
+    today: '2026-10-19',
+  })
+
+  assert.equal(g.xp, 90) // Saturday 2 steps + bonus; Sunday teeth + bonus.
+  assert.equal(g.streak, 2)
+  assert.equal(g.days.flatMap(day => day.entries).some(entry => entry.kind === 'miss'), false)
 })
 
 test('penalties: only finished days, only from startDay, only on due weekdays', () => {

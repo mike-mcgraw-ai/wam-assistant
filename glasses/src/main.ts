@@ -2648,6 +2648,19 @@ async function activate(): Promise<void> {
     // The LIFE line. Two things live behind it — talk, or read back what you
     // already said — so it opens the pair rather than picking one for you.
     if (row?.kind === 'listen') {
+      // Before Start Day this row is the morning doorway. Dismissing it marks
+      // the walk skipped for now; once Home refreshes, the same top row opens
+      // Talk / Notes as usual.
+      if (state.space === 'life' && state.plan?.day?.started !== true && state.plan?.day?.skipped !== true) {
+        const result = await skipDay('life')
+        if (!result.ok) {
+          state.error = result.error
+          await paint()
+          return
+        }
+        await openPlan()
+        return
+      }
       state.view = { kind: 'capture', cursor: 0 }
       state.scrollTop = 0
       clampCursor()
@@ -2675,23 +2688,6 @@ async function activate(): Promise<void> {
       }
       if (state.plan?.day) delete state.plan.day.draft
       await startDayCapture(true)
-      return
-    }
-
-    // Skip is a state change for the whole day, so it arms first.
-    if (row?.kind === 'skip-day') {
-      const gate = confirmGate('skip-day')
-      if (gate !== 'confirmed') {
-        if (gate === 'armed') await paint()
-        return
-      }
-      const result = await skipDay(state.space === 'ops' ? 'ops' : 'life')
-      if (!result.ok) {
-        state.error = result.error
-        await paint()
-        return
-      }
-      await openPlan()
       return
     }
 

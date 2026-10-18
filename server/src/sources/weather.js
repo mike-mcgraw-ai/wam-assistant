@@ -1,7 +1,7 @@
 const DEFAULT_TTL_SECONDS = 75 * 60
 const MORNING_POLL_MS = 30 * 60_000
 const OFF_HOURS_POLL_MS = 2 * 60 * 60_000
-const RAIN_LOOKAHEAD_MS = 24 * 60 * 60_000
+const RAIN_LOOKAHEAD_MS = 72 * 60 * 60_000
 
 function numberEnv(env, key) {
   if (env[key] === undefined || env[key] === '') return null
@@ -137,7 +137,9 @@ function briefTimeLabel(value, { now = Date.now(), timeZone = 'America/New_York'
   const minute = parts.find(part => part.type === 'minute')?.value ?? '00'
   const suffix = (parts.find(part => part.type === 'dayPeriod')?.value ?? '').toLowerCase().slice(0, 1)
   const time = minute === '00' ? `${hour}${suffix}` : `${hour}:${minute}${suffix}`
-  return localDateKey(date, timeZone) === localDateKey(now, timeZone) ? time : `tom ${time}`
+  if (localDateKey(date, timeZone) === localDateKey(now, timeZone)) return time
+  const weekday = new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short' }).format(date)
+  return `${weekday} ${time}`
 }
 
 function rainLikely(period) {

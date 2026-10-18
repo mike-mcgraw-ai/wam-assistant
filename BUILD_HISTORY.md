@@ -1,6 +1,6 @@
 # Device Build History
 
-WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 40 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
+WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 41 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
 
 | Face build | Attribution / status | Change |
 |---|---|---|
@@ -171,3 +171,9 @@ WAM used rapid numbered device builds for hardware testing. These entries are do
 | v0.174.0 | Claude (watch and drive the glasses from the iPad; hub only) |  |
 | v0.175.0 | Claude (kiosk Today: every step, task detail; hub only) |  |
 | v0.176.0 | Claude (Brief first again on the glasses; Me space on the iPad) | Before Start Day the glasses show the Brief again, and the iPad gets a Me space for notes and review. |
+| v0.177.0 | Codex (remove fake morning-brief readings; server only) | Do not present old manual seed values as real stale counts or weather. |
+| v0.178.0 | Codex (live Apple Mail unread count; server only) | Replace the Mail setup marker with a real count from Apple Mail on this Mac. |
+| v0.179.0 | Codex (compact morning brief line; server only) | Make the pre-Start-Day brief read as three separated glanceable values. |
+| v0.180.0 | Codex (brief dismissal and 72-hour rain) | Make the morning doorway denser and remove the redundant Skip row. |
+| v0.181.0 | Codex (pause a routine item without rewriting history; server only) | Pause the routine checklist item from 2026-10-18 forward. |
+| v0.182.0 | Codex (full grocery names on every screen) | Restore the exact product names on the household grocery list and omit attribution across the kiosk, phone, Pad, and glasses list views so names get the available width. |

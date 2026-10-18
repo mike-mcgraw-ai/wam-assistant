@@ -27,6 +27,7 @@
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { eatOutEntries } from './eatOut.js'
+import { scheduledItems } from './checklistSchedule.js'
 
 export const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
 
@@ -97,7 +98,7 @@ export function computeGame({
     const tpl = templates.get(run.checklistId)
     const rule = ruleFor(config, run.checklistId)
     if (rule.ignore) continue
-    const itemIds = tpl ? (tpl.items || []).map(i => i.id) : null
+    const itemIds = tpl ? scheduledItems(tpl, run.day).map(i => i.id) : null
     const checked = Object.keys(run.checked || {}).filter(id => !itemIds || itemIds.includes(id))
     if (tpl?.kind === 'daily') runIndex.set(`${run.checklistId}:${run.day}`, run)
 
@@ -119,7 +120,7 @@ export function computeGame({
       const rule = ruleFor(config, tpl.id)
       if (!rule.missPenalty) continue
       const run = runIndex.get(`${tpl.id}:${day}`)
-      const missed = (tpl.items || []).filter(i => !run?.checked?.[i.id]).map(i => i.id)
+      const missed = scheduledItems(tpl, day).filter(i => !run?.checked?.[i.id]).map(i => i.id)
       if (!missed.length) continue
       const xp = -rule.missPenalty * missed.length
       const b = bucket(day)
@@ -200,7 +201,8 @@ export function computeGame({
     if (!due.length) return null // nothing due: neutral
     return due.every(tpl => {
       const run = runIndex.get(`${tpl.id}:${day}`)
-      return (tpl.items || []).length > 0 && (tpl.items || []).every(i => run?.checked?.[i.id])
+      const items = scheduledItems(tpl, day)
+      return items.length > 0 && items.every(i => run?.checked?.[i.id])
     })
   }
   let streak = 0

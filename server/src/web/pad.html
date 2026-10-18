@@ -737,11 +737,11 @@ function renderInbox() {
     })
 
     const body = el('div')
-    body.appendChild(el('div', null, row.text))
+    body.appendChild(el('div', null, row.label || row.text))
     const meta = el('div', 'sub')
     if (row.list) meta.appendChild(el('span', 'tag', row.list))
-    meta.appendChild(document.createTextNode(row.pending ? 'waiting to sync' : (row.by || '')))
-    body.appendChild(meta)
+    if (row.pending) meta.appendChild(document.createTextNode('waiting to sync'))
+    if (meta.childNodes.length) body.appendChild(meta)
 
     li.append(tick, body)
     host.appendChild(li)

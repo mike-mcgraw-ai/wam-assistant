@@ -83,7 +83,7 @@ test('fragmented speech becomes readable units while raw noise remains untouched
 test('ordinary need language is not a task command', () => {
   assert.equal(parseTaskCommand('I need to start the day.'), null)
   assert.equal(parseTaskCommand('I need to be added on here.'), null)
-  assert.equal(parseTaskCommand('We need to make the meds workflow better.'), null)
+  assert.equal(parseTaskCommand('We need to make the stretch workflow better.'), null)
 })
 
 test('short explicit commands remain supported', () => {

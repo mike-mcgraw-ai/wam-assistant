@@ -39,6 +39,7 @@ import { linkExistingSpokenTask, materializeSpokenWork, previewSpokenTaskUpdate,
 import { transcribeSession } from './sessionTranscript.js'
 import { remainingPlanSteps } from './planRows.js'
 import { refreshWeatherBrief, weatherRefreshDelayMs } from './sources/weather.js'
+import { refreshMailBrief, mailRefreshDelayMs } from './sources/mail.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -320,6 +321,29 @@ function scheduleMorningWeather(delayMs = 0) {
       .catch(err => console.warn(`[weather] poll: ${err.message}`))
       .finally(() => {
         scheduleMorningWeather(weatherRefreshDelayMs({
+          now: new Date(),
+          timeZone: checklists.timezone,
+          env: process.env,
+        }))
+      })
+  }, delayMs)
+}
+
+async function refreshMorningMail(reason = 'poll') {
+  const result = await refreshMailBrief({
+    morningBrief,
+    env: process.env,
+    logger: console,
+  })
+  if (!result.ok) console.warn(`[mail] ${reason}: ${result.error}`)
+}
+
+function scheduleMorningMail(delayMs = 0) {
+  setTimeout(() => {
+    refreshMorningMail('poll')
+      .catch(err => console.warn(`[mail] poll: ${err.message}`))
+      .finally(() => {
+        scheduleMorningMail(mailRefreshDelayMs({
           now: new Date(),
           timeZone: checklists.timezone,
           env: process.env,
@@ -2060,7 +2084,7 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { ok: true, members: householdMembers(), fallback: 'Household' })
   }
   if (req.method === 'GET' && url.pathname === '/list') {
-    const items = inbox.active(300).map(item => ({ ...item, label: Inbox.label(item) }))
+    const items = inbox.active(300).map(item => ({ ...item, by: null, label: Inbox.label(item) }))
     return json(res, 200, { ok: true, items, today: listToday() })
   }
   if (req.method === 'POST' && url.pathname.startsWith('/list/')) {
@@ -2068,7 +2092,7 @@ const server = http.createServer(async (req, res) => {
     let body = {}
     try { body = JSON.parse((await readBody(req, 4 * 1024 * 1024)) || '{}') } catch (err) { return json(res, 400, { error: `bad body: ${err.message}` }) }
     const by = String(body.by || 'Household').slice(0, 24)
-    const listing = () => inbox.active(300).map(item => ({ ...item, label: Inbox.label(item) }))
+    const listing = () => inbox.active(300).map(item => ({ ...item, by: null, label: Inbox.label(item) }))
 
     if (url.pathname === '/list/voice') {
       // A retried utterance returns the first answer instead of applying twice.
@@ -2167,15 +2191,20 @@ const server = http.createServer(async (req, res) => {
       }
       return json(res, 200, { ok: true, changeId, say: 'Cleared the list.', items: listing() })
     }
-    const one = url.pathname.match(/^\/list\/([^/]+)\/(done|undone|urgent|remove)$/)
+    const one = url.pathname.match(/^\/list\/([^/]+)\/(done|undone|urgent|remove|edit)$/)
     if (one) {
       const id = decodeURIComponent(one[1])
       const item = inbox.items.get(id)
       if (!item) return json(res, 404, { ok: false, error: 'unknown item' })
+      if (one[2] === 'edit' && (typeof body.name !== 'string' || !body.name.trim())) return json(res, 400, { ok: false, error: 'name required' })
       const changeId = `chg-${one[2]}-${Date.now()}`
       rememberChange(changeId)
       let say = ''
-      if (one[2] === 'done') {
+      if (one[2] === 'edit') {
+        const result = inbox.update(id, { name: body.name }, { changeId })
+        if (!result.ok) return json(res, 400, result)
+        say = `Updated ${result.item.name}.`
+      } else if (one[2] === 'done') {
         inbox.complete(id, true, { by, changeId })
         if (item.taskId) closeTask(item.taskId)
         say = `Checked off ${item.name || item.text}.`
@@ -2250,7 +2279,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/inbox') {
-    return json(res, 200, { items: inbox.active(), pending: inbox.pending().length })
+    const items = inbox.active().map(item => ({ ...item, by: null, label: Inbox.label(item) }))
+    return json(res, 200, { items, pending: inbox.pending().length })
   }
 
   if (req.method === 'POST' && url.pathname === '/tasks') {
@@ -3071,6 +3101,7 @@ setInterval(() => {
 }, 5 * 60 * 1000)
 
 scheduleMorningWeather(0)
+scheduleMorningMail(250)
 
 startSocketMode({
   appToken: process.env.SLACK_APP_TOKEN,

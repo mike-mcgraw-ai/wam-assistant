@@ -27,7 +27,7 @@ test('morning brief creates a truthful all-source setup snapshot', () => {
   assert.equal(snapshot.sources.weather.status, 'notConfigured')
   assert.equal(snapshot.sources.money.status, 'notConfigured')
   assert.deepEqual(snapshot.summary, {
-    line1: '💬⚙ 📩⚙ 🔗– 🌤⚙ 💵⚙',
+    line1: 'MAIL SET | SET | MONEY SET',
     line2: '',
     line3: '',
     asOfLabel: '@7:05a',
@@ -58,14 +58,14 @@ test('source updates require freshness for ok values and become stale after ttl'
     dayStatus: { day: '2026-10-12', started: false },
   })
   assert.equal(fresh.sources.weather.status, 'ok')
-  assert.equal(fresh.summary.line1, '💬⚙ 📩⚙ 🔗– 🌤61°☔ 💵⚙')
+  assert.equal(fresh.summary.line1, 'MAIL SET | 61F R NOW | MONEY SET')
 
   const stale = brief.snapshot({
     now: Date.UTC(2026, 9, 12, 11, 6),
     dayStatus: { day: '2026-10-12', started: false },
   })
   assert.equal(stale.sources.weather.status, 'stale')
-  assert.equal(stale.summary.line1, '💬⚙ 📩⚙ 🔗– 🌤61°☔? 💵⚙')
+  assert.equal(stale.summary.line1, 'MAIL SET | 61F R NOW? | MONEY SET')
 })
 
 test('morning brief persists compact source summaries across restarts', () => {
@@ -91,10 +91,41 @@ test('morning brief persists compact source summaries across restarts', () => {
 
     assert.equal(snapshot.sources.mail.value, 3)
     assert.equal(snapshot.sources.mail.display, '3')
-    assert.equal(snapshot.summary.line1, '💬⚙ 📩3 🔗– 🌤⚙ 💵⚙')
+    assert.equal(snapshot.summary.line1, 'MAIL 3 | SET | MONEY SET')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('manual seed placeholders never render as real stale readings', () => {
+  const brief = new MorningBrief({ timezone: 'America/New_York' })
+  for (const [id, display, value] of [
+    ['texts', '0', 0],
+    ['mail', '0', 0],
+    ['linkedin', '0', 0],
+    ['weather', '61F', 61],
+  ]) {
+    assert.equal(brief.updateSource({
+      id,
+      status: 'ok',
+      display,
+      value,
+      asOf: '2026-10-13T09:06:57.000Z',
+      ttlSeconds: 86400,
+      source: 'manual-seed',
+      confidence: 'seeded',
+    }).ok, true)
+  }
+
+  const snapshot = brief.snapshot({
+    now: Date.UTC(2026, 9, 18, 16, 25),
+    dayStatus: { day: '2026-10-18', started: false },
+  })
+  assert.equal(snapshot.sources.texts.status, 'notConfigured')
+  assert.equal(snapshot.sources.mail.status, 'notConfigured')
+  assert.equal(snapshot.sources.linkedin.status, 'disabled')
+  assert.equal(snapshot.sources.weather.status, 'notConfigured')
+  assert.equal(snapshot.summary.line1, 'MAIL SET | SET | MONEY SET')
 })
 
 test('finance updates reject private-looking identifiers', () => {
@@ -152,7 +183,7 @@ test('finance summary renders numeric money slots instead of a slot count', () =
     now: Date.UTC(2026, 9, 12, 11, 5),
     dayStatus: { day: '2026-10-12', started: false },
   })
-  assert.equal(snapshot.summary.line1, '💬⚙ 📩⚙ 🔗– 🌤⚙ 💵+$240/$18.2k')
+  assert.equal(snapshot.summary.line1, 'MAIL SET | SET | MONEY +$240/$18.2k')
 })
 
 test('finance summary will not show seeded placeholders as a number', () => {
@@ -190,5 +221,5 @@ test('finance summary will not show seeded placeholders as a number', () => {
     now: Date.UTC(2026, 9, 12, 11, 5),
     dayStatus: { day: '2026-10-12', started: false },
   })
-  assert.equal(snapshot.summary.line1, '💬⚙ 📩⚙ 🔗– 🌤⚙ 💵⚙')
+  assert.equal(snapshot.summary.line1, 'MAIL SET | SET | MONEY SET')
 })
