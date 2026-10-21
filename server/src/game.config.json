@@ -1,0 +1,12 @@
+{
+  "$comment": "Synthetic life-game rules for the public snapshot. XP is computed by fixed rules from the checklist runs; nothing is stored or guessed.",
+  "levels": { "base": 100, "growth": 50 },
+  "defaults": { "stepXP": 10, "completeBonus": 25, "missPenalty": 0, "penaltyDays": [] },
+  "checklists": {
+    "morning": { "stepXP": 10, "completeBonus": 25, "missPenalty": 5, "penaltyDays": ["mon", "tue", "wed", "thu", "fri"] },
+    "laundry": { "stepXP": 10, "completeBonus": 25 }
+  },
+  "commitments": { "stepPenalty": 10, "taskPenalty": 10 },
+  "streak": { "milestones": [3, 7, 14, 30, 60, 100] },
+  "pings": { "levelUp": true, "streakMilestone": true }
+}

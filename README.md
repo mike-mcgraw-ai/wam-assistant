@@ -2,11 +2,22 @@
 
 > Historical milestone `v0.42.0`, based on face build `0.184.0`. Originally completed 2026-10-18; sanitized and published 2026-10-18. See [MILESTONE.md](MILESTONE.md) for this checkpoint.
 
-A portable, privacy-first conversation assistant with an Even G2 smart-glasses
-client. WAM keeps the thread of a real conversation visible without demanding
-the user's full attention: live speech becomes readable paragraphs, a running
-conversation compass preserves the main thread, and brief cues can surface a
-useful answer, fact-check, follow-up, or recap.
+WAM is a shared household assistant: the list, the chores and their timers in
+one place, so the household doesn't live in one person's memory. It runs on a
+phone, with Even G2 smart glasses as an optional heads-up display. The website,
+with a fictional sample household, is at
+<https://wam-in-progress.halebread5.chatgpt.site/>.
+
+This repository is the glasses side: the Even G2 app and the local hub it talks
+to. It began as a conversation assistant. Live speech becomes readable
+paragraphs, a running conversation compass keeps the main thread, and brief
+cues surface an answer, fact-check, follow-up or recap. It grew into a daily
+heads-up display: a morning brief, the day's running order of chores with live
+timers, voice notes reviewed before they are saved, and chat with AI assistants.
+
+The household app itself, WAM Home, is developed in a separate private
+repository. This snapshot keeps the shared Start Day rules and swaps the rest
+for a plain-list stand-in, so the hub still runs on its own.
 
 This repository is a sanitized portfolio edition. It contains synthetic
 configuration and fixtures only. It does not contain personal conversations,
@@ -21,6 +32,8 @@ diagnostic or one-line hardware build as a separate release.
 ## What it demonstrates
 
 - A 576 x 288 heads-up display designed for fast glance reading
+- A daily running order: hands-on steps and machine waits, live timers, and
+  chore times learned from completed runs (a missing time stays blank)
 - Local speech-to-text with an optional cloud fallback
 - Thought-level transcript coalescing instead of treating audio chunks as sentences
 - Running topics, recent points, summaries, and conversational recovery
@@ -114,3 +127,8 @@ hardware, debugging evidence, privacy choices, and release decisions. Claude
 and Codex have been used as implementation collaborators. That collaboration is
 documented because coordinating multiple agents safely became part of the
 engineering work.
+
+## License
+
+All rights reserved. The source is published for portfolio review only; see
+[LICENSE](LICENSE).
