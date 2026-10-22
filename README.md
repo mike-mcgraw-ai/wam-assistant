@@ -104,20 +104,33 @@ the returned transcript board and cues.
 - `docs/SPOKEN-WORK-GLASSES-REVIEW.md`: a synthetic case study of the compact glasses review and guarded voice amendments
 - `docs/SPOKEN-WORK-MIGRATION.md`: a synthetic case study of verified-backup, resumable migration and manual-purge retention
 
-## Try the software path
+## Try it
 
-The portfolio snapshot intentionally does not include a production package or
-private deployment configuration.
+The quickest way to see WAM is the website's sample household, in the browser,
+with no install, account or glasses: <https://wam-in-progress.halebread5.chatgpt.site/>.
+
+On the glasses, the same day looks like this (rendered by the display code in
+this repository, from synthetic data):
+
+![A laundry routine mid wash cycle, with live timers, on the Even G2 display](docs/images/glasses-laundry.png)
+
+![The conversation compass: the main thread, the current point and a parked tangent](docs/images/glasses-conversation.png)
+
+## Run the code
+
+For reviewers who want to read and run the source. The portfolio snapshot
+intentionally does not include a production package or private deployment
+configuration.
 
 ```bash
 npm --prefix server install
 npm --prefix glasses install
 npm test
-npm run demo
+npm --prefix server start
 ```
 
-Start the local hub with `npm --prefix server start`. Hardware packaging needs
-the EvenHub SDK and a package identity registered by the developer.
+Hardware packaging needs the EvenHub SDK and a package identity registered by
+the developer.
 
 ## Development disclosure
 

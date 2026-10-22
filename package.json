@@ -4,7 +4,6 @@
   "version": "0.42.0",
   "scripts": {
     "build": "npm --prefix glasses run build",
-    "test": "npm --prefix server test && npm --prefix glasses run typecheck",
-    "demo": "npm --prefix glasses run demo"
+    "test": "npm --prefix server test && npm --prefix glasses run typecheck"
   }
 }
