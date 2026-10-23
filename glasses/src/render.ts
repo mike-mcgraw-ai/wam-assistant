@@ -41,6 +41,7 @@ import {
   inboxItemLines,
   agendaRow,
   taskRow,
+  taskDoneRow,
   ruleRight,
   ruleCentred,
   ago,
@@ -1533,10 +1534,10 @@ function renderPlan(state: UiState, cursor: number): string {
       else if (selected && state.armedTaskId === `undo:fu:${f.id}`) lines.push(clipToWidth(`>[?] Undo ${f.label}?`))
       else lines.push(followupRow(f, selected))
     } else if (row.kind === 'task') {
-      lines.push(clip(`${point}${taskRow(row.task)}`, LINE_CHARS))
+      lines.push(taskRow(row.task, false, point === '>'))
     } else if (row.kind === 'task-done') {
       const armed = state.armedTaskId === `undo:task:${row.task.taskId}`
-      lines.push(clipToWidth(`${point}${armed ? '[?] Reopen ' : '[x] Done '}${row.task.label}${armed ? '?' : ''}`))
+      lines.push(armed ? clipToWidth(`${point}[?] Reopen ${row.task.label}?`) : taskDoneRow(row.task, point === '>'))
     } else if (row.kind === 'agenda') {
       // agendaRow already enforces the measured pixel width. A second
       // character-count cap chopped the final `r` from "Take out of dryer"

@@ -1,6 +1,6 @@
 # Device Build History
 
-WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 43 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
+WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 44 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
 
 | Face build | Attribution / status | Change |
 |---|---|---|
@@ -186,3 +186,4 @@ WAM used rapid numbered device builds for hardware testing. These entries are do
 | v0.189.0 | Claude (WAM Home v0.40.0 synced — a step started out of turn leads its routine) |  |
 | v0.190.0 | Claude (one system: the hub on Mike's WAM Home household; switched 2026-10-23) | Personal WAM's life space now reads and writes the wearer's WAM Home household: one system with the app. |
 | v0.191.0 | Codex (recent Solo Notes fixes) |  |
+| v0.192.0 | Claude (glasses task rows get check boxes) | Tasks on Home get the same check box as every other row; a click still opens the task first. |

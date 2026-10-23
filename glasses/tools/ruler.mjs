@@ -27,7 +27,7 @@ if (!WIDTHS_MEASURED) console.log('NOTE: widths are estimates until the calibrat
 if (arg) { show('', arg); process.exit(0) }
 
 const plan = JSON.parse(readFileSync('/tmp/plan.json', 'utf8'))
-for (const t of plan.tasks) show('', ' ' + taskRow(t))
+for (const t of plan.tasks) show('', taskRow(t))
 console.log('')
 for (const r of plan.agenda) show('', ' ' + agendaRow(r))
 

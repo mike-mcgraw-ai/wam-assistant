@@ -47,3 +47,4 @@ These are the real completion dates of private device builds. The sanitized port
 | v0.41.0 | 2026-10-18 | 0.182.0 | **Full-width list names:** Long list items use the full display width and wrap across lines without an attribution suffix. |
 | v0.42.0 | 2026-10-18 | 0.184.0 | **Grocery labels that learn once:** Item-first list labels preserve exact product names. New names get one AI suggestion; corrections become deterministic rules for future matches. |
 | v0.43.0 | 2026-10-23 | 0.191.0 | **Time that tells the whole story:** Active routines keep the expected duration beside the live clock, completed work earns on the day it happened, and captured-note processing is supervised as a durable service. |
+| v0.44.0 | 2026-10-23 | 0.192.0 | **Tasks you can check:** Tasks on Home use the same check box as every other row, lined up with the daily items and follow-ups; a click still opens the task first so it is checked off with its notes. |

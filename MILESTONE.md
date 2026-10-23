@@ -1,8 +1,8 @@
-# Time that tells the whole story
+# Tasks you can check
 
-- Public version: `v0.43.0`
-- Face build: `0.191.0`
+- Public version: `v0.44.0`
+- Face build: `0.192.0`
 - Originally completed: `2026-10-23`
 - Sanitized and published: `2026-10-23`
 
-Active routines keep the expected duration beside the live clock, completed work earns on the day it happened, and captured-note processing is supervised as a durable service.
+Tasks on Home use the same check box as every other row, lined up with the daily items and follow-ups; a click still opens the task first so it is checked off with its notes.

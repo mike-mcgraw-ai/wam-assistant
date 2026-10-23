@@ -399,8 +399,16 @@ export function wrap(text: string, width = LINE_CHARS): string[] {
  * Sorting it downward would demote the row that most needs to stay in view
  * for exactly the hours you are most likely to be looking at the screen.
  */
-export function taskRow(row: TaskRow, armed = false): string {
-  const marker = armed ? '?' : '!'
+export function taskRow(row: TaskRow, armed = false, selected = false): string {
+  // A task is a row you can check, drawn like the every-day items and
+  // follow-ups around it: the cursor and box at the left, the label at the same
+  // place (v0.192.0). Mike, 2026-10-23: "since they are all showing as ! For
+  // tasks there really isn't a check box for those - need to make them the
+  // same check boxes - just make the click on those go in first". A click
+  // still opens the task first; [!] keeps the one meaning it has on the list
+  // screens, urgent.
+  const urgent = /\(urgent\)\s*$/i.test(row.label)
+  const box = armed ? '[?]' : urgent ? '[!]' : '[ ]'
   const est = row.ms === null ? '' : mins(row.ms)
   const when = armed ? 'done?' : (row.opensLabel ?? '')
 
@@ -408,10 +416,20 @@ export function taskRow(row: TaskRow, armed = false): string {
   // every time on the page ends on one vertical line.
   return clipToWidth(
     layout([
-      { text: marker, at: 8 },
-      { text: row.label, at: COL.taskLabel },
+      { text: `${selected ? '>' : ' '}${box}`, at: 0 },
+      { text: row.label, at: COL.label - 130 },
       { text: when, end: COL.taskWhen },
       { text: est, end: COL.right },
+    ]),
+  )
+}
+
+/** A task ticked a moment ago, kept so the tick can be undone: the same row, checked. */
+export function taskDoneRow(row: TaskRow, selected = false): string {
+  return clipToWidth(
+    layout([
+      { text: `${selected ? '>' : ' '}[x]`, at: 0 },
+      { text: row.label, at: COL.label - 130 },
     ]),
   )
 }
