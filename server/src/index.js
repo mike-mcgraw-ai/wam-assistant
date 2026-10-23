@@ -108,9 +108,18 @@ function gameState(now = Date.now(), historyDays = 60) {
     for (const t of household.allTasks()) {
       taskInfo[t.hubId] = { label: t.label, doneAt: t.done ? t.doneAt ?? null : null, completedOn: tasks.done.get(t.hubId)?.completedOn ?? null }
     }
+    // The import copied the hub's runs into WAM Home, but only the steps the
+    // routine has today: Stretch, paused in Morning, was left out of September's
+    // days and its XP with it (2026-10-23). WAM Home's copy is the record; a
+    // tick the hub kept for an item that copy has no step for still counts.
     runs = [
       ...runs.filter(run => (checklists.templates.get(run.checklistId)?.space ?? 'ops') !== 'life'),
-      ...household.gameRuns(id => checklists.templates.get(id)?.items ?? [], ts => checklists.dayKey(ts)),
+      ...household.gameRuns(id => checklists.templates.get(id)?.items ?? [], ts => checklists.dayKey(ts)).map(run => {
+        const hubRun = run.hubRunId && checklists.runs.get(run.hubRunId)
+        if (!hubRun) return run
+        const dropped = Object.entries(hubRun.checked ?? {}).filter(([id]) => !run.stepIds.includes(id))
+        return { ...run, checked: { ...Object.fromEntries(dropped), ...run.checked } }
+      }),
     ]
   }
   return computeGame({

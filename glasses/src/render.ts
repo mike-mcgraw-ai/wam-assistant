@@ -821,8 +821,14 @@ export function indexRows(state: UiState): IndexRow[] {
   const rows: IndexRow[] = []
 
   // Shared-list groups sit above your own checklists: something the other
-  // person added is the thing most likely to be news to you.
-  for (const group of inboxGroups(state)) rows.push({ kind: 'inbox', group })
+  // person added is the thing most likely to be news to you. In Life only
+  // urgent items earn a row here (v0.193.0); the whole list lives under the
+  // Life bar, in Capture → Groceries. Mike, 2026-10-23: "URGENT is the only
+  // ones that should be added to glasses list on main page".
+  for (const group of inboxGroups(state)) {
+    if (state.space === 'life' && !group.items.some(item => item.urgent)) continue
+    rows.push({ kind: 'inbox', group })
+  }
   const active = (state.snapshot?.checklists?.active ?? []).filter(r => inSpace(r.space, state.space))
 
   // Incomplete lists earn a row. A finished daily list drops off rather than
@@ -852,7 +858,7 @@ export function indexRows(state: UiState): IndexRow[] {
 function renderIndexRow(row: IndexRow, selected: boolean, space: Space): string {
   switch (row.kind) {
     case 'inbox':
-      return inboxGroupRow(row.group, selected)
+      return inboxGroupRow(row.group, selected, space === 'life')
     case 'check':
       return checklistRow(row.run, selected)
     case 'start':
@@ -1162,7 +1168,8 @@ function renderIndex(state: UiState, cursor: number): string {
   )
   const checksLeft = open.reduce((n, r) => n + (r.total - r.done), 0)
   const flagged = visibleBoards(state).some(b => b.status !== 'ok')
-  const listItems = inboxGroups(state).reduce((n, g) => n + g.items.length, 0)
+  // Only urgent items are news on this screen in Life (v0.193.0).
+  const listItems = inboxGroups(state).reduce((n, g) => n + g.items.filter(item => state.space !== 'life' || item.urgent).length, 0)
 
   if (checksLeft === 0 && !flagged && listItems === 0 && !cue && !state.alertsOnly && rows.length > 0) {
     // Everything genuinely done and green. Worth marking rather than showing

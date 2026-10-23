@@ -1,8 +1,8 @@
-# Tasks you can check
+# Only urgent groceries on the main screens
 
-- Public version: `v0.44.0`
-- Face build: `0.192.0`
+- Public version: `v0.45.0`
+- Face build: `0.193.0`
 - Originally completed: `2026-10-23`
-- Sanitized and published: `2026-10-23`
+- Sanitized and published: `2026-10-26`
 
-Tasks on Home use the same check box as every other row, lined up with the daily items and follow-ups; a click still opens the task first so it is checked off with its notes.
+Groceries wait under Capture in the Life bar; only items marked urgent reach the glasses' main screens.

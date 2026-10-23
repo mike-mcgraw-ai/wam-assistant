@@ -486,7 +486,13 @@ export function fitsRow(stat: ChecklistStats, selected: boolean): string {
 }
 
 /** One row on the index for a shared list: "> *  Groceries        3" */
-export function inboxGroupRow(group: InboxGroup, selected: boolean): string {
+export function inboxGroupRow(group: InboxGroup, selected: boolean, urgentOnly = false): string {
+  // In Life the row is there only for urgent items, so it counts those
+  // (v0.193.0); the whole list is one click in.
+  if (urgentOnly) {
+    const urgent = group.items.filter(item => item.urgent).length
+    return clip(`${selected ? '>' : ' '}!   ${pad(group.name, 14)} ${urgent} urgent`, LINE_CHARS)
+  }
   return clip(
     `${selected ? '>' : ' '}*   ${pad(group.name, 14)} ${group.items.length}`,
     LINE_CHARS,

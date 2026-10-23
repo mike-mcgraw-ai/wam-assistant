@@ -1,6 +1,6 @@
 # WAM Assistant
 
-> Historical milestone `v0.43.0`, based on face build `0.191.0`. Originally completed 2026-10-23; sanitized and published 2026-10-23. See [MILESTONE.md](MILESTONE.md) for this checkpoint.
+> Historical milestone `v0.45.0`, based on face build `0.193.0`. Originally completed 2026-10-23; sanitized and published 2026-10-26. See [MILESTONE.md](MILESTONE.md) for this checkpoint.
 
 WAM is a shared household assistant: the list, the chores and their timers in
 one place, so the household doesn't live in one person's memory. It runs on a
@@ -25,7 +25,7 @@ recordings, tasks, credentials, private server addresses, packaged apps, or the
 private repository's Git objects.
 
 WAM progressed through more than 100 documented on-device iterations. This
-public history distills that work into 43 runnable milestones so the important
+public history distills that work into 45 runnable milestones so the important
 product and engineering turns remain reviewable without presenting every
 diagnostic or one-line hardware build as a separate release.
 
