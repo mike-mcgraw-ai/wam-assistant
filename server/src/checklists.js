@@ -238,7 +238,17 @@ export class Checklists {
 
   /** Match spoken work to saved routines and identify the unmatched clauses. */
   /** The on-demand routines that can be started by name in a space. */
+  /**
+   * Routines kept outside this store (v0.190.0): linked to Mike's WAM Home
+   * household, the life space's routines are his WAM Home ones, so Start Day
+   * matches what the app would start. A function (space) => templates | null;
+   * null (the default) changes nothing.
+   */
+  externalRoutines = null
+
   routineTemplates(space = 'life') {
+    const external = this.externalRoutines?.(space)
+    if (external) return external
     return [...this.templates.values()]
       .filter(template => template.kind === 'ondemand' && (template.space ?? 'ops') === space)
   }
@@ -434,12 +444,19 @@ export class Checklists {
         : sameWork(item.label, prior.label)))) continue
       unique.push(item)
     }
-    const missing = unique.find(item => item.kind === 'checklist' && !this.templates.has(item.checklistId))
+    const known = id => this.templates.has(id) || Boolean(this.externalRoutines?.(space)?.some(t => t.id === id))
+    const missing = unique.find(item => item.kind === 'checklist' && !known(item.checklistId))
     if (missing) return { ok: false, error: `reviewed checklist no longer exists: ${missing.label}` }
     return { ok: true, draftId: draft.id, items: unique, tasks: unique.filter(item => item.kind === 'task') }
   }
 
-  commitDayDraft(space = 'life', now = Date.now(), taskIds = [], sourceLinks = []) {
+  /**
+   * @param {object} [options]
+   * @param {Array<{checklistId: string, runId: string}>|null} [options.startedElsewhere]
+   *   Linked to WAM Home (v0.190.0), the routines were started there; record
+   *   their ids as today's commitments instead of starting runs here.
+   */
+  commitDayDraft(space = 'life', now = Date.now(), taskIds = [], sourceLinks = [], { startedElsewhere = null } = {}) {
     const prepared = this.prepareDayDraft(space, now)
     if (!prepared.ok) return prepared
     const day = this.dayKey(now)
@@ -451,6 +468,14 @@ export class Checklists {
     const runIds = []
     for (const item of unique) {
       if (item.kind !== 'checklist') continue
+      if (startedElsewhere) {
+        const elsewhere = startedElsewhere.find(row => row.checklistId === item.checklistId)
+        if (!elsewhere) continue
+        checklistIds.push(item.checklistId)
+        if (elsewhere.runId) runIds.push(elsewhere.runId)
+        if (item.note?.trim()) this.addNote(item.checklistId, item.note, 'start-day', `${draft.id}:day-note:${item.id}`, now)
+        continue
+      }
       const started = this.start(item.checklistId, now, { startIndex: item.startIndex ?? 0 })
       if (!started.ok) continue
       checklistIds.push(item.checklistId)

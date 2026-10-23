@@ -53,6 +53,27 @@ test('steps earn XP, a complete list earns its bonus', () => {
   assert.equal(g.todayEarned, 55)
 })
 
+test('steps and completion bonus earn on the day they were actually checked', () => {
+  const late = {
+    runId: 'dishes-old',
+    checklistId: 'dishes',
+    day: '2026-10-18',
+    checked: {
+      load: { at: Date.parse('2026-10-22T14:00:00Z') },
+      run: { at: Date.parse('2026-10-22T16:00:00Z') },
+    },
+  }
+  const g = computeGame({
+    runs: [late], templates, config, today: '2026-10-22', dayKeyOf: utcDay,
+  })
+
+  assert.equal(g.todayEarned, 45)
+  assert.equal(g.days.find(day => day.day === '2026-10-18').earned, 0)
+  assert.deepEqual(g.days.find(day => day.day === '2026-10-22').entries.map(entry => entry.kind), [
+    'step', 'step', 'complete',
+  ])
+})
+
 test('items no longer on the list do not earn', () => {
   const g = computeGame({ runs: [run('dishes', '2026-10-10', ['gone'])], templates, config, today: '2026-10-10' })
   assert.equal(g.xp, 0)

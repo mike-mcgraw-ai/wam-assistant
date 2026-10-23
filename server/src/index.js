@@ -13,6 +13,8 @@ import { Inbox } from './inbox.js'
 import { parseListSpeech } from './vendor/wam-home/listVoice.js'
 import { applyListSpeech, relinkAfterUndo } from './vendor/wam-home/householdList.js'
 import { routeHouseholdSpeech } from './vendor/wam-home/householdRouter.js'
+import { createHousehold } from './wamHome/household.js'
+import { TaskOverlay } from './wamHome/overlay.js'
 import { Tasks, matchOpenTask, linkedCompletionEvidence } from './tasks.js'
 import { Followups, daysBetween, reminderText } from './followups.js'
 import { Triage, sweepInbox } from './triage.js'
@@ -100,8 +102,19 @@ function gameState(now = Date.now(), historyDays = 60) {
   for (const t of tasks.taskDefs()) {
     taskInfo[t.id] = { label: t.label, doneAt: tasks.done.get(t.id)?.doneAt ?? null, completedOn: tasks.done.get(t.id)?.completedOn ?? null }
   }
+  // Linked (v0.190.0): life runs and tasks are WAM Home's. Work lists stay here.
+  let runs = [...checklists.runs.values()]
+  if (household.ready) {
+    for (const t of household.allTasks()) {
+      taskInfo[t.hubId] = { label: t.label, doneAt: t.done ? t.doneAt ?? null : null, completedOn: tasks.done.get(t.hubId)?.completedOn ?? null }
+    }
+    runs = [
+      ...runs.filter(run => (checklists.templates.get(run.checklistId)?.space ?? 'ops') !== 'life'),
+      ...household.gameRuns(id => checklists.templates.get(id)?.items ?? [], ts => checklists.dayKey(ts)),
+    ]
+  }
   return computeGame({
-    runs: [...checklists.runs.values()],
+    runs,
     templates: checklists.templates,
     config: gameConfig,
     today: checklists.dayKey(now),
@@ -151,6 +164,14 @@ function reopenTask(taskId) {
   try { tasks.complete(taskId, false) } catch (err) { console.warn(`[list] reopen task: ${err.message}`) }
 }
 const listDeps = () => ({ inbox, openUrgentTask, closeTask, reopenTask })
+function householdLists() {
+  const names = new Set(['Groceries'])
+  for (const item of inbox.active(500)) {
+    const name = String(item.list || '').trim()
+    if (name && !['Unsorted', 'Other'].includes(name)) names.add(name)
+  }
+  return [...names].map(name => ({ name }))
+}
 /** Names for the kiosk chips. Private data (server/data/household.json), never in git. */
 function householdMembers() {
   try {
@@ -196,7 +217,7 @@ function undoHouseholdChange(changeId) {
  */
 const KIOSK_DONE_GRACE_MS = 10 * 60_000
 function kioskRoutines(now = Date.now()) {
-  return checklists.snapshot(now).active
+  return checklistsSnapshot(now).active
     .filter(run => run.space === 'life' && run.kind === 'ondemand')
     .filter(run => !run.complete || (run.lastAt && now - run.lastAt < KIOSK_DONE_GRACE_MS))
     .map(run => ({
@@ -223,8 +244,8 @@ function listToday() {
   const committed = new Set(checklists.committedTaskIds('life'))
   return {
     routines: kioskRoutines(),
-    tasks: tasks.list()
-      .filter(task => task.space !== 'ops' && committed.has(task.id))
+    tasks: (linked() ? household.taskList(Date.now()) : tasks.list())
+      .filter(task => task.space !== 'ops' && (linked() || committed.has(task.id)))
       .map(task => {
         const last = task.notes?.at(-1)
         return {
@@ -252,6 +273,187 @@ const tasks = new Tasks(
   JSON.parse(readFileSync(process.env.TASKS_PATH || join(HERE, 'tasks.config.json'), 'utf8')),
   { storePath: join(DATA_DIR, 'tasks.json'), logPath: join(DATA_DIR, 'tasks.jsonl') },
 )
+
+// ---- one system: the life space on Mike's WAM Home household (v0.190.0) ---
+// Mike, 2026-10-22: "the glasses and app should work the same with the same
+// logic 100%". With WAM_HOME_LINK=1 and the hub paired (tools/wam-home-link.mjs),
+// the life space's list, tasks, routines and runs come from WAM Home, and
+// Home's order from WAM Home's own core. Off, or not yet paired, nothing here
+// changes anything: the hub uses its own stores exactly as before.
+const taskOverlay = new TaskOverlay(join(DATA_DIR, 'wam-home-overlay.json'))
+const household = createHousehold({
+  enabled: process.env.WAM_HOME_LINK === '1' && Boolean(process.env.WAM_HOME_URL),
+  url: process.env.WAM_HOME_URL || '',
+  dataDir: DATA_DIR,
+  hubTemplates: () => [...checklists.templates.values()]
+    .filter(t => (t.space ?? 'ops') === 'life')
+    .map(t => ({ id: t.id, name: t.name, kind: t.kind })),
+  taskOverlay: id => ({ ...taskOverlay.get(id), notes: tasks.notes(id) }),
+})
+// A WAM Home task can carry hub notes; completing it is WAM Home's (household.taskDone).
+tasks.external = id => (household.ready ? household.taskById(id) : null)
+// Start Day matches the household's own routines when linked.
+checklists.externalRoutines = space => (space === 'life' && household.ready ? household.routineTemplates() : null)
+
+/**
+ * A new task, wherever it lives (v0.190.0). Linked, a life task is created in
+ * WAM Home under an id chosen here (so the caller has it at once, as with the
+ * hub's own store), and its hub-only details go in the overlay. Otherwise, the
+ * hub's own store, exactly as before.
+ */
+function addTaskAnywhere(input = {}, at = Date.now()) {
+  if (!household.ready || input.space === 'ops') return tasks.addTask(input, at)
+  const label = String(input.label ?? input.text ?? '').trim().slice(0, 80)
+  if (!label) return { ok: false, error: 'empty task' }
+  const clientId = String(input.clientId || '').trim()
+  const earlier = taskOverlay.byClientId(clientId)
+  if (earlier && household.ownsTask(earlier)) {
+    return { ok: true, duplicate: true, task: { ...household.taskById(earlier), ...taskOverlay.get(earlier) } }
+  }
+  const taken = new Set([...tasks.taskDefs().map(t => t.id), ...household.allTasks().map(t => t.hubId)])
+  const base = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || `task-${at.toString(36)}`
+  let id = base
+  for (let n = 2; taken.has(id); n += 1) id = `${base}-${n}`
+  const estimate = Number(input.estimateMinutes)
+  const extra = taskOverlay.set(id, {
+    weight: input.weight === 'normal' ? 'normal' : 'big',
+    window: ['business', 'evening', 'anytime'].includes(input.window) ? input.window : 'anytime',
+    needsPlan: input.needsPlan === true ? true : undefined,
+    note: String(input.note || '').trim().slice(0, 120) || undefined,
+    estimateMinutes: Number.isFinite(estimate) && estimate > 0 ? Math.round(estimate) : undefined,
+    clientId: clientId || undefined,
+  })
+  const created = household.addTask({ id, label, createdAt: at })
+  if (!created.ok) return created
+  const firstNote = String(input.firstNote || '').trim()
+  if (firstNote) tasks.addNote(id, firstNote, input.by, `${clientId || id}:note`, at)
+  return { ok: true, task: { id, label, space: 'life', ...extra } }
+}
+/** The task store as hub code that creates tasks sees it, linked or not (spoken-work review). */
+const tasksForWork = {
+  addTask: (input, at) => addTaskAnywhere(input, at),
+  addNote: (...args) => tasks.addNote(...args),
+  notes: id => tasks.notes(id),
+  list: now => tasksList(now),
+  taskDefs: () => (household.ready
+    ? [...tasks.taskDefs().filter(t => (t.space ?? 'life') !== 'life' || t.id === CAPTURE_TASK_ID),
+      ...household.allTasks().filter(t => !t.archivedAt).map(t => ({ id: t.hubId, label: t.label, space: 'life' }))]
+    : tasks.taskDefs()),
+}
+if (process.env.WAM_HOME_LINK === '1' && !process.env.WAM_HOME_URL) console.warn('[wam-home] WAM_HOME_LINK=1 needs WAM_HOME_URL; staying on the hub stores')
+/** True when the life space reads and writes WAM Home. */
+const linked = () => household.ready
+/** checklists.snapshot(), with the life half from WAM Home when linked. */
+function checklistsSnapshot(now = Date.now()) {
+  const own = checklists.snapshot(now)
+  if (!linked()) return own
+  const life = household.checklists(now)
+  return {
+    ...own,
+    active: [...own.active.filter(run => run.space !== 'life'), ...life.active],
+    startable: [...own.startable.filter(t => t.space !== 'life'), ...life.startable],
+  }
+}
+/**
+ * Where the phone's timer alerts come from (v0.190.0). Linked, the household's
+ * timers are WAM Home's; the hub keeps announcing them over ntfy unless Mike
+ * chooses WAM Home's own push (WAM_HOME_ALERTS=push). Work lists stay here.
+ */
+function waitSource() {
+  if (!household.ready) return checklists
+  const lifeToo = process.env.WAM_HOME_ALERTS !== 'push'
+  return {
+    dueWaits: now => [
+      ...checklists.dueWaits(now).filter(wait => (checklists.templates.get(wait.checklistId)?.space ?? 'ops') !== 'life'),
+      ...(lifeToo ? household.dueWaits(now) : []),
+    ],
+    markNotified: (runId, itemId) => (household.owns(runId) ? household.markNotified(runId, itemId) : checklists.markNotified(runId, itemId)),
+  }
+}
+
+/** tasks.list(), with life tasks from WAM Home when linked (the catch-all notes task stays). */
+function tasksList(now = Date.now()) {
+  if (!linked()) return tasks.list(now)
+  return [
+    ...tasks.list(now).filter(task => task.space !== 'life' || task.id === CAPTURE_TASK_ID),
+    ...household.taskList(now),
+  ]
+}
+/**
+ * Commit a reviewed Start Day walk to WAM Home (v0.190.0): errands as list
+ * items, tasks matched to an open one or added, routines started from their
+ * reviewed step. Then the hub records the day (commitments) with WAM Home's ids.
+ */
+async function commitDayToWamHome(prepared, space) {
+  const errands = prepared.tasks.filter(item => item.errand)
+  const lists = household.lists().map(list => list.name)
+  for (const errand of errands) {
+    const ops = parseListSpeech(errand.source || errand.label, household.listItems(), lists).filter(op => op.type === 'add' && !op.raw)
+    if (!ops.length) ops.push({ name: errand.label })
+    for (const op of ops) {
+      const out = await household.addItem({ name: op.name, qty: op.qty, unit: op.unit, list: op.list, urgent: op.urgent })
+      if (!out.ok) return { ok: false, error: out.message || out.error || 'WAM Home did not take an errand; review is still available' }
+    }
+  }
+  const taskItems = prepared.tasks.filter(item => !item.errand)
+  const open = tasksList().filter(task => task.space === space)
+  const created = []
+  for (const [index, item] of taskItems.entries()) {
+    const existing = matchOpenTask(item.label, open)
+    if (existing) {
+      if (item.note?.trim()) tasks.addNote(existing.id, item.note, 'start-day', `${prepared.draftId}:day-note:${item.id || index}`)
+      created.push(existing)
+      continue
+    }
+    const added = addTaskAnywhere({
+      label: item.label, space, window: 'anytime', weight: 'big', needsPlan: soundsLikePlan(item.label),
+      firstNote: item.note || item.label, by: 'start-day', clientId: `${prepared.draftId}:day-task:${item.id || index}`,
+    })
+    if (!added.ok) return { ok: false, error: added.error || 'could not save a task; review is still available' }
+    created.push(added.task)
+  }
+  const startedElsewhere = []
+  for (const item of prepared.items.filter(row => row.kind === 'checklist')) {
+    const out = await household.startRoutine(item.checklistId, item.startIndex ?? 0)
+    if (!out.ok) return { ok: false, error: out.message || out.error || `could not start ${item.label}` }
+    startedElsewhere.push({ checklistId: item.checklistId, runId: out.runId })
+  }
+  const taskIdsByItem = new Map(taskItems.map((item, index) => [item.id, created[index]?.id]))
+  const sourceLinks = prepared.items.map(item => ({ itemId: item.id, sessionIds: item.sourceSessionIds || [], taskId: taskIdsByItem.get(item.id) || null }))
+  const result = checklists.commitDayDraft(space, Date.now(), created.map(task => task.id), sourceLinks, { startedElsewhere })
+  if (result.ok) {
+    result.createdTasks = created
+    try { result.reviewLinks = spokenWork.linkStartDayCommit(prepared.draftId, sourceLinks) }
+    catch (error) { result.reviewLinkError = String(error.message || error); console.warn(`[spoken-work] Start Day link pending reconciliation: ${error.message}`) }
+  }
+  return result
+}
+
+/** The life plan from WAM Home: the same running order as the app, the hub's day and brief on top. */
+function linkedPlan(space, now = Date.now()) {
+  const rawDay = checklists.dayStatus(space, now)
+  const rows = household.taskRows(now)
+  const capture = taskRows(space).filter(task => task.taskId === CAPTURE_TASK_ID)
+  // As in the app, every open task is on Today; Start Day commitments are a
+  // hub overlay to settle with Mike (docs/UNIFY-PERSONAL-WAM.md).
+  const day = rawDay ? { ...rawDay, taskIds: rows.map(task => task.taskId) } : null
+  const agendaRows = household.agenda(now)
+  const busyMs = agendaRows.reduce((max, row) => Math.max(max, row.cumulativeBusyMs ?? 0), 0)
+  return {
+    minutes: 720,
+    budgetMs: 720 * 60_000,
+    timeline: [],
+    busyMs,
+    idleMs: 0,
+    progress: [],
+    reach: [],
+    day,
+    morningBrief: morningBrief.snapshot({ space, dayStatus: day }),
+    tasks: [...rows, ...capture],
+    followups: followups.visible(checklists.dayKey(), space),
+    agenda: agendaRows,
+  }
+}
 
 const jobs = new Jobs({
   storePath: join(DATA_DIR, 'jobs.json'),
@@ -618,6 +820,7 @@ function withDoneInline(rows, done) {
 }
 
 function buildPlan(minutes, requestedIds, space) {
+  if (space === 'life' && linked()) return linkedPlan(space)
   const rawDay = space ? checklists.dayStatus(space) : null
   const openTaskIds = space
     ? new Set(taskRows(space).map(task => task.taskId))
@@ -995,14 +1198,14 @@ function queueCoachCue(space, { reason = 'poll', priority = 'normal' } = {}) {
 
 function buildCurrentCue(space, now = Date.now()) {
   const safeSpace = cueSpace(space)
-  const checklistsState = checklists.snapshot(now)
+  const checklistsState = checklistsSnapshot(now)
   const { snapshot: coachSnapshot, modelCue } = coachSnapshotWithModel(safeSpace, now)
   return buildCue({
     space: safeSpace,
     snapshot: store.snapshot(now),
     plan: buildPlan(720, [], safeSpace),
     checklistsState,
-    inboxGroups: inbox.grouped(),
+    inboxGroups: linked() ? household.groupedList() : inbox.grouped(),
     dueWaits: checklists.dueWaits(now),
     jobsSummary: jobs.summary(now),
     coach: coachSnapshot,
@@ -1064,7 +1267,7 @@ function findTaskForText(text, space = null) {
 
   let best = null
   let bestScore = 0
-  for (const task of tasks.taskDefs()) {
+  for (const task of tasksForWork.taskDefs()) {
     if (space && (task.space ?? 'life') !== space) continue
     let score = 0
     for (const alias of taskAliases(task)) {
@@ -1170,7 +1373,7 @@ function routeCoachSession(session, at = Date.now(), fullText = '') {
   // fixed-duration STT chunk is not an utterance and must never create state.
   const taskText = parseTaskCommand(rawText)
   if (taskText) {
-    const result = tasks.addTask({
+    const result = addTaskAnywhere({
       label: taskText,
       space,
       window: 'anytime',
@@ -1691,7 +1894,7 @@ const server = http.createServer(async (req, res) => {
       }
       result = spokenWork.applyAmendment(id, { revision, commandId })
     } else if (spokenMutation[2] === 'destination-sync') {
-      result = body.kind === 'task' ? updateSpokenTask({ store: spokenWork, tasks, itemId: id, revision, commandId })
+      result = body.kind === 'task' ? updateSpokenTask({ store: spokenWork, tasks: tasksForWork, itemId: id, revision, commandId })
         : ['project', 'idea', 'memory'].includes(body.kind)
           ? spokenWork.updateResource(id, body.kind, { revision, commandId })
           : { ok: false, code: 400, error: 'invalid destination kind' }
@@ -1719,9 +1922,9 @@ const server = http.createServer(async (req, res) => {
         result = sourceReady.ok ? spokenWork.merge(id, sourceId, { revision, sourceRevision, commandId }) : sourceReady
       }
     } else if (body.action === 'task') {
-      result = promoteSpokenTask({ store: spokenWork, tasks, checklists, itemId: id, revision, commandId, candidateId: body.candidateId || null })
+      result = promoteSpokenTask({ store: spokenWork, tasks: tasksForWork, checklists, itemId: id, revision, commandId, candidateId: body.candidateId || null })
     } else if (body.action === 'link-task') {
-      result = linkExistingSpokenTask({ store: spokenWork, tasks, itemId: id, taskId: String(body.taskId || ''), revision, commandId })
+      result = linkExistingSpokenTask({ store: spokenWork, tasks: tasksForWork, itemId: id, taskId: String(body.taskId || ''), revision, commandId })
     } else if (['project', 'idea', 'memory'].includes(body.action)) {
       result = promoteSpokenResource({ store: spokenWork, recordings, itemId: id, kind: body.action, revision, commandId,
         title: String(body.title || '').trim() || null })
@@ -2114,7 +2317,9 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { ok: true, members: householdMembers(), fallback: 'Household' })
   }
   if (req.method === 'GET' && url.pathname === '/list') {
-    const items = inbox.active(300).map(item => ({ ...item, by: null, label: Inbox.label(item) }))
+    const items = linked()
+      ? household.listItems().map(item => ({ ...item, label: Inbox.label(item) }))
+      : inbox.active(300).map(item => ({ ...item, by: null, label: Inbox.label(item) }))
     return json(res, 200, { ok: true, items, today: listToday() })
   }
   if (req.method === 'POST' && url.pathname.startsWith('/list/')) {
@@ -2123,6 +2328,54 @@ const server = http.createServer(async (req, res) => {
     try { body = JSON.parse((await readBody(req, 4 * 1024 * 1024)) || '{}') } catch (err) { return json(res, 400, { error: `bad body: ${err.message}` }) }
     const by = String(body.by || 'Household').slice(0, 24)
     const listing = () => inbox.active(300).map(item => ({ ...item, by: null, label: Inbox.label(item) }))
+
+    // Linked (v0.190.0): the kiosk's and the glasses' list is Mike's WAM Home
+    // list. What is said goes to WAM Home's own capture, so the iPad, the
+    // phone app and the glasses route words by one set of rules, and Undo
+    // takes back the household's last change.
+    if (linked()) {
+      const linkedListing = () => household.listItems().map(item => ({ ...item, label: Inbox.label(item) }))
+      const answer = (out, extra = {}) => out.ok
+        ? json(res, 200, { ok: true, say: out.say ?? '', changeId: out.skipped ? null : 'wam-home', items: linkedListing(), today: listToday(), ...extra })
+        : json(res, out.status && out.status < 500 ? 400 : 503, { ok: false, error: out.message || out.error, say: out.message || 'WAM Home did not take that.' })
+      if (url.pathname === '/list/voice') {
+        if (body.clientId && listReplies.has(body.clientId)) return json(res, 200, listReplies.get(body.clientId))
+        let heard = String(body.text || '').trim()
+        if (!heard && body.pcmBase64) {
+          let pcm
+          try { pcm = Buffer.from(String(body.pcmBase64).replace(/^data:.*?;base64,/, ''), 'base64') } catch { return json(res, 400, { error: 'bad audio' }) }
+          if (pcm.length >= 1600) {
+            const out = await transcribeClip(pcm, { sampleRate: body.sampleRate, channels: body.channels, clientId: body.clientId })
+            if (!out.ok) return json(res, 503, { ok: false, error: String(out.error || 'transcription failed') })
+            heard = String(out.text || '').trim()
+          }
+        }
+        if (!heard) return json(res, 200, { ok: true, heard: '', applied: [], say: 'I did not hear anything.', items: linkedListing() })
+        const out = await household.capture(heard, body.pcmBase64 ? 'kiosk-voice' : 'kiosk-text')
+        if (!out.ok) return answer(out)
+        const reply = { ok: true, heard, say: out.say, changeId: 'wam-home', applied: [{ type: 'capture' }], items: linkedListing(), today: listToday() }
+        if (body.clientId) {
+          listReplies.set(body.clientId, reply)
+          if (listReplies.size > 200) listReplies.delete(listReplies.keys().next().value)
+        }
+        return json(res, 200, reply)
+      }
+      if (url.pathname === '/list/undo') return answer(await household.undo())
+      if (url.pathname === '/list/clear') {
+        if (body.confirm !== true) return json(res, 400, { ok: false, error: 'clear needs confirm: true' })
+        return answer(await household.clearList())
+      }
+      const one = url.pathname.match(/^\/list\/([^/]+)\/(done|undone|urgent|remove)$/)
+      if (one && household.ownsItem(decodeURIComponent(one[1]))) {
+        const id = decodeURIComponent(one[1])
+        const out = one[2] === 'done' ? await household.itemDone(id, true)
+          : one[2] === 'undone' ? await household.itemDone(id, false)
+            : one[2] === 'urgent' ? await household.itemUrgent(id, body.urgent !== false)
+              : await household.itemRemove(id)
+        return answer(out)
+      }
+      return json(res, 409, { ok: false, error: 'not available while linked to WAM Home yet', say: 'Do that in the WAM Home app for now.' })
+    }
 
     if (url.pathname === '/list/voice') {
       // A retried utterance returns the first answer instead of applying twice.
@@ -2142,7 +2395,9 @@ const server = http.createServer(async (req, res) => {
       // Routed like the Start Day walk (householdRouter.js): carrots go on the
       // list, "vacuum" starts the Vacuum routine with its steps and timers,
       // "call the vet" is a task on today's Home.
-      const routed = routeHouseholdSpeech(heard, { routines: checklists.routineTemplates('life'), items: inbox.active(300) })
+      const routed = routeHouseholdSpeech(heard, {
+        routines: checklists.routineTemplates('life'), items: inbox.active(300), lists: householdLists(),
+      })
       const now = Date.now()
       const changeId = `chg-${crypto.randomUUID()}`
       const says = []
@@ -2305,8 +2560,8 @@ const server = http.createServer(async (req, res) => {
     // said.
     const label = parseTaskCommand(text)
     if (label) {
-      const created = tasks.addTask({ label, space: body.space === 'ops' ? 'ops' : 'life', clientId: body.clientId })
-      if (created.ok) return json(res, 200, { ok: true, text, task: created.task, tasks: tasks.list() })
+      const created = addTaskAnywhere({ label, space: body.space === 'ops' ? 'ops' : 'life', clientId: body.clientId })
+      if (created.ok) return json(res, 200, { ok: true, text, task: created.task, tasks: tasksList() })
     }
 
     const result = inbox.add(text, { by: body.by, clientId: body.clientId })
@@ -2327,8 +2582,8 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       return json(res, 400, { error: `bad body: ${err.message}` })
     }
-    const result = tasks.addTask(body)
-    return json(res, result.ok ? 200 : 400, { ...result, tasks: tasks.list() })
+    const result = addTaskAnywhere(body)
+    return json(res, result.ok ? 200 : 400, { ...result, tasks: tasksList() })
   }
 
   const completionDateMatch = url.pathname.match(/^\/task\/([^/]+)\/completion-date$/)
@@ -2370,7 +2625,7 @@ const server = http.createServer(async (req, res) => {
     const fromTask = url.pathname.match(/^\/task\/([^/]+)\/followup$/)
     if (fromTask) {
       const taskId = decodeURIComponent(fromTask[1])
-      const task = tasks.taskDefs().find(row => row.id === taskId)
+      const task = tasksForWork.taskDefs().find(row => row.id === taskId)
       if (!task) return json(res, 404, { error: 'unknown task' })
       const added = followups.add({
         label: body.label || `Follow up: ${task.label}`,
@@ -2380,8 +2635,10 @@ const server = http.createServer(async (req, res) => {
         clientId: body.clientId,
       })
       if (!added.ok) return json(res, 400, added)
-      const done = tasks.complete(taskId, true)
-      if (done.ok) closeLinkedListItem(taskId)
+      const done = household.ready && household.ownsTask(taskId)
+        ? await household.taskDone(taskId, true)
+        : tasks.complete(taskId, true)
+      if (done.ok && !household.ready) closeLinkedListItem(taskId)
       return json(res, 200, { ...added, taskDone: done.ok, tasks: tasks.list(), items: listing() })
     }
 
@@ -2417,6 +2674,13 @@ const server = http.createServer(async (req, res) => {
       return json(res, result.ok ? 200 : 400, { ...result, tasks: tasks.list() })
     }
 
+    // A life task in WAM Home when linked (v0.190.0): its own command, which
+    // also ticks a linked grocery the way WAM Home always does.
+    if (linked() && household.ownsTask(id)) {
+      const out = await household.taskDone(id, action === 'done')
+      if (!out.ok) return json(res, out.status && out.status < 500 ? 400 : 503, { ok: false, error: out.message || out.error })
+      return json(res, 200, { ok: true, tasks: tasksList() })
+    }
     const result = tasks.complete(id, action === 'done')
     if (result.ok && action === 'done') closeLinkedListItem(id)
     return json(res, result.ok ? 200 : 404, { ...result, tasks: tasks.list() })
@@ -2460,10 +2724,18 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/tasks') {
     if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
-    if (url.searchParams.get('includeDone') !== '1') return json(res, 200, { tasks: tasks.list() })
+    if (url.searchParams.get('includeDone') !== '1') return json(res, 200, { tasks: tasksList() })
     const spokenItems = spokenWork.all()
-    return json(res, 200, { tasks: tasks.list(),
-      completedTasks: tasks.completed().map(task => ({ ...task, voiceEvidence: [
+    // Linked, done life tasks are WAM Home's; their notes are still here.
+    const completed = household.ready
+      ? [...tasks.completed().filter(task => task.space !== 'life'),
+        ...household.allTasks().filter(task => task.done && !task.archivedAt).map(task => ({
+          id: task.hubId, label: task.label, space: 'life', doneAt: task.doneAt ?? null,
+          completedOn: tasks.done.get(task.hubId)?.completedOn ?? null, notes: tasks.notes(task.hubId),
+        }))].sort((a, b) => (b.doneAt ?? 0) - (a.doneAt ?? 0))
+      : tasks.completed()
+    return json(res, 200, { tasks: tasksList(),
+      completedTasks: completed.map(task => ({ ...task, voiceEvidence: [
         ...task.notes.filter(note => String(note.by).startsWith('listen')).map(note => ({ id: note.id, text: note.text, by: note.by })),
         ...linkedCompletionEvidence(spokenItems, task.id),
       ] })),
@@ -2587,10 +2859,10 @@ const server = http.createServer(async (req, res) => {
     const space = cueSpace(body.space)
     const firstLine = String(found.note.text || '').split('\n').map(line => line.trim()).find(Boolean) || 'Captured task'
     const label = firstLine.slice(0, 80)
-    const existing = matchOpenTask(label, tasks.list(at).filter(task => task.space === space))
+    const existing = matchOpenTask(label, tasksList(at).filter(task => task.space === space))
     const created = existing
       ? { ok: true, task: existing, existing: true }
-      : tasks.addTask({
+      : addTaskAnywhere({
           label,
           space,
           window: 'anytime',
@@ -2609,8 +2881,8 @@ const server = http.createServer(async (req, res) => {
       ok: true,
       task: created.task,
       day: checklists.dayStatus(space),
-      tasks: tasks.list(at),
-      checklists: checklists.snapshot(at),
+      tasks: tasksList(at),
+      checklists: checklistsSnapshot(at),
     })
   }
 
@@ -2804,6 +3076,12 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ---- read: the glasses poll this -------------------------------------
+  // The WAM Home link's health (v0.190.0): off, or linked/online/revision.
+  if (req.method === 'GET' && url.pathname === '/wam-home/status') {
+    if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
+    return json(res, 200, household.enabled ? household.status() : { enabled: false })
+  }
+
   if (req.method === 'GET' && url.pathname === '/state') {
     if (!authorized(req, READ_TOKEN)) return json(res, 401, { error: 'unauthorized' })
 
@@ -2816,12 +3094,12 @@ const server = http.createServer(async (req, res) => {
     }
     return json(res, 200, {
       ...snapshot,
-      checklists: checklists.snapshot(),
+      checklists: checklistsSnapshot(),
       // Duration stats ride along so the "what fits in the time I have"
       // screen is instant rather than a second round trip.
       stats: checklists.allStats(),
-      inbox: inbox.grouped(),
-      tasks: tasks.list(),
+      inbox: linked() ? household.groupedList() : inbox.grouped(),
+      tasks: tasksList(),
       stt: { ...sttStats, pending: pendingTranscriptions(), ...transcriberInfo() },
       assistant: {
         chatgpt: assistant.providerReady.chatgpt,
@@ -2916,6 +3194,25 @@ const server = http.createServer(async (req, res) => {
       return json(res, 400, { error: `bad body: ${err.message}` })
     }
 
+    // The life space's runs live in WAM Home when linked (v0.190.0).
+    const wamHomeWrite = linked() && (
+      (['/check', '/step/begin', '/step/reset', '/run/finish'].includes(url.pathname) && household.owns(body.runId)) ||
+      (url.pathname === '/run/start' && household.ownsTemplate(body.checklistId)) ||
+      url.pathname === '/timers/reset')
+    if (wamHomeWrite) {
+      const out = url.pathname === '/check' ? await household.check(body.runId, body.itemId, body.done !== false)
+        : url.pathname === '/step/begin' ? await household.begin(body.runId, body.itemId)
+          : url.pathname === '/step/reset' ? await household.reset(body.runId, body.itemId)
+            : url.pathname === '/run/start' ? await household.startRoutine(body.checklistId)
+              : url.pathname === '/run/finish' ? await household.stopRun(body.runId)
+                : await household.timersReset()
+      // The work lists' clocks are still the hub's own.
+      if (url.pathname === '/timers/reset') checklists.resetActiveTimers(Date.now(), body.by || 'glasses')
+      if (!out.ok) return json(res, out.status && out.status < 500 ? 400 : 503, { ok: false, error: out.message || out.error })
+      if (url.pathname === '/check') announceGame()
+      return json(res, 200, { ok: true, checklists: checklistsSnapshot() })
+    }
+
     let result
     if (url.pathname === '/check') {
       result = checklists.check(body.runId, body.itemId, body.done !== false, Date.now(), body.by || 'glasses')
@@ -2941,7 +3238,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/check') announceGame()
     // Return the fresh checklist state so the glasses can repaint from the
     // server's view rather than guessing at what its own write did.
-    return json(res, 200, { ok: true, checklists: checklists.snapshot() })
+    return json(res, 200, { ok: true, checklists: checklistsSnapshot() })
   }
 
   // ---- Start Day: skip for now ------------------------------------------
@@ -2953,7 +3250,7 @@ const server = http.createServer(async (req, res) => {
     let result
 
     if (body.action === 'stage') {
-      result = checklists.draftDay(String(body.transcript || ''), space, String(body.sessionId || crypto.randomUUID()), Date.now(), tasks.list().filter(task => task.space === space).map(task => task.label))
+      result = checklists.draftDay(String(body.transcript || ''), space, String(body.sessionId || crypto.randomUUID()), Date.now(), tasksList().filter(task => task.space === space).map(task => task.label))
       if (result.ok && body.sessionId && spokenWork.bySource(`coach:${body.sessionId}`)) {
         spokenWork.ingest({ sourceKey: `coach:${body.sessionId}`, destinationRefs: [{ kind: 'start_day', id: result.draft.id,
           itemIds: result.sourceItemIds || [], createdAt: Date.now(), syncRevision: 1 }] })
@@ -2972,14 +3269,19 @@ const server = http.createServer(async (req, res) => {
     } else if (body.action === 'commit') {
       const prepared = checklists.prepareDayDraft(space)
       result = prepared
-      if (prepared.ok) {
+      if (prepared.ok && space === 'life' && household.ready) {
+        // Linked (v0.190.0): the reviewed walk goes to WAM Home item by item,
+        // as exact commands, so Review Day and "from <step>" survive. Start
+        // Day's own record (what was committed today) stays here.
+        result = await commitDayToWamHome(prepared, space)
+      } else if (prepared.ok) {
         // Errands go onto the household list, not Home (Mike, 2026-10-18);
         // saying "urgent" with one still makes it a Home task via the list.
         const errands = prepared.tasks.filter(item => item.errand)
         if (errands.length) {
           prepared.tasks = prepared.tasks.filter(item => !item.errand)
           for (const errand of errands) {
-            applyListSpeech(parseListSpeech(errand.source || errand.label, inbox.active(300)), { ...listDeps(), by: 'Start Day', via: 'start-day' })
+            applyListSpeech(parseListSpeech(errand.source || errand.label, inbox.active(300), householdLists()), { ...listDeps(), by: 'Start Day', via: 'start-day' })
           }
         }
         const open = tasks.list().filter(task => task.space === space)
@@ -3023,7 +3325,7 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, {
       ...result,
       day: checklists.dayStatus(space),
-      checklists: checklists.snapshot(),
+      checklists: checklistsSnapshot(),
     })
   }
 
@@ -3034,7 +3336,7 @@ const server = http.createServer(async (req, res) => {
     const space = body.space === 'ops' ? 'ops' : 'life'
     const result = checklists.skipDay(space)
     if (!result.ok) return json(res, 400, result)
-    return json(res, 200, { ok: true, day: result, checklists: checklists.snapshot() })
+    return json(res, 200, { ok: true, day: result, checklists: checklistsSnapshot() })
   }
 
   // ---- block plan -------------------------------------------------------
@@ -3103,7 +3405,7 @@ setInterval(() => {
  * fine granularity for a wash cycle and costs nothing.
  */
 setInterval(() => {
-  sweepWaits(checklists, notifier).catch(err => console.warn(`[notify] sweep: ${err.message}`))
+  sweepWaits(waitSource(), notifier).catch(err => console.warn(`[notify] sweep: ${err.message}`))
 }, 30_000)
 
 if (AI_CUE_NOTIFY) {

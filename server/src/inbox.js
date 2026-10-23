@@ -199,10 +199,12 @@ export class Inbox {
   }
 
   /** The live item this name refers to (same item, same unit), if any. */
-  findLive(name, unit = null) {
+  findLive(name, unit = null, list = null) {
     const key = itemKey(name)
     return [...this.items.values()].find(i =>
-      i.status !== STATUS.DONE && !i.removedAt && itemKey(i.name || i.text) === key && (i.unit ?? null) === (unit ?? null)) ?? null
+      i.status !== STATUS.DONE && !i.removedAt && itemKey(i.name || i.text) === key
+      && (i.unit ?? null) === (unit ?? null)
+      && (list === null || listLabelKey(i.list || 'Groceries') === listLabelKey(list))) ?? null
   }
 
   /**
@@ -216,7 +218,7 @@ export class Inbox {
       const existing = [...this.items.values()].find(i => i.clientId === clientId)
       if (existing) return { ok: true, item: existing, duplicate: true }
     }
-    const same = raw ? null : this.findLive(text, unit)
+    const same = raw ? null : this.findLive(text, unit, list)
     if (same) {
       if (changeId) this.#remember(changeId, same.id)
       same.qty = (same.qty || 1) + (qty || 1)

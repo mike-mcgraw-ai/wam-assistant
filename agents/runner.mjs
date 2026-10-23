@@ -37,7 +37,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const HUB = (process.env.HUB_URL || 'http://localhost:8787').replace(/\/+$/, '')
 const TOKEN = process.env.AGENT_TOKEN || ''
 const CMD = process.env.AGENT_CMD || 'claude -p'
-const CHATGPT_CMD = process.env.CHATGPT_CMD || `codex exec --ephemeral --sandbox workspace-write -C ${ROOT} -`
+const CHATGPT_CMD = process.env.CHATGPT_CMD || `codex exec --ephemeral --model gpt-5.6-luna -c model_reasoning_effort=\"low\" --sandbox workspace-write -C ${ROOT} -`
 const CLAUDE_CMD = process.env.CLAUDE_CMD || 'claude -p'
 const POLL_SECONDS = Number(process.env.POLL_SECONDS) || 900
 
@@ -370,7 +370,9 @@ const handlers = {
   async 'spoken.extract'(job) {
     const input = job.input ?? {}
     if (!String(input.rawText || '').trim()) throw new Error('spoken extraction has no transcript')
-    const reply = await think(SPOKEN_EXTRACT_PROMPT + JSON.stringify(input, null, 2), 90_000)
+    // Durable notes cannot depend on the live-cue provider having spend left.
+    // The ChatGPT worker is already authenticated and isolated per request.
+    const reply = await think(SPOKEN_EXTRACT_PROMPT + JSON.stringify(input, null, 2), 90_000, CHATGPT_CMD)
     const parsed = extractJson(reply)
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('expected a proposal object')
     return parsed

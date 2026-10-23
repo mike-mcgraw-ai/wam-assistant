@@ -1,8 +1,8 @@
-# Grocery labels that learn once
+# Time that tells the whole story
 
-- Public version: `v0.42.0`
-- Face build: `0.184.0`
-- Originally completed: `2026-10-18`
-- Sanitized and published: `2026-10-18`
+- Public version: `v0.43.0`
+- Face build: `0.191.0`
+- Originally completed: `2026-10-23`
+- Sanitized and published: `2026-10-23`
 
-Item-first list labels preserve exact product names. New names get one AI suggestion; corrections become deterministic rules for future matches.
+Active routines keep the expected duration beside the live clock, completed work earns on the day it happened, and captured-note processing is supervised as a durable service.

@@ -1,4 +1,4 @@
-// Synced from WAM Home 039b4fb (core/src/intent.js). Edit it there, not here; then run tools/sync-wam-home.mjs.
+// Synced from WAM Home fb5affa (core/src/intent.js). Edit it there, not here; then run tools/sync-wam-home.mjs.
 /**
  * Start Day intent — which routines a spoken sentence names, and what is left
  * over as tasks, errands or fragments. Fixed rules, no model.

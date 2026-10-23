@@ -105,8 +105,16 @@ export class Tasks {
   }
 
   #taskById(id) {
-    return this.taskDefs().find(t => t.id === id)
+    return this.taskDefs().find(t => t.id === id) ?? this.external?.(id) ?? undefined
   }
+
+  /**
+   * Tasks kept outside this store (v0.190.0): with the hub linked to Mike's
+   * WAM Home household, a life task lives there. Set to a lookup returning
+   * { id, label, space, external: true } so notes can still hang off it here.
+   * Null (the default) changes nothing.
+   */
+  external = null
 
   has(id) {
     return Boolean(this.#taskById(id))
@@ -346,9 +354,13 @@ export class Tasks {
   }
 
   complete(id, done = true, now = Date.now()) {
-    if (!this.#taskById(id)) {
+    const task = this.#taskById(id)
+    if (!task) {
       return { ok: false, error: `unknown task "${id}"` }
     }
+    // Done or not is WAM Home's to say for its tasks; marking it only here
+    // would make the two disagree.
+    if (task.external) return { ok: false, error: `task "${id}" lives in WAM Home` }
     if (done === this.done.has(id)) return { ok: true, unchanged: true }
     if (done) this.done.set(id, { doneAt: now })
     else this.done.delete(id)

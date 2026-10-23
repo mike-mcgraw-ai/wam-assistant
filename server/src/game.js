@@ -102,12 +102,17 @@ export function computeGame({
     const checked = Object.keys(run.checked || {}).filter(id => !itemIds || itemIds.includes(id))
     if (tpl?.kind === 'daily') runIndex.set(`${run.checklistId}:${run.day}`, run)
 
-    const b = bucket(run.day)
     for (const itemId of checked) {
+      const checkedAt = Number(run.checked?.[itemId]?.at)
+      const earnedDay = Number.isFinite(checkedAt) && checkedAt > 0 ? dayKeyOf(checkedAt) : run.day
+      const b = bucket(earnedDay)
       b.earned += rule.stepXP
       b.entries.push({ kind: 'step', checklistId: run.checklistId, itemId, xp: rule.stepXP })
     }
     if (itemIds?.length && itemIds.every(id => run.checked?.[id])) {
+      const completedAt = Math.max(...itemIds.map(id => Number(run.checked?.[id]?.at) || 0))
+      const completedDay = completedAt > 0 ? dayKeyOf(completedAt) : run.day
+      const b = bucket(completedDay)
       b.earned += rule.completeBonus
       b.entries.push({ kind: 'complete', checklistId: run.checklistId, xp: rule.completeBonus })
     }

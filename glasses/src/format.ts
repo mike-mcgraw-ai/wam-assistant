@@ -229,11 +229,10 @@ export function checklistItemRow(item: ChecklistItem, selected: boolean): string
         : '[ ]'
 
   const liveClock = activeItemClock(item)
-  let right = ''
-  if (item.done) right = clockShort(item.at)
-  else if (liveClock) right = liveClock
-  else if (item.stepKind === 'wait' && item.waitMinutes) right = `~${item.waitMinutes}m`
-  else if (item.estimateMinutes) right = `~${item.estimateMinutes}m`
+  let expected = ''
+  if (item.done) expected = clockShort(item.at)
+  else if (item.stepKind === 'wait' && item.waitMinutes) expected = `~${item.waitMinutes}m`
+  else if (item.estimateMinutes) expected = `~${item.estimateMinutes}m`
 
   // Pixel layout, not a 24-character cap. The cap chopped "Move to dryer" to
   // "Move to drye" with a third of the display still empty — a limit invented
@@ -242,7 +241,8 @@ export function checklistItemRow(item: ChecklistItem, selected: boolean): string
     layout([
       { text: `${cursor}${box}`, at: 0 },
       { text: item.label, at: COL.label - 130 },
-      { text: right, end: liveClock ? COL.timer : COL.right },
+      { text: expected, end: COL.right },
+      ...(liveClock ? [{ text: liveClock, end: COL.timer }] : []),
     ]),
     COL.edge,
   )

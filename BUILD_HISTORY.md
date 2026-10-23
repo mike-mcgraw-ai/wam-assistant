@@ -1,6 +1,6 @@
 # Device Build History
 
-WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 42 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
+WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 43 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
 
 | Face build | Attribution / status | Change |
 |---|---|---|
@@ -179,3 +179,10 @@ WAM used rapid numbered device builds for hardware testing. These entries are do
 | v0.182.0 | Codex (full grocery names on every screen) | Restore the exact product names on the household grocery list and omit attribution across the kiosk, phone, Pad, and glasses list views so names get the available width. |
 | v0.183.0 | Claude (chat wording shared with the iPad; hub only) | The chat screen's words move into one module that the glasses and the iPad's new Chat tab both use. |
 | v0.184.0 | Codex (automatic grocery glance labels) | Keep exact product names while showing concise, correctable labels on every list surface. New products get an AI suggestion once, then reuse the saved classification. |
+| v0.185.0 | Claude (WAM Home v0.25.0 synced — speech with no commas splits at actions and chores) |  |
+| v0.186.0 | Codex (WAM Home v0.27.0 lists and learned names sync) |  |
+| v0.187.0 | Claude (WAM Home v0.30.0 synced — the running-list rules file) |  |
+| v0.188.0 | Claude (WAM Home v0.31.0 synced — step clocks, learned times, starter routines) |  |
+| v0.189.0 | Claude (WAM Home v0.40.0 synced — a step started out of turn leads its routine) |  |
+| v0.190.0 | Claude (one system: the hub on Mike's WAM Home household; switched 2026-10-23) | Personal WAM's life space now reads and writes the wearer's WAM Home household: one system with the app. |
+| v0.191.0 | Codex (recent Solo Notes fixes) |  |
