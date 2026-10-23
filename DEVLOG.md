@@ -49,3 +49,4 @@ These are the real completion dates of private device builds. The sanitized port
 | v0.43.0 | 2026-10-23 | 0.191.0 | **Time that tells the whole story:** Active routines keep the expected duration beside the live clock, completed work earns on the day it happened, and captured-note processing is supervised as a durable service. |
 | v0.44.0 | 2026-10-23 | 0.192.0 | **Tasks you can check:** Tasks on Home use the same check box as every other row, lined up with the daily items and follow-ups; a click still opens the task first so it is checked off with its notes. |
 | v0.45.0 | 2026-10-23 | 0.193.0 | **Only urgent groceries on the main screens:** Groceries wait under Capture in the Life bar; only items marked urgent reach the glasses' main screens. |
+| v0.46.0 | 2026-10-23 | 0.194.0 | **Close a routine early; Home shows today's picks:** A routine with steps left can be closed from its card, and Home's running order shows only the routines picked for today. |

@@ -1,6 +1,6 @@
 # Device Build History
 
-WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 45 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
+WAM used rapid numbered device builds for hardware testing. These entries are documented engineering iterations, not all public releases; some were diagnostic, folded into a later package, or replaced after testing on the glasses. The 46 tags in [DEVLOG.md](DEVLOG.md) are the runnable portfolio checkpoints.
 
 | Face build | Attribution / status | Change |
 |---|---|---|
@@ -188,3 +188,4 @@ WAM used rapid numbered device builds for hardware testing. These entries are do
 | v0.191.0 | Codex (recent Solo Notes fixes) |  |
 | v0.192.0 | Claude (glasses task rows get check boxes) | Tasks on Home get the same check box as every other row; a click still opens the task first. |
 | v0.193.0 | Claude (only urgent groceries on the glasses' main screens; the game gets a routine item history back) | Groceries wait under Capture in the Life bar, and only urgent ones reach the main screens. |
+| v0.194.0 | Claude (close a routine you don't need to finish; Home shows only today's picks) | Close a routine with steps left, and Home's running order shows only what you picked for today. |

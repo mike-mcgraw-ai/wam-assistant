@@ -58,6 +58,8 @@ import {
 import { loadPlan, loadSnapshot, savePlan, saveSnapshot } from './storage'
 import {
   findRun,
+  closable,
+  checklistRowCount,
   findNoteRow,
   indexRows,
   noteDetailStops,
@@ -1607,8 +1609,8 @@ function rowCount(): number {
       return choreRows(state).length
     case 'checklist': {
       const run = findRun(state, state.view.runId)
-      // +1: the "note on this list" row that follows the last step.
-      return run ? run.items.length + 1 : 0
+      // The steps, then "note on this list", then Close for a routine.
+      return run ? checklistRowCount(run) : 0
     }
     case 'picker':
       return startable(state).length
@@ -2465,6 +2467,31 @@ async function activate(): Promise<void> {
 
   if (view.kind === 'checklist') {
     const run = findRun(state, view.runId)
+    if (run && view.cursor === run.items.length + 1 && closable(run)) {
+      // Close with steps left (v0.194.0): the rest weren't needed. Arm, then
+      // confirm, as every action on this screen is.
+      const gate = confirmGate(`close:${run.runId}`)
+      if (gate !== 'confirmed') {
+        if (gate === 'armed') await paint()
+        return
+      }
+      const closed = await finishChecklist(run.runId)
+      if (!closed.ok) {
+        state.error = closed.error || 'could not close'
+        await paint()
+        return
+      }
+      if (state.snapshot) state.snapshot.checklists = closed.checklists
+      // Back to the running order, which no longer carries it.
+      if (state.space === 'life') await openPlan()
+      else {
+        state.view = homeView()
+        state.scrollTop = 0
+        clampCursor()
+        await paint()
+      }
+      return
+    }
     if (run && view.cursor === run.items.length) {
       await talkAbout({ choreId: run.checklistId, label: run.name })
       return

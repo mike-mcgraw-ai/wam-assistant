@@ -446,7 +446,16 @@ function linkedPlan(space, now = Date.now()) {
   // As in the app, every open task is on Today; Start Day commitments are a
   // hub overlay to settle with Mike (docs/UNIFY-PERSONAL-WAM.md).
   const day = rawDay ? { ...rawDay, taskIds: rows.map(task => task.taskId) } : null
-  const agendaRows = household.agenda(now)
+  // The running order is today's: what Start Day picked, what was started
+  // today (a card in the app, "Start a list", the iPad), and anything picked
+  // on an earlier day and not done yet. A routine left going in the app from
+  // an earlier day stays on the list screens, where it can be closed, not on
+  // Home. Mike, 2026-10-23: "it shows EVERYTHING on the running order from the
+  // cards even though I didnt want Laundry on there".
+  const today = checklists.dayKey(now)
+  const agendaRows = household.agenda(now, run =>
+    checklists.dayKey(run.createdAt ?? now) === today ||
+    checklists.isCommitted(run.id) || (run.hub?.runId && checklists.isCommitted(run.hub.runId)))
   const busyMs = agendaRows.reduce((max, row) => Math.max(max, row.cumulativeBusyMs ?? 0), 0)
   return {
     minutes: 720,

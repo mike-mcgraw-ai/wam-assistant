@@ -1217,6 +1217,21 @@ export function findRun(state: UiState, runId: string): ChecklistRun | undefined
   return state.snapshot?.checklists?.active.find(r => r.runId === runId)
 }
 
+/**
+ * A routine can be closed with steps left: the dishwasher that isn't full
+ * enough to run (v0.194.0). Every-day lists are ticked, never closed.
+ * Mike, 2026-10-23: "Dishes dont really need to be ran - since its not full,
+ * but I did all the other steps so need to close it all off".
+ */
+export function closable(run: ChecklistRun): boolean {
+  return run.kind === 'ondemand'
+}
+
+/** Rows on a list's own screen: its steps, the note row, then Close. */
+export function checklistRowCount(run: ChecklistRun): number {
+  return run.items.length + 1 + (closable(run) ? 1 : 0)
+}
+
 /** What the confirming tap will do to a checklist step (v0.120.0 gate). */
 function armedVerb(item: ChecklistItem): string {
   if (item.suspect) return 'Reset'
@@ -1233,8 +1248,9 @@ function renderChecklist(state: UiState, runId: string, cursor: number): string 
   // One row past the last step: talk about this chore. Same idea as the task
   // screen — capture started from inside a list already knows what it is about,
   // so nothing downstream has to guess which chore the note belongs to.
-  const total = run.items.length + 1
+  const total = checklistRowCount(run)
   const win = windowFollow(cursor, total, roomBelow(['header'], 1), state.scrollTop)
+  const left = run.total - run.done
   const { start, end } = win
   const more = win.more ? `${win.atTop ? '' : '^'}${win.atEnd ? '' : 'v'}` : ''
 
@@ -1245,7 +1261,11 @@ function renderChecklist(state: UiState, runId: string, cursor: number): string 
     ),
   ]
   for (let i = start; i < end; i += 1) {
-    if (i === run.items.length) {
+    if (i === run.items.length + 1) {
+      lines.push(clip(i === cursor && state.armedTaskId === `close:${run.runId}`
+        ? `>[?] Close ${run.name}?`
+        : `${i === cursor ? '>' : ' '}[ ] Close ${run.name}${left ? ` (${left} left)` : ''}`, LINE_CHARS))
+    } else if (i === run.items.length) {
       const live = state.coachSession?.active
       lines.push(clip(`${i === cursor ? '>' : ' '}${live ? '[*] Stop listening' : '[~] Note on this list'}`, LINE_CHARS))
     } else if (i === cursor && state.armedTaskId === `item:${run.runId}:${run.items[i].id}`) {
@@ -1258,6 +1278,13 @@ function renderChecklist(state: UiState, runId: string, cursor: number): string 
   // What a click does, spelled out while this is still new. Deliberately not
   // the double-tap: going back is the one gesture that is already obvious.
   const item = run.items[cursor]
+  if (cursor === run.items.length + 1) {
+    const armedClose = state.armedTaskId === `close:${run.runId}`
+    lines.push(armedClose
+      ? left ? `click again - ${left} left not needed` : 'click again to close'
+      : left ? 'click to close - the rest not needed' : 'click to close it')
+    return assemble(lines, config.maxChars, config.maxLines)
+  }
   if (cursor === run.items.length) {
     lines.push(state.coachSession?.active ? 'recording - click to stop' : 'click arms voice note')
     return assemble(lines, config.maxChars, config.maxLines)
